@@ -1,0 +1,1374 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>CopperOS</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --brand: #d97757;
+        --brand-strong: color-mix(in srgb, var(--brand) 78%, black);
+        --brand-soft: rgba(217, 119, 87, 0.14);
+        --brand-fg: #ffffff;
+        accent-color: var(--brand);
+
+        --bg: #fbfbfd;
+        --surface: #f4f4f8;
+        --surface-2: #eaeaf1;
+        --border: rgba(18, 19, 28, 0.09);
+        --text: #191a22;
+        --text-muted: #64656f;
+        --text-faint: #94959f;
+
+        --ok: #1a9c5c;
+        --ok-soft: rgba(26, 156, 92, 0.12);
+        --err: #d0334c;
+        --err-soft: rgba(208, 51, 76, 0.1);
+        --warn: #b4650b;
+        --warn-soft: rgba(224, 162, 59, 0.14);
+
+        --code-bg: rgba(18, 19, 28, 0.06);
+        --code-bg-on-brand: rgba(255, 255, 255, 0.22);
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #151515;
+          --surface: #20201f;
+          --surface-2: #292825;
+          --border: rgba(230, 222, 215, 0.08);
+          --text: #ece9e6;
+          --text-muted: #a5a19b;
+          --text-faint: #79766f;
+          --brand-soft: rgba(217, 119, 87, 0.18);
+          --ok-soft: rgba(26, 156, 92, 0.18);
+          --err-soft: rgba(208, 51, 76, 0.18);
+          --warn-soft: rgba(224, 162, 59, 0.18);
+          --code-bg: rgba(230, 222, 215, 0.07);
+        }
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        min-width: 280px;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
+        overflow: hidden;
+        background: var(--bg);
+        color: var(--text);
+        font:
+          14px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          sans-serif;
+      }
+
+      /* ── header ─────────────────────────────────────────────────────────── */
+      header {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: none;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .status-indicator {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 12.5px;
+        font-weight: 600;
+        color: var(--text-muted);
+        white-space: nowrap;
+        transition: color 0.2s ease;
+      }
+      #status-indicator:has(#dot.on) #status {
+        color: var(--text);
+      }
+      #status-indicator:has(#dot.busy) #status {
+        color: var(--brand);
+      }
+      #dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        background: var(--err);
+        flex: none;
+        transition:
+          background-color 0.2s ease,
+          box-shadow 0.2s ease;
+      }
+      #dot.on {
+        background: var(--ok);
+        box-shadow: 0 0 6px rgba(26, 156, 92, 0.6);
+      }
+      #dot.busy {
+        background: var(--brand);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      @keyframes pulse {
+        0%,
+        100% {
+          opacity: 1;
+        }
+        50% {
+          opacity: 0.35;
+        }
+      }
+
+      .icon-btn {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        width: 26px;
+        height: 26px;
+        padding: 0;
+        border-radius: 7px;
+        flex: none;
+        border: 1px solid transparent;
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition:
+          background-color 0.15s ease,
+          color 0.15s ease,
+          transform 0.1s ease;
+      }
+      .icon-btn:hover {
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .icon-btn:active {
+        transform: scale(0.9);
+      }
+      .icon-btn.active {
+        background: var(--brand-soft);
+        color: var(--brand);
+      }
+      .icon-btn svg {
+        width: 15px;
+        height: 15px;
+        transition: transform 0.15s ease;
+      }
+
+      /* ── header menu ───────────────────────────────────────────────────── */
+      .header-actions {
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        margin-left: auto;
+      }
+      .menu-wrap {
+        position: relative;
+      }
+      .menu-dropdown {
+        position: absolute;
+        top: calc(100% + 6px);
+        right: 0;
+        min-width: 172px;
+        padding: 6px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        box-shadow:
+          0 10px 30px rgba(0, 0, 0, 0.18),
+          0 2px 8px rgba(0, 0, 0, 0.08);
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        opacity: 0;
+        transform: translateY(-4px) scale(0.96);
+        transform-origin: top right;
+        pointer-events: none;
+        transition:
+          opacity 0.15s ease,
+          transform 0.15s cubic-bezier(0.2, 0.8, 0.3, 1);
+        z-index: 20;
+      }
+      .menu-dropdown.on {
+        opacity: 1;
+        transform: none;
+        pointer-events: auto;
+      }
+      .menu-item {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        width: 100%;
+        text-align: left;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 8px 9px;
+        border-radius: 8px;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        cursor: pointer;
+        transition: background-color 0.15s ease;
+      }
+      .menu-item:hover {
+        background: var(--surface-2);
+      }
+      .menu-item:active {
+        transform: scale(0.98);
+      }
+      .menu-item.active {
+        background: var(--brand-soft);
+        color: var(--brand);
+      }
+      .menu-item svg {
+        width: 15px;
+        height: 15px;
+        flex: none;
+      }
+
+      /* ── main / pages ──────────────────────────────────────────────────── */
+      #main {
+        flex: 1 1 auto;
+        min-height: 0;
+        position: relative;
+        overflow: hidden;
+      }
+      #chat-view {
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      .page {
+        position: absolute;
+        inset: 0;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        transform: translateX(100%);
+        transition: transform 0.28s cubic-bezier(0.22, 0.9, 0.25, 1);
+        overflow: hidden;
+        z-index: 10;
+      }
+      .page.on {
+        transform: translateX(0);
+      }
+      .page-head {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: none;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .page-title {
+        font-size: 13.5px;
+        font-weight: 700;
+        color: var(--text);
+      }
+      #history-list {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 6px 6px 8px;
+      }
+      #history-empty,
+      #history-loading {
+        padding: 14px 12px 16px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--text-faint);
+      }
+      .chat-item {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        width: 100%;
+        text-align: left;
+        font: inherit;
+        padding: 7px 8px;
+        border-radius: 8px;
+        border: none;
+        background: transparent;
+        color: inherit;
+        cursor: pointer;
+        transition: background-color 0.15s ease;
+        animation: riseIn 0.18s ease-out both;
+      }
+      .chat-item:hover {
+        background: var(--surface-2);
+      }
+      .chat-item.active {
+        background: var(--brand-soft);
+        cursor: default;
+      }
+      .chat-title {
+        font-size: 13.5px;
+        font-weight: 600;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      .chat-meta {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 11.5px;
+        color: var(--text-faint);
+      }
+      .chat-meta .badge {
+        padding: 1px 6px;
+        border-radius: 100px;
+        background: var(--brand);
+        color: var(--brand-fg);
+        font-weight: 700;
+        font-size: 10.5px;
+        letter-spacing: 0.2px;
+      }
+
+      /* ── live view ──────────────────────────────────────────────────────── */
+      #live-wrap {
+        display: none;
+        flex: none;
+        padding: 10px 12px 0;
+      }
+      #live-wrap.on {
+        display: block;
+      }
+      #live-frame {
+        position: relative;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        background: #000;
+      }
+      #live {
+        display: block;
+        width: 100%;
+      }
+      #live-badge {
+        position: absolute;
+        top: 6px;
+        left: 6px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 6px;
+        border-radius: 100px;
+        background: rgba(0, 0, 0, 0.55);
+        color: #fff;
+        font-size: 11px;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+      }
+      #live-badge::before {
+        content: "";
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #ff4d5e;
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+
+      /* ── transcript ─────────────────────────────────────────────────────── */
+      #log {
+        flex: 1 1 auto;
+        min-height: 0;
+        padding: 10px 12px;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
+      }
+      #log > * {
+        animation: riseIn 0.22s ease-out both;
+      }
+      @keyframes riseIn {
+        from {
+          opacity: 0;
+          transform: translateY(6px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #log > * {
+          animation: none;
+        }
+      }
+      #empty {
+        text-align: center;
+        padding: 22px 8px 8px;
+        color: var(--text-faint);
+      }
+      #empty svg {
+        width: 26px;
+        height: 26px;
+        margin-bottom: 8px;
+        opacity: 0.6;
+      }
+      #empty p {
+        margin: 0 0 12px;
+        font-size: 13px;
+      }
+      #chips {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        max-width: 100%;
+      }
+      .chip {
+        text-align: left;
+        font: inherit;
+        font-size: 13px;
+        padding: 7px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: var(--text-muted);
+        cursor: pointer;
+        transition:
+          border-color 0.15s ease,
+          color 0.15s ease,
+          transform 0.1s ease;
+      }
+      .chip:hover {
+        border-color: var(--brand);
+        color: var(--text);
+      }
+      .chip:active {
+        transform: scale(0.98);
+      }
+
+      .row {
+        display: flex;
+        gap: 7px;
+        align-items: flex-start;
+      }
+      .row.mine {
+        justify-content: flex-end;
+      }
+      .bubble {
+        max-width: 84%;
+        padding: 7px 10px;
+        border-radius: 11px;
+        font-size: 13.5px;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      .row.mine .bubble {
+        background: var(--brand);
+        color: var(--brand-fg);
+        border-bottom-right-radius: 3px;
+      }
+      .row.theirs .bubble {
+        background: var(--surface-2);
+        border-bottom-left-radius: 3px;
+      }
+      .row.think .bubble {
+        background: transparent;
+        color: var(--text-faint);
+        font-style: italic;
+        padding: 0;
+      }
+
+      /* Structured "say"/"think" content, rendered from a lightweight markdown subset. */
+      .bubble p {
+        margin: 0 0 6px;
+      }
+      .bubble p:last-child {
+        margin-bottom: 0;
+      }
+      .bubble ul,
+      .bubble ol {
+        margin: 0 0 6px;
+        padding-left: 18px;
+      }
+      .bubble ul:last-child,
+      .bubble ol:last-child {
+        margin-bottom: 0;
+      }
+      .bubble li {
+        margin: 2px 0;
+      }
+      .bubble .md-h {
+        font-weight: 700;
+        margin: 2px 0 4px;
+      }
+      .bubble .md-h1 {
+        font-size: 14.5px;
+      }
+      .bubble .md-h2 {
+        font-size: 14px;
+      }
+      .bubble .md-h3,
+      .bubble .md-h4 {
+        font-size: 13.5px;
+      }
+      .bubble code {
+        background: var(--code-bg);
+        padding: 1px 4px;
+        border-radius: 4px;
+        font:
+          12.5px/1.4 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      .bubble pre {
+        background: var(--code-bg);
+        padding: 7px 9px;
+        border-radius: 7px;
+        overflow-x: auto;
+        margin: 0 0 6px;
+        white-space: pre;
+      }
+      .bubble pre:last-child {
+        margin-bottom: 0;
+      }
+      .bubble pre code {
+        background: none;
+        padding: 0;
+      }
+      .row.mine .bubble code,
+      .row.mine .bubble pre {
+        background: var(--code-bg-on-brand);
+      }
+      .bubble a {
+        color: inherit;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      .avatar {
+        width: 20px;
+        height: 20px;
+        border-radius: 6px;
+        flex: none;
+        margin-top: 1px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--surface-2);
+        color: var(--text-muted);
+      }
+      .avatar svg {
+        width: 12px;
+        height: 12px;
+      }
+
+      .step {
+        display: flex;
+        align-items: flex-start;
+        gap: 7px;
+        padding: 4px 2px;
+        color: var(--text-muted);
+        font-size: 13px;
+      }
+      .step .ic {
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
+        flex: none;
+        margin-top: 0.5px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: var(--surface-2);
+        color: var(--text-muted);
+      }
+      .step .ic svg {
+        width: 11px;
+        height: 11px;
+      }
+      .step .label {
+        font-weight: 600;
+        color: var(--text);
+        flex: none;
+      }
+      .step .text {
+        flex: 1;
+        overflow-wrap: anywhere;
+      }
+      .step.err {
+        color: var(--err);
+      }
+      .step.err .ic {
+        background: var(--err-soft);
+        color: var(--err);
+      }
+      .step.warn .ic {
+        background: var(--warn-soft);
+        color: var(--warn);
+      }
+
+      .status-chip {
+        align-self: center;
+        max-width: 92%;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        padding: 3px 10px;
+        border-radius: 100px;
+        font-size: 12px;
+        font-weight: 600;
+        background: var(--surface-2);
+        color: var(--text-muted);
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
+      .status-chip svg {
+        width: 11px;
+        height: 11px;
+      }
+      .status-chip.ok {
+        background: var(--ok-soft);
+        color: var(--ok);
+      }
+      .status-chip.err {
+        background: var(--err-soft);
+        color: var(--err);
+      }
+
+      /* ── approval ───────────────────────────────────────────────────────── */
+      #approval {
+        display: none;
+        flex: none;
+        margin: 0 12px 10px;
+        padding: 10px;
+        border-radius: 10px;
+        border: 1px solid rgba(224, 162, 59, 0.4);
+        background: var(--warn-soft);
+        animation: approvalIn 0.25s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+      }
+      @keyframes approvalIn {
+        from {
+          opacity: 0;
+          transform: translateY(-6px) scale(0.98);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      #approval-head {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        font-size: 12.5px;
+        font-weight: 700;
+        color: var(--warn);
+        margin-bottom: 4px;
+      }
+      #approval-head svg {
+        width: 13px;
+        height: 13px;
+        animation: shieldPulse 1.8s ease-in-out infinite;
+      }
+      @keyframes shieldPulse {
+        0%,
+        100% {
+          transform: scale(1);
+        }
+        50% {
+          transform: scale(1.12);
+        }
+      }
+      #approval-text {
+        font-size: 13.5px;
+        margin-bottom: 8px;
+      }
+
+      /* ── composer ───────────────────────────────────────────────────────── */
+      #composer {
+        flex: none;
+        padding: 10px 12px 12px;
+        border-top: 1px solid var(--border);
+      }
+      #input-wrap {
+        display: flex;
+        align-items: flex-end;
+        gap: 6px;
+        padding: 6px 6px 6px 10px;
+        border-radius: 10px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        max-width: 640px;
+      }
+      #input-wrap:focus-within {
+        border-color: var(--brand);
+        box-shadow: 0 0 0 3px var(--brand-soft);
+      }
+      #task {
+        flex: 1;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        resize: none;
+        max-height: 160px;
+        min-height: 20px;
+        padding: 3px 0;
+        outline: none;
+      }
+      #task::placeholder {
+        color: var(--text-faint);
+      }
+
+      button.btn {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        cursor: pointer;
+        border-radius: 8px;
+        padding: 6px 11px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text);
+        transition:
+          background-color 0.15s ease,
+          transform 0.1s ease;
+      }
+      button.btn svg {
+        width: 13px;
+        height: 13px;
+        flex: none;
+      }
+      button.btn:hover:not(:disabled) {
+        background: var(--surface-2);
+      }
+      button.btn:active:not(:disabled) {
+        transform: scale(0.96);
+      }
+      button.btn:disabled {
+        opacity: 0.4;
+        cursor: default;
+      }
+
+      #send {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+        width: 28px;
+        height: 28px;
+        border-radius: 8px;
+        border: none;
+        cursor: pointer;
+        background: var(--brand);
+        color: var(--brand-fg);
+        transition:
+          background 0.15s ease,
+          transform 0.1s ease;
+      }
+      #send .icon-swap {
+        position: relative;
+        width: 13px;
+        height: 13px;
+      }
+      #send svg {
+        position: absolute;
+        inset: 0;
+        width: 13px;
+        height: 13px;
+        transition:
+          opacity 0.15s ease,
+          transform 0.15s ease;
+      }
+      #send .ic-stop {
+        opacity: 0;
+        transform: scale(0.4) rotate(-45deg);
+      }
+      #send.running .ic-send {
+        opacity: 0;
+        transform: scale(0.4) rotate(45deg);
+      }
+      #send.running .ic-stop {
+        opacity: 1;
+        transform: scale(1) rotate(0);
+        animation: pulse 1.6s ease-in-out infinite;
+      }
+      #send:disabled {
+        background: var(--surface-2);
+        color: var(--text-faint);
+        cursor: default;
+      }
+      #send:hover:not(:disabled) {
+        background: var(--brand-strong);
+      }
+      #send:active:not(:disabled) {
+        transform: scale(0.94);
+      }
+      #hint {
+        margin-top: 6px;
+        font-size: 11.5px;
+        color: var(--text-faint);
+        text-align: center;
+      }
+
+      .icon-btn {
+        position: relative;
+      }
+      .icon-btn.alert::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        right: 2px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--err);
+        box-shadow: 0 0 0 1.5px var(--bg);
+        animation: alertPop 0.25s ease-out both;
+      }
+      @keyframes alertPop {
+        from {
+          transform: scale(0);
+        }
+        to {
+          transform: scale(1);
+        }
+      }
+
+      /* Small per-icon hover gestures — reinforce what each button does. */
+      #settings:hover svg {
+        transform: rotate(40deg);
+      }
+      #history:hover svg {
+        transform: rotate(-15deg);
+      }
+      #new-chat:hover svg {
+        transform: scale(1.12);
+      }
+      #watch:hover svg {
+        transform: scale(1.1);
+      }
+      #cfg-ollama-refresh:hover svg,
+      #cfg-openai-refresh:hover svg {
+        animation: spin 0.5s ease-in-out;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(180deg);
+        }
+      }
+
+      #subheader {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: none;
+        padding: 6px 12px;
+        border-bottom: 1px solid var(--border);
+        background: var(--surface);
+      }
+      #approval-label {
+        font-size: 11.5px;
+        color: var(--text-faint);
+        margin-right: auto;
+      }
+      #approval-mode {
+        font: inherit;
+        font-size: 12px;
+        padding: 3px 6px;
+        border-radius: 6px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text);
+        cursor: pointer;
+      }
+
+      .chat-title-row {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+      }
+      .chat-alert {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--err);
+        flex: none;
+      }
+
+      /* ── settings page ─────────────────────────────────────────────────── */
+      #settings-body {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 12px 12px 14px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .field {
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+      }
+      .field label {
+        font-size: 12px;
+        font-weight: 600;
+        color: var(--text-muted);
+      }
+      .field select,
+      .field input[type="text"],
+      .field input[type="password"] {
+        font: inherit;
+        font-size: 13px;
+        padding: 6px 8px;
+        border-radius: 7px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text);
+        width: 100%;
+      }
+      .field select:focus,
+      .field input:focus {
+        outline: none;
+        border-color: var(--brand);
+        box-shadow: 0 0 0 3px var(--brand-soft);
+      }
+      .field-row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .field-row select {
+        flex: 1;
+      }
+      .field-row .icon-btn {
+        border: 1px solid var(--border);
+      }
+      .key-row {
+        display: flex;
+        gap: 6px;
+        align-items: center;
+      }
+      .key-row input {
+        flex: 1;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      }
+      #settings-status {
+        font-size: 12px;
+        min-height: 14px;
+      }
+      #settings-status.err {
+        color: var(--err);
+      }
+      #settings-status.ok {
+        color: var(--ok);
+      }
+      .provider-block {
+        display: none;
+        flex-direction: column;
+        gap: 12px;
+      }
+      .provider-block.on {
+        display: flex;
+      }
+      #settings-save {
+        align-self: flex-start;
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <div id="status-indicator" class="status-indicator">
+        <span id="dot"></span>
+        <span id="status">connecting…</span>
+      </div>
+
+      <div class="header-actions">
+        <button id="watch" class="icon-btn" title="Live view">
+          <svg
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.4"
+            stroke-linecap="round"
+            stroke-linejoin="round"
+          >
+            <rect x="1.5" y="4.5" width="13" height="9" rx="1.5" />
+            <path d="M5 4.5l1.2-2h3.6l1.2 2" />
+            <circle cx="8" cy="9" r="2.3" />
+          </svg>
+        </button>
+
+        <div class="menu-wrap">
+          <button
+            id="menu-btn"
+            class="icon-btn"
+            title="Menu"
+            aria-haspopup="true"
+            aria-expanded="false"
+          >
+            <svg viewBox="0 0 16 16" fill="currentColor">
+              <circle cx="8" cy="3.4" r="1.35" />
+              <circle cx="8" cy="8" r="1.35" />
+              <circle cx="8" cy="12.6" r="1.35" />
+            </svg>
+          </button>
+          <div id="menu-dropdown" class="menu-dropdown" role="menu">
+            <button
+              id="history"
+              class="menu-item"
+              type="button"
+              role="menuitem"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="8" cy="8.5" r="6" />
+                <path d="M8 5.2V8.5l2.2 1.4" />
+                <path d="M4.8 1.8L3 3.6M11.2 1.8L13 3.6" />
+              </svg>
+              <span>Past chats</span>
+            </button>
+            <button
+              id="new-chat"
+              class="menu-item"
+              type="button"
+              role="menuitem"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M13 3v4h-4" />
+                <path d="M3 13v-4h4" />
+                <path d="M4 6a5 5 0 018-2.5M12 10a5 5 0 01-8 2.5" />
+              </svg>
+              <span>New chat</span>
+            </button>
+            <button
+              id="settings"
+              class="menu-item"
+              type="button"
+              role="menuitem"
+            >
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <circle cx="8" cy="8" r="2.2" />
+                <path
+                  d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7L3.6 3.6"
+                />
+              </svg>
+              <span>Settings</span>
+            </button>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <div id="main">
+      <div id="chat-view">
+        <div id="subheader">
+          <label id="approval-label" for="approval-mode">Approval</label>
+          <select id="approval-mode" title="When this chat asks before acting">
+            <option value="all">All actions</option>
+            <option value="submits">Only submits</option>
+            <option value="none">Never</option>
+          </select>
+        </div>
+
+        <div id="history-page" class="page">
+          <div class="page-head">
+            <button id="history-close" class="icon-btn" title="Back">
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M13 8H3M3 8l4.2-4.2M3 8l4.2 4.2" />
+              </svg>
+            </button>
+            <span class="page-title">Past chats</span>
+          </div>
+          <div id="history-list"></div>
+        </div>
+
+        <div id="settings-page" class="page">
+          <div class="page-head">
+            <button id="settings-close" class="icon-btn" title="Back">
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M13 8H3M3 8l4.2-4.2M3 8l4.2 4.2" />
+              </svg>
+            </button>
+            <span class="page-title">Settings</span>
+          </div>
+          <div id="settings-body">
+            <div class="field">
+              <label for="cfg-provider">Model provider</label>
+              <select id="cfg-provider">
+                <option value="ollama">Ollama (local)</option>
+                <option value="openai">OpenAI</option>
+              </select>
+            </div>
+
+            <div id="block-ollama" class="provider-block">
+              <div class="field">
+                <label for="cfg-ollama-host">Ollama host</label>
+                <input
+                  id="cfg-ollama-host"
+                  type="text"
+                  placeholder="http://127.0.0.1:11434"
+                />
+              </div>
+              <div class="field">
+                <label for="cfg-ollama-model">Model</label>
+                <div class="field-row">
+                  <select id="cfg-ollama-model"></select>
+                  <button
+                    id="cfg-ollama-refresh"
+                    class="icon-btn"
+                    type="button"
+                    title="Refresh model list"
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.4"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path
+                        d="M13.5 8a5.5 5.5 0 10-1.6 3.9M13.5 8V4.5M13.5 8H10"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div id="block-openai" class="provider-block">
+              <div class="field">
+                <label for="cfg-openai-key">OpenAI API key</label>
+                <div class="key-row">
+                  <input
+                    id="cfg-openai-key"
+                    type="password"
+                    placeholder="sk-…"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button
+                    id="cfg-openai-key-toggle"
+                    class="icon-btn"
+                    type="button"
+                    title="Show key"
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.3"
+                    >
+                      <path
+                        d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"
+                      />
+                      <circle cx="8" cy="8" r="2" />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+              <div class="field">
+                <label for="cfg-openai-model">Model</label>
+                <div class="field-row">
+                  <select id="cfg-openai-model"></select>
+                  <button
+                    id="cfg-openai-refresh"
+                    class="icon-btn"
+                    type="button"
+                    title="Refresh model list"
+                  >
+                    <svg
+                      viewBox="0 0 16 16"
+                      fill="none"
+                      stroke="currentColor"
+                      stroke-width="1.4"
+                      stroke-linecap="round"
+                      stroke-linejoin="round"
+                    >
+                      <path
+                        d="M13.5 8a5.5 5.5 0 10-1.6 3.9M13.5 8V4.5M13.5 8H10"
+                      />
+                    </svg>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            <div id="settings-status"></div>
+            <button
+              id="settings-save"
+              class="btn"
+              type="button"
+              style="
+                background: var(--brand);
+                border-color: var(--brand);
+                color: var(--brand-fg);
+              "
+            >
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M3.5 8.5l3 3 6-7" />
+              </svg>
+              Save
+            </button>
+          </div>
+        </div>
+
+        <div id="live-wrap">
+          <div id="live-frame">
+            <span id="live-badge">LIVE</span>
+            <img id="live" alt="live browser view" />
+          </div>
+        </div>
+
+        <div id="log">
+          <div id="empty">
+            <svg
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.3"
+            >
+              <rect x="1.5" y="2.5" width="13" height="9" rx="1.5" />
+              <path d="M5 14l1.5-2.5h3L11 14" />
+            </svg>
+            <p>Tell it what to do on this page.</p>
+            <div id="chips">
+              <button class="chip" type="button">
+                Find job postings for "UX designer" in New York City
+              </button>
+              <button class="chip" type="button">
+                Summarize this article in three bullet points
+              </button>
+              <button class="chip" type="button">
+                Find their contact email or support form
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div id="approval">
+          <div id="approval-head">
+            <svg
+              viewBox="0 0 16 16"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="1.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            >
+              <path
+                d="M8 1.5l6 2.5v4c0 4-2.6 6.3-6 7.5-3.4-1.2-6-3.5-6-7.5v-4l6-2.5z"
+              />
+            </svg>
+            Approval needed
+          </div>
+          <div id="approval-text"></div>
+          <div class="row" style="gap: 6px">
+            <button
+              id="approve"
+              class="btn"
+              style="
+                background: var(--ok);
+                border-color: var(--ok);
+                color: #fff;
+              "
+            >
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              >
+                <path d="M3.5 8.5l3 3 6-7" />
+              </svg>
+              Approve
+            </button>
+            <button id="deny" class="btn">
+              <svg
+                viewBox="0 0 16 16"
+                fill="none"
+                stroke="currentColor"
+                stroke-width="1.6"
+                stroke-linecap="round"
+              >
+                <path d="M4 4l8 8M12 4l-8 8" />
+              </svg>
+              Deny
+            </button>
+          </div>
+        </div>
+
+        <div id="composer">
+          <div id="input-wrap">
+            <textarea
+              id="task"
+              rows="1"
+              placeholder="e.g. Find the pricing page and tell me the cheapest paid tier"
+            ></textarea>
+            <button id="send" title="Send">
+              <span class="icon-swap">
+                <svg class="ic-send" viewBox="0 0 16 16" fill="currentColor">
+                  <path d="M1 8l13-6-5 13-2-5-6-2z" />
+                </svg>
+                <svg class="ic-stop" viewBox="0 0 16 16" fill="currentColor">
+                  <rect x="4" y="4" width="8" height="8" rx="1.5" />
+                </svg>
+              </span>
+            </button>
+          </div>
+          <div id="hint">Enter to send · Shift+Enter for a new line</div>
+        </div>
+      </div>
+    </div>
+
+    <script src="sidepanel.js" type="module"></script>
+  </body>
+</html>
