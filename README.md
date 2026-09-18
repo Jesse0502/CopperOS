@@ -1,4 +1,4 @@
-# CopperOS
+<video src="https://github.com/user-attachments/assets/YOUR_ID_HERE" controls></video>
 
 **Beta.** Interfaces, config format, and stored-session layout may still
 change between versions. See [Known limits](#known-limits) before assuming
