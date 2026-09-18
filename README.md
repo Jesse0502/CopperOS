@@ -1,4 +1,4 @@
-![App Demo]([https://s3.ap-southeast-2.amazonaws.com/copper.jassydev.com/CopperOS+Product+Demo.gif](https://s3.ap-southeast-2.amazonaws.com/copper.jassydev.com/CopperOS+Product+Demo.gif))
+<video src="https://s3.ap-southeast-2.amazonaws.com/copper.jassydev.com/CopperOS+Product+Demo.gif"></video>
 
 **Beta.** Interfaces, config format, and stored-session layout may still
 change between versions. See [Known limits](#known-limits) before assuming
