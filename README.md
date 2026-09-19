@@ -1,5 +1,4 @@
-
-<img width="1280" height="720" alt="CopperOS Demo - Spreadsheet (14s)" src="https://github.com/user-attachments/assets/2bbacddb-eef6-4561-9111-8ad5ad7e7be1" />
+<img width="1230" height="454" alt="CopperOS-Banner" src="https://github.com/user-attachments/assets/188a612f-5722-4d58-9184-9ea006a7e903" />
 
 
 **Beta.** Interfaces, config format, and stored-session layout may still
