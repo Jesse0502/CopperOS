@@ -1,4 +1,7 @@
-<video src="https://s3.ap-southeast-2.amazonaws.com/copper.jassydev.com/CopperOS+Product+Demo.gif"></video>
+
+
+https://github.com/user-attachments/assets/480f3698-f679-4338-8e48-1f1fee740212
+
 
 **Beta.** Interfaces, config format, and stored-session layout may still
 change between versions. See [Known limits](#known-limits) before assuming
