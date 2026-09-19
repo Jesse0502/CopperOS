@@ -1,6 +1,5 @@
 
-
-https://github.com/user-attachments/assets/480f3698-f679-4338-8e48-1f1fee740212
+<img width="1280" height="720" alt="CopperOS Demo - Spreadsheet (14s)" src="https://github.com/user-attachments/assets/2bbacddb-eef6-4561-9111-8ad5ad7e7be1" />
 
 
 **Beta.** Interfaces, config format, and stored-session layout may still
