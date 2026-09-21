@@ -91,6 +91,7 @@ const STEP_ICON = {
   wait: "clock",
   "awaiting-approval": "shield",
   "tool-error": "alert",
+  remember: "list", recall: "eye",
 };
 
 const STEP_LABEL = {
@@ -102,6 +103,7 @@ const STEP_LABEL = {
   wait: "Wait",
   "awaiting-approval": "Approval",
   "tool-error": "Tool error",
+  remember: "Remember", recall: "Recall",
 };
 
 // ── markdown (subset) ────────────────────────────────────────────────────

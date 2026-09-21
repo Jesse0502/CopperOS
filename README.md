@@ -121,6 +121,7 @@ lives on disk under `storage/`, so it survives restarting the broker too.
 storage/
   sessions/<id>.json   one transcript per chat
   current.json         which one to resume
+  memories/<topic>/<slug>.md   durable facts, kept across chats
 ```
 
 It is written after every step, so an interrupted run still leaves a resumable
@@ -321,10 +322,11 @@ worker termination.
 | `extension/workspace.js` | The one CopperOS tab group; which tabs are the agent's; closing them. |
 | `extension/presence.js` | Which tab carries the overlay; hiding it for screenshots. |
 | `extension/overlay.js` | The in-page frame, status pill, and agent cursor. |
-| `broker/src/tools.ts` | The 17 tool definitions. |
+| `broker/src/tools.ts` | The 19 tool definitions. |
 | `broker/src/agent.ts` | The loop, system prompt, history pruning. |
 | `broker/src/bridge.ts` | WebSocket RPC server. |
 | `broker/src/session.ts` | Chat transcripts on disk: load, sanitize, save. |
+| `broker/src/memory.ts` | Durable cross-chat facts on disk: save, search. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
 
 ## Testing without Chrome

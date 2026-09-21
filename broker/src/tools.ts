@@ -6,6 +6,8 @@
 
 import type OpenAI from "openai";
 import { call, emit, requestApproval } from "./bridge.js";
+import { judgeAction, judgeMemoryWorth, judgeOutcome } from "./jev.js";
+import { saveMemory, searchMemories } from "./memory.js";
 import type { ApprovalMode } from "./session.js";
 
 // Provider-neutral content parts. Ollama's OpenAI-compatible endpoint accepts
@@ -44,6 +46,8 @@ export type BrowserTool = {
 };
 
 async function gate(kind: "click" | "submit", what: string, ctx: ToolCtx): Promise<string | null> {
+  judgeAction(kind, what, ctx.chatId);
+
   const needed =
     ctx.approvalMode === "all" ||
     (ctx.approvalMode === "submits" && kind === "submit");
@@ -76,7 +80,9 @@ const str = (description: string) => ({ type: "string" as const, description });
  * looking at is unchanged, the button is still in the next snapshot, and it
  * clicks again. Saying so in the tool result is what breaks that loop.
  */
-function describeAction(r: any, ctx: ToolCtx): string {
+function describeAction(what: string, r: any, ctx: ToolCtx): string {
+  judgeOutcome(what, r, ctx.chatId);
+
   const moved = r?.followedNewTab;
   if (!moved) return JSON.stringify(r);
   emit("follow-tab", ctx.chatId, moved.url ?? `tab ${moved.tabId}`);
@@ -227,11 +233,12 @@ const click: BrowserTool = {
     },
   },
   async run({ ref, why, destructive }, ctx) {
-    const denied = await gate(destructive ? "submit" : "click", `Click ${ref} — ${why}`, ctx);
+    const what = `Click ${ref} — ${why}`;
+    const denied = await gate(destructive ? "submit" : "click", what, ctx);
     if (denied) return denied;
     emit("click", ctx.chatId, `${ref} — ${why}`);
     const r = await call("click", ctx.chatId, { ref }, undefined, ctx.signal);
-    return describeAction(r, ctx);
+    return describeAction(what, r, ctx);
   },
 };
 
@@ -253,13 +260,14 @@ const type: BrowserTool = {
     },
   },
   async run({ ref, text, submit, clear }, ctx) {
+    const what = submit ? `Type into ${ref} and submit: "${text}"` : `Type into ${ref}: "${text}"`;
     if (submit) {
-      const denied = await gate("submit", `Type into ${ref} and submit: "${text}"`, ctx);
+      const denied = await gate("submit", what, ctx);
       if (denied) return denied;
     }
     emit("type", ctx.chatId, `${ref} ← "${text}"${submit ? " ⏎" : ""}`);
     const r = await call("type", ctx.chatId, { ref, text, submit, clear }, undefined, ctx.signal);
-    return describeAction(r, ctx);
+    return describeAction(what, r, ctx);
   },
 };
 
@@ -323,8 +331,11 @@ const paste: BrowserTool = {
     },
   },
   async run({ ref, text, submit, clear }, ctx) {
+    const what = submit
+      ? `Paste into ${ref} and submit: ${preview(text, 200)}`
+      : `Paste into ${ref}: ${preview(text, 200)}`;
     if (submit) {
-      const denied = await gate("submit", `Paste into ${ref} and submit: ${preview(text, 200)}`, ctx);
+      const denied = await gate("submit", what, ctx);
       if (denied) return denied;
     }
     emit("paste", ctx.chatId, `${ref} ⇐ ${preview(text)}${submit ? " ⏎" : ""}`);
@@ -332,7 +343,7 @@ const paste: BrowserTool = {
     // The read-back value is only for the verdict. Echoing a whole cover
     // letter back into the context would cost its length again for nothing.
     const { value, ...rest } = r ?? {};
-    return describeAction(rest, ctx) + pasteVerdict(value ?? null, text);
+    return describeAction(what, rest, ctx) + pasteVerdict(value ?? null, text);
   },
 };
 
@@ -392,7 +403,8 @@ const pressKey: BrowserTool = {
   },
   async run({ key }, ctx) {
     emit("key", ctx.chatId, key);
-    return describeAction(await call("press_key", ctx.chatId, { key }, undefined, ctx.signal), ctx);
+    const r = await call("press_key", ctx.chatId, { key }, undefined, ctx.signal);
+    return describeAction(`Press ${key}`, r, ctx);
   },
 };
 
@@ -554,11 +566,68 @@ const closeTab: BrowserTool = {
   },
 };
 
+// ── memory ──────────────────────────────────────────────────────────────────
+
+const remember: BrowserTool = {
+  def: {
+    name: "remember",
+    description:
+      "Save a durable fact about the user for future chats — preferences, " +
+      "account or profile details you were told or filled into a form, " +
+      "recurring tasks. Not for one-off task state that only matters in this " +
+      "chat. Never store passwords or other secrets.",
+    input_schema: {
+      type: "object",
+      properties: {
+        topic: str(
+          'Slash-separated topic path, e.g. "user/career" or "user/preferences". ' +
+            "Reuse an existing topic when it fits.",
+        ),
+        title: str('Short title for this fact, e.g. "Current job title"'),
+        content: str("The fact itself, in a sentence or two."),
+      },
+      required: ["topic", "title", "content"],
+    },
+  },
+  async run({ topic, title, content }, ctx) {
+    judgeMemoryWorth(topic, title, content, ctx.chatId);
+    const meta = await saveMemory(topic, title, content);
+    emit("remember", ctx.chatId, `${meta.topic}/${meta.slug}`);
+    return `Saved to ${meta.topic}/${meta.slug}.md`;
+  },
+};
+
+const searchMemory: BrowserTool = {
+  def: {
+    name: "search_memory",
+    description:
+      "Search facts saved earlier with remember, across all past chats. Call " +
+      "this before a task that could reuse something you already know about " +
+      "the user — filling a form, personalizing a choice, resuming a " +
+      "recurring task.",
+    input_schema: {
+      type: "object",
+      properties: { query: str("What to look for, in plain words") },
+      required: ["query"],
+    },
+  },
+  async run({ query }, ctx) {
+    const { verdict, results } = await searchMemories(query, ctx.chatId);
+    emit("recall", ctx.chatId, `${results.length} match(es)`);
+    if (results.length === 0) {
+      return verdict ? `${verdict}\n\nNo saved memories matched.` : "No saved memories matched.";
+    }
+    const body = results.map((r) => `[${r.topic}/${r.slug}] ${r.title}\n${r.content}`).join("\n\n");
+    return verdict ? `${verdict}\n\n${body}` : body;
+  },
+};
+
 export const TOOLS: BrowserTool[] = [
   snapshot, screenshot, readPage,
   click, type, paste, hover, selectOption, pressKey, scroll,
   navigate, goBack, waitForIdle,
   listTabs, openTab, activateTab, closeTab,
+  remember, searchMemory,
 ];
 
 export const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = TOOLS.map(

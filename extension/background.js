@@ -195,7 +195,10 @@ async function freshTab() {
 // driving one task at a time, which is the only way a chat's first action
 // happens in practice; left undefended rather than adding cross-chat locking
 // for a race that a human cannot actually trigger.
-async function targetTab(chatId, explicit) {
+// Resolves which tab a chat drives without attaching — navigate needs this
+// split so it can route around a restricted starting page (chrome://newtab
+// on a freshly opened tab, chrome://settings, …) before CDP ever touches it.
+async function resolveTabId(chatId, explicit) {
   // A revived worker has not read its stored tab ids yet; without this wait it
   // could hijack whatever the user is viewing before knowing better.
   await ready;
@@ -214,10 +217,15 @@ async function targetTab(chatId, explicit) {
   } catch {
     ctx.tabId = await freshTab();
   }
-  await attach(ctx.tabId);
-  persistTabs();
-  driving(chatId, ctx.tabId);
   return ctx.tabId;
+}
+
+async function targetTab(chatId, explicit) {
+  const tabId = await resolveTabId(chatId, explicit);
+  await attach(tabId);
+  persistTabs();
+  driving(chatId, tabId);
+  return tabId;
 }
 
 // ── tabs opened by our own actions ──────────────────────────────────────────
@@ -407,8 +415,21 @@ const OPS = {
   },
 
   async navigate({ chatId, url, tabId }) {
-    const id = await targetTab(chatId, tabId);
-    return nav.navigate(id, url);
+    const id = await resolveTabId(chatId, tabId);
+    const tab = await chrome.tabs.get(id).catch(() => null);
+    // A fresh tab defaults to chrome://newtab, and the active tab may well be
+    // a chrome://, Web Store, or PDF-viewer page — none of which CDP can
+    // attach to. Get off it with the plain tabs API first; attach() then
+    // succeeds normally on the real page escapeRestrictedPage() already
+    // navigated to, so navigate() below must skip re-navigating to it.
+    const wasRestricted = Boolean(tab && nav.isRestrictedUrl(tab.url));
+    if (wasRestricted) {
+      await nav.escapeRestrictedPage(id, url);
+    }
+    await attach(id);
+    persistTabs();
+    driving(chatId, id);
+    return nav.navigate(id, url, { skipNavigate: wasRestricted });
   },
 
   async go_back({ chatId, tabId }) {

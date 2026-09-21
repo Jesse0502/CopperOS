@@ -12,6 +12,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
     "dotenv": "^16.4.5",
     "openai": "^7.15.0",
     "ws": "^8.18.0"

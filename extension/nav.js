@@ -1,6 +1,9 @@
 // Navigation, readiness detection, and text extraction.
 
 import { send } from "./cdp.js";
+import { isRestrictedUrl } from "./restricted.js";
+
+export { isRestrictedUrl };
 
 // ── CDP event bus ───────────────────────────────────────────────────────────
 
@@ -44,17 +47,46 @@ export async function waitForIdle(tabId, { timeoutMs = 15000 } = {}) {
   return { idle: Boolean(hit), timedOut: !hit };
 }
 
-export async function navigate(tabId, url, { timeoutMs = 20000 } = {}) {
+export async function navigate(tabId, url, { timeoutMs = 20000, skipNavigate = false } = {}) {
   if (!/^https?:\/\//i.test(url)) {
     throw new Error(`refusing to navigate to non-http(s) URL: ${url}`);
   }
   await send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
-  const nav = send(tabId, "Page.navigate", { url });
-  const result = await nav;
-  if (result?.errorText) throw new Error(`navigation failed: ${result.errorText}`);
+  if (!skipNavigate) {
+    const result = await send(tabId, "Page.navigate", { url });
+    if (result?.errorText) throw new Error(`navigation failed: ${result.errorText}`);
+  }
   const idle = await waitForIdle(tabId, { timeoutMs });
   const tab = await chrome.tabs.get(tabId);
   return { url: tab.url, title: tab.title, ...idle };
+}
+
+function waitForTabComplete(tabId, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    const done = () => {
+      chrome.tabs.onUpdated.removeListener(listener);
+      clearTimeout(timer);
+      resolve();
+    };
+    const timer = setTimeout(done, timeoutMs);
+    function listener(id, info) {
+      if (id === tabId && info.status === "complete") done();
+    }
+    chrome.tabs.onUpdated.addListener(listener);
+  });
+}
+
+// A tab freshly opened with no URL, or one sitting on chrome://newtab, a
+// settings page, the Web Store, etc., cannot take a CDP attach — that's a
+// Chrome restriction, not a bug. The plain tabs API has no such restriction,
+// so use it to get off the restricted page and onto real content; CDP
+// attaches fine once there, and `navigate` takes over as normal from then on.
+export async function escapeRestrictedPage(tabId, url) {
+  if (!/^https?:\/\//i.test(url)) {
+    throw new Error(`refusing to navigate to non-http(s) URL: ${url}`);
+  }
+  await chrome.tabs.update(tabId, { url });
+  await waitForTabComplete(tabId);
 }
 
 export async function goBack(tabId) {

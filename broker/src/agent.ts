@@ -123,7 +123,14 @@ Do not chain several blind actions between snapshots — pages change underneath
 When the task is done, state what you did and what you found. If you could not
 complete it, say exactly where you stopped and why — do not claim success you
 did not verify on screen.
-</reporting>`;
+</reporting>
+
+<memory>
+remember and search_memory persist facts about the user across chats, filed by topic (e.g. "user/career", "user/preferences").
+- Call search_memory before a task that could reuse something you already know: filling a form, personalizing a choice, resuming a recurring job.
+- Call remember when you learn something durable worth not re-learning next time — not one-off task details for this chat, and never passwords or other secrets.
+- Reuse an existing topic when a fact fits one; only invent a new topic path when nothing existing does.
+</memory>`;
 
 // Injected once per resumed chat, right before the first new task. Filtered
 // back out of replay() — it is a note to the model, not part of the chat.
