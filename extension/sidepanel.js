@@ -92,6 +92,10 @@ const STEP_ICON = {
   "awaiting-approval": "shield",
   "tool-error": "alert",
   remember: "list", recall: "eye",
+  progress: "check", "task-check": "list", blocked: "shield",
+  lookup: "eye", ask: "list", answered: "check",
+  "auto-approved": "shield", "job-fit": "check",
+  "check-in": "bot", supervisor: "shield",
 };
 
 const STEP_LABEL = {
@@ -104,6 +108,10 @@ const STEP_LABEL = {
   "awaiting-approval": "Approval",
   "tool-error": "Tool error",
   remember: "Remember", recall: "Recall",
+  progress: "Progress", "task-check": "Task check", blocked: "Blocked",
+  lookup: "Lookup", ask: "Questions", answered: "Answers",
+  "auto-approved": "Auto-approved", "job-fit": "Job check",
+  "check-in": "Check-in", supervisor: "Supervisor",
 };
 
 // ── markdown (subset) ────────────────────────────────────────────────────
@@ -234,7 +242,10 @@ function addThink(text) {
 function addStep(kind, text) {
   hideEmpty();
   const row = document.createElement("div");
-  const tone = kind === "tool-error" ? " err" : kind === "awaiting-approval" ? " warn" : "";
+  const warn =
+    kind === "awaiting-approval" || kind === "blocked" ||
+    (kind === "supervisor" && (text || "").startsWith("off course"));
+  const tone = kind === "tool-error" ? " err" : warn ? " warn" : "";
   row.className = `step${tone}`;
   const ic = document.createElement("span");
   ic.className = "ic";
@@ -310,6 +321,118 @@ function showApproval(pending) {
   pendingApprovalId = pending.id;
   $("approval-text").textContent = pending.text;
   approval.style.display = "block";
+}
+
+// ── questions (ask_user) ─────────────────────────────────────────────────
+//
+// One question at a time: the agent's suggested options, then always a box
+// for the user's own answer. Nothing goes back until the last question is
+// done, so Back works right up to then.
+let ask = null; // { id, intro, questions, index, picks: Set[], other: string[] }
+
+function showAsk(pending) {
+  const questions = pending?.ask?.questions ?? [];
+  if (!pending || questions.length === 0) {
+    $("ask").classList.remove("open");
+    ask = null;
+    return;
+  }
+  if (ask && ask.id === pending.id) return; // already on screen; keep the progress
+  ask = {
+    id: pending.id,
+    intro: pending.ask.intro ?? "",
+    questions,
+    index: 0,
+    picks: questions.map(() => new Set()),
+    other: questions.map(() => ""),
+  };
+  $("ask").classList.add("open");
+  renderAsk();
+}
+
+/** A question's answer as sent back: picked options, then anything typed; null when skipped. */
+function answerFor(i) {
+  const other = ask.other[i].trim();
+  const parts = [...ask.picks[i], ...(other ? [other] : [])];
+  return parts.length ? parts.join(", ") : null;
+}
+
+function renderAsk() {
+  const q = ask.questions[ask.index];
+  const options = q.options ?? [];
+  const last = ask.index === ask.questions.length - 1;
+  $("ask-count").textContent = `${ask.index + 1} of ${ask.questions.length}`;
+  $("ask-intro").textContent = ask.intro;
+  $("ask-progress-bar").style.width = `${(ask.index / ask.questions.length) * 100}%`;
+  $("ask-question").textContent = q.question;
+  $("ask-hint").textContent = options.length
+    ? q.multiple ? "Pick any that apply, or add your own." : "Pick one, or type your own."
+    : "";
+
+  const box = $("ask-options");
+  box.replaceChildren();
+  box.setAttribute("role", q.multiple ? "group" : "radiogroup");
+  for (const opt of options) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "ask-opt";
+    b.setAttribute("role", q.multiple ? "checkbox" : "radio");
+    b.setAttribute("aria-checked", String(ask.picks[ask.index].has(opt)));
+    const mark = document.createElement("span");
+    mark.className = "ask-mark";
+    const txt = document.createElement("span");
+    txt.className = "ask-txt";
+    txt.textContent = opt;
+    b.append(mark, txt);
+    b.addEventListener("click", () => pickOption(opt));
+    box.appendChild(b);
+  }
+
+  const other = $("ask-other");
+  other.value = ask.other[ask.index];
+  other.placeholder = options.length ? "Something else…" : "Type your answer…";
+  other.classList.toggle("filled", Boolean(other.value.trim()));
+  $("ask-back").disabled = ask.index === 0;
+  $("ask-next").textContent = last ? "Send answers" : "Next";
+  $("ask-next").disabled = answerFor(ask.index) === null;
+  if (!options.length) other.focus();
+}
+
+function pickOption(opt) {
+  const q = ask.questions[ask.index];
+  const picks = ask.picks[ask.index];
+  if (q.multiple) {
+    if (picks.has(opt)) picks.delete(opt);
+    else picks.add(opt);
+    renderAsk();
+    return;
+  }
+  picks.clear();
+  picks.add(opt);
+  ask.other[ask.index] = ""; // a picked option replaces a typed answer
+  renderAsk();
+  // One tap answers a single-choice question. The last one waits for Send.
+  const at = ask.index;
+  if (at < ask.questions.length - 1) {
+    setTimeout(() => {
+      if (ask && ask.index === at) askAdvance();
+    }, 180);
+  }
+}
+
+function askAdvance() {
+  if (!ask) return;
+  if (ask.index < ask.questions.length - 1) {
+    ask.index++;
+    renderAsk();
+    return;
+  }
+  port.postMessage({
+    type: "answers",
+    id: ask.id,
+    answers: ask.questions.map((_, i) => answerFor(i)),
+  });
+  showAsk(null);
 }
 
 function setWatching(on) {
@@ -435,9 +558,10 @@ function closeHistory() {
 
 // ── settings panel ───────────────────────────────────────────────────────
 
+const PROVIDERS = ["ollama", "openai", "openrouter"];
+
 function providerBlocks(provider) {
-  $("block-ollama").classList.toggle("on", provider === "ollama");
-  $("block-openai").classList.toggle("on", provider === "openai");
+  for (const p of PROVIDERS) $(`block-${p}`).classList.toggle("on", provider === p);
 }
 
 function setSettingsStatus(text, tone) {
@@ -470,15 +594,17 @@ function applyConfig(cfg) {
   fillModelSelect($("cfg-ollama-model"), [], cfg.ollama.model);
   $("cfg-openai-key").value = cfg.openai.apiKey || "";
   fillModelSelect($("cfg-openai-model"), [], cfg.openai.model);
+  // Absent from a broker older than the extension.
+  const openrouter = cfg.openrouter ?? { model: "", apiKey: "" };
+  $("cfg-openrouter-key").value = openrouter.apiKey || "";
+  fillModelSelect($("cfg-openrouter-model"), [], openrouter.model);
   requestModels(cfg.provider);
 }
 
 function requestModels(provider) {
-  const select = provider === "ollama" ? $("cfg-ollama-model") : $("cfg-openai-model");
-  const refresh = provider === "ollama" ? $("cfg-ollama-refresh") : $("cfg-openai-refresh");
-  refresh.disabled = true;
+  // The select is populated when the "models" response arrives.
+  $(`cfg-${provider}-refresh`).disabled = true;
   port.postMessage({ type: "list_models", provider });
-  void select; // populated when the "models" response arrives
 }
 
 function openSettings() {
@@ -512,16 +638,19 @@ $("cfg-provider").addEventListener("change", () => {
   requestModels(provider);
 });
 
-$("cfg-ollama-refresh").addEventListener("click", () => requestModels("ollama"));
-$("cfg-openai-refresh").addEventListener("click", () => requestModels("openai"));
+for (const p of PROVIDERS) {
+  $(`cfg-${p}-refresh`).addEventListener("click", () => requestModels(p));
+}
 
-$("cfg-openai-key-toggle").addEventListener("click", () => {
-  const input = $("cfg-openai-key");
-  const toggle = $("cfg-openai-key-toggle");
-  const showing = input.type === "text";
-  input.type = showing ? "password" : "text";
-  toggle.title = showing ? "Show key" : "Hide key";
-});
+for (const p of ["openai", "openrouter"]) {
+  $(`cfg-${p}-key-toggle`).addEventListener("click", () => {
+    const input = $(`cfg-${p}-key`);
+    const toggle = $(`cfg-${p}-key-toggle`);
+    const showing = input.type === "text";
+    input.type = showing ? "password" : "text";
+    toggle.title = showing ? "Show key" : "Hide key";
+  });
+}
 
 $("settings-save").addEventListener("click", () => {
   const provider = $("cfg-provider").value;
@@ -534,6 +663,10 @@ $("settings-save").addEventListener("click", () => {
     openai: {
       model: $("cfg-openai-model").value,
       apiKey: $("cfg-openai-key").value.trim(),
+    },
+    openrouter: {
+      model: $("cfg-openrouter-model").value,
+      apiKey: $("cfg-openrouter-key").value.trim(),
     },
   };
   setSettingsStatus("Saving…");
@@ -560,6 +693,7 @@ port.onMessage.addListener((msg) => {
       for (const ev of msg.events ?? []) renderEvent(ev.event, ev.text ?? "");
       setRunning(Boolean(msg.running));
       showApproval(msg.approval);
+      showAsk(msg.ask);
       setWatching(Boolean(msg.watching));
       setApprovalMode(msg.approvalMode ?? "submits");
       setPendingApprovalChatIds(msg.pendingApprovalChatIds ?? []);
@@ -567,7 +701,10 @@ port.onMessage.addListener((msg) => {
 
     case "run_state":
       setRunning(Boolean(msg.running));
-      if (!msg.running) showApproval(null);
+      if (!msg.running) {
+        showApproval(null);
+        showAsk(null);
+      }
       break;
 
     case "approval_flags":
@@ -594,9 +731,9 @@ port.onMessage.addListener((msg) => {
       break;
 
     case "models": {
-      const select = msg.provider === "ollama" ? $("cfg-ollama-model") : $("cfg-openai-model");
-      const refresh = msg.provider === "ollama" ? $("cfg-ollama-refresh") : $("cfg-openai-refresh");
-      refresh.disabled = false;
+      if (!PROVIDERS.includes(msg.provider)) break;
+      const select = $(`cfg-${msg.provider}-model`);
+      $(`cfg-${msg.provider}-refresh`).disabled = false;
       if (msg.error) {
         setSettingsStatus(msg.error, "err");
         break;
@@ -608,6 +745,10 @@ port.onMessage.addListener((msg) => {
     case "agent_event":
       if (msg.event === "approval_request") {
         showApproval({ id: msg.id, text: msg.text });
+        break;
+      }
+      if (msg.event === "ask_request") {
+        showAsk({ id: msg.id, ask: msg.ask });
         break;
       }
       if (msg.event === "start") {
@@ -624,6 +765,7 @@ port.onMessage.addListener((msg) => {
       if (TERMINAL.includes(msg.event)) {
         setRunning(false);
         showApproval(null);
+        showAsk(null);
       }
       break;
   }
@@ -687,6 +829,7 @@ $("new-chat").addEventListener("click", () => {
   resetLog();
   setRunning(false);
   showApproval(null);
+  showAsk(null);
   closeHistory();
   closeSettings();
   closeMenu();
@@ -744,6 +887,46 @@ $("approve").addEventListener("click", () => {
 $("deny").addEventListener("click", () => {
   port.postMessage({ type: "approval", id: pendingApprovalId, approved: false });
   showApproval(null);
+});
+
+$("ask-other").addEventListener("input", (e) => {
+  if (!ask) return;
+  const value = e.target.value;
+  ask.other[ask.index] = value;
+  // On a single-choice question, typing your own answer replaces a pick.
+  if (!ask.questions[ask.index].multiple && value.trim() && ask.picks[ask.index].size) {
+    ask.picks[ask.index].clear();
+    for (const b of $("ask-options").children) b.setAttribute("aria-checked", "false");
+  }
+  e.target.classList.toggle("filled", Boolean(value.trim()));
+  $("ask-next").disabled = answerFor(ask.index) === null;
+});
+
+$("ask-other").addEventListener("keydown", (e) => {
+  if (e.key !== "Enter" || e.isComposing) return;
+  e.preventDefault();
+  if (ask && answerFor(ask.index) !== null) askAdvance();
+});
+
+$("ask-next").addEventListener("click", () => askAdvance());
+
+$("ask-skip").addEventListener("click", () => {
+  if (!ask) return;
+  ask.picks[ask.index].clear();
+  ask.other[ask.index] = "";
+  askAdvance();
+});
+
+$("ask-back").addEventListener("click", () => {
+  if (!ask || ask.index === 0) return;
+  ask.index--;
+  renderAsk();
+});
+
+$("ask-close").addEventListener("click", () => {
+  if (!ask) return;
+  port.postMessage({ type: "answers", id: ask.id, dismissed: true });
+  showAsk(null);
 });
 
 renderStatus();

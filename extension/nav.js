@@ -1,59 +1,64 @@
 // Navigation, readiness detection, and text extraction.
 
+import { activityOf } from "./activity.js";
 import { send } from "./cdp.js";
 import { isRestrictedUrl } from "./restricted.js";
 
 export { isRestrictedUrl };
 
-// ── CDP event bus ───────────────────────────────────────────────────────────
-
-const waiters = new Set(); // { tabId, match, resolve }
-
-chrome.debugger.onEvent.addListener((source, method, params) => {
-  for (const w of [...waiters]) {
-    if (w.tabId !== source.tabId) continue;
-    if (w.match(method, params)) {
-      waiters.delete(w);
-      w.resolve({ method, params });
-    }
-  }
-});
-
-function waitForEvent(tabId, match, timeoutMs) {
-  return new Promise((resolve) => {
-    const w = { tabId, match, resolve };
-    waiters.add(w);
-    setTimeout(() => {
-      if (waiters.delete(w)) resolve(null); // timeout -> null, never throws
-    }, timeoutMs);
-  });
-}
-
 // ── readiness ───────────────────────────────────────────────────────────────
 
 // Knowing when a page has settled is the single biggest source of flakiness
-// in browser agents. `networkAlmostIdle` is the same heuristic Puppeteer's
-// networkidle2 uses, and it fires on SPA route changes too, not just loads.
-export async function waitForIdle(tabId, { timeoutMs = 15000 } = {}) {
-  await send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
-  const hit = await waitForEvent(
-    tabId,
-    (method, params) =>
-      method === "Page.lifecycleEvent" && params.name === "networkAlmostIdle",
-    timeoutMs,
-  );
-  // A short settle lets late-running client render work land before we look.
-  await new Promise((r) => setTimeout(r, 350));
-  return { idle: Boolean(hit), timedOut: !hit };
+// in browser agents. Settled here means: the main frame has finished loading
+// and no request that matters (see activity.js) has been in flight for
+// QUIET_MS. The quiet stretch also covers the moment between a click and the
+// navigation it sets off, and lets the page's own rendering land.
+const QUIET_MS = 500;
+// Past this, stop holding out for an onload that a slow image or ad is
+// holding back, or for a chatty page's last request or two — the same
+// tolerance as Puppeteer's networkidle2. A document still on its way is
+// always waited for.
+const RELAX_AFTER_MS = 3000;
+const POLL_MS = 100;
+
+export async function waitForIdle(tabId, { timeoutMs = 10000, quietMs = QUIET_MS } = {}) {
+  const started = Date.now();
+  let quietSince = null;
+  for (;;) {
+    const now = Date.now();
+    const waited = now - started;
+    // A tab attached outside cdp.js is not tracked: all that is left to go on
+    // is the quiet stretch itself.
+    const a = activityOf(tabId) ?? { loading: false, navigating: false, active: 0 };
+    const settled = waited < RELAX_AFTER_MS
+      ? !a.loading && !a.navigating && a.active === 0
+      : !a.navigating && a.active <= 2;
+    if (!settled) quietSince = null;
+    else if (quietSince === null) quietSince = now;
+    else if (now - quietSince >= quietMs) {
+      return { idle: true, timedOut: false, waitedMs: waited };
+    }
+    if (waited >= timeoutMs) {
+      return {
+        idle: false,
+        timedOut: true,
+        waitedMs: waited,
+        stillLoading: a.loading || a.navigating,
+        requestsInFlight: a.active,
+      };
+    }
+    await new Promise((r) => setTimeout(r, POLL_MS));
+  }
 }
 
-export async function navigate(tabId, url, { timeoutMs = 20000, skipNavigate = false } = {}) {
+export async function navigate(tabId, url, { timeoutMs = 15000, skipNavigate = false } = {}) {
   if (!/^https?:\/\//i.test(url)) {
     throw new Error(`refusing to navigate to non-http(s) URL: ${url}`);
   }
-  await send(tabId, "Page.setLifecycleEventsEnabled", { enabled: true });
   if (!skipNavigate) {
-    const result = await send(tabId, "Page.navigate", { url });
+    // Answered only once the server responds, so it gets longer than the
+    // usual command bound.
+    const result = await send(tabId, "Page.navigate", { url }, { timeoutMs: 30_000 });
     if (result?.errorText) throw new Error(`navigation failed: ${result.errorText}`);
   }
   const idle = await waitForIdle(tabId, { timeoutMs });
@@ -61,7 +66,7 @@ export async function navigate(tabId, url, { timeoutMs = 20000, skipNavigate = f
   return { url: tab.url, title: tab.title, ...idle };
 }
 
-function waitForTabComplete(tabId, timeoutMs = 20000) {
+function waitForTabComplete(tabId, timeoutMs = 15000) {
   return new Promise((resolve) => {
     const done = () => {
       chrome.tabs.onUpdated.removeListener(listener);

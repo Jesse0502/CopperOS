@@ -50,8 +50,9 @@ const renderForm = () =>
     ([ref, label]) => `  [${ref}] textbox "${label}" value=${JSON.stringify(formValues[ref] ?? "")}`,
   ).join("\n") +
   '\n  [e5] button "Submit application"';
-const enter = (ref: string, text: string, clear?: boolean) => {
-  formValues[ref] = clear ? text : (formValues[ref] ?? "") + text;
+// Like the extension, filling a field by ref replaces what it held.
+const enter = (ref: string, text: string) => {
+  formValues[ref] = text;
 };
 const PASTE_REJECT = process.env.STUB_PASTE_REJECT ?? null;
 
@@ -89,17 +90,17 @@ const OPS: Record<string, (p: any) => unknown> = {
     }
     return { clickedAt: { x: 120, y: 240 } };
   },
-  type: ({ ref, text, clear }: any) => {
-    if (FORM) enter(ref, text, clear);
+  type: ({ ref, text }: any) => {
+    if (FORM) enter(ref, text);
     return { typed: text.length, submitted: false };
   },
-  paste: ({ ref, text, clear }: any) => {
+  paste: ({ ref, text }: any) => {
     if (!refs.includes(ref)) {
       throw new Error(`stale or unknown ref "${ref}" — call snapshot again`);
     }
     const rejected = ref === PASTE_REJECT;
-    if (clear) formValues[ref] = "";
-    if (!rejected) enter(ref, text, clear);
+    formValues[ref] = "";
+    if (!rejected) enter(ref, text);
     return {
       pasted: text.length,
       submitted: false,

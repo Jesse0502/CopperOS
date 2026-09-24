@@ -10,9 +10,10 @@
 // chat's, so several chats can run at once without interfering.
 
 import { attach, detach, isAttached } from "./cdp.js";
-import { snapshot } from "./snapshot.js";
+import { diffSnapshots, lastSnapshot, snapshot } from "./snapshot.js";
 import * as input from "./input.js";
 import * as nav from "./nav.js";
+import * as sheets from "./sheets.js";
 import * as som from "./som.js";
 import * as screencast from "./screencast.js";
 import * as presence from "./presence.js";
@@ -97,15 +98,25 @@ let session = {
   // chatId -> { id, text }, for every chat with an open gate, not just the
   // viewed one — this is what lights up the history icon and its rows.
   pendingApprovals: {},
+  ask: null, // { id, ask: { intro, questions } } while an ask_user form is open on the viewed chat
+  // chatId -> { id, ask }, for every chat with questions waiting, like pendingApprovals.
+  pendingAsks: {},
 };
 
 const ready = (async () => {
   try {
     const { session: saved, tabsByChat: savedTabs } =
       await chrome.storage.session.get(["session", "tabsByChat"]);
-    if (saved) session = { ...session, ...saved, pendingApprovals: saved.pendingApprovals ?? {} };
+    if (saved) {
+      session = {
+        ...session,
+        ...saved,
+        pendingApprovals: saved.pendingApprovals ?? {},
+        pendingAsks: saved.pendingAsks ?? {},
+      };
+    }
     if (savedTabs) tabsByChat = savedTabs;
-    setBadge(Object.keys(session.pendingApprovals).length > 0);
+    setBadge(needsAttention());
     // A recycled worker mid-run: keep marking the tab. The broker's chat_state
     // on reconnect corrects this if the run ended while we were down.
     if (session.running) runChanged(session.chatId, true);
@@ -126,8 +137,17 @@ function setBadge(on) {
   if (on) chrome.action.setBadgeBackgroundColor({ color: "#c2410c" });
 }
 
+/** Chats waiting on the user — an approval or questions — for the badge and the history alert. */
+function waitingChatIds() {
+  return [...new Set([...Object.keys(session.pendingApprovals), ...Object.keys(session.pendingAsks)])];
+}
+
+function needsAttention() {
+  return waitingChatIds().length > 0;
+}
+
 function broadcastApprovalFlags() {
-  broadcastToPanels({ type: "approval_flags", chatIds: Object.keys(session.pendingApprovals) });
+  broadcastToPanels({ type: "approval_flags", chatIds: waitingChatIds() });
 }
 
 function recordEvent(msg) {
@@ -148,6 +168,19 @@ function recordEvent(msg) {
     return;
   }
 
+  if (msg.event === "ask_request") {
+    const pending = { id: msg.id, ask: msg.ask ?? { intro: "", questions: [] } };
+    if (chatId !== null) {
+      session.pendingAsks[chatId] = pending;
+      broadcastApprovalFlags();
+    }
+    if (forViewed) session.ask = pending;
+    setBadge(true);
+    persist();
+    if (forViewed) broadcastToPanels(msg);
+    return;
+  }
+
   if (msg.event === "start" && forViewed) {
     session.running = true;
     session.task = msg.text ?? null;
@@ -157,16 +190,18 @@ function recordEvent(msg) {
   }
 
   if (TERMINAL.includes(msg.event)) {
-    if (chatId !== null && session.pendingApprovals[chatId]) {
+    if (chatId !== null && (session.pendingApprovals[chatId] || session.pendingAsks[chatId])) {
       delete session.pendingApprovals[chatId];
+      delete session.pendingAsks[chatId];
       broadcastApprovalFlags();
     }
     if (forViewed) {
       session.running = false;
       session.approval = null;
+      session.ask = null;
       runChanged(session.chatId, false);
     }
-    setBadge(Object.keys(session.pendingApprovals).length > 0);
+    setBadge(needsAttention());
   }
 
   if (!forViewed) {
@@ -239,8 +274,13 @@ async function targetTab(chatId, explicit) {
 // Tracked by the exact opener tab id, not by chat — several chats can each be
 // mid-action at once, and this way each only ever claims the tab its own
 // action opened.
-const NEW_TAB_WAIT_MS = 1500;
 let openedTabs = []; // { tabId, openerTabId, at }
+
+// How long an action waits for what it set off — a navigation, data loading
+// into the page, a new tab — before reporting back. Most settle far sooner:
+// an action that sets off nothing is back after the quiet stretch alone.
+const SETTLE_MS = 8000;
+const SETTLE_QUIET_MS = 300;
 
 // The agent works in background tabs. Chrome itself decides to raise a window
 // when a page calls window.open, and an extension cannot veto that — but it
@@ -298,41 +338,128 @@ async function keepInBackground(newTabId, before) {
 chrome.tabs.onCreated.addListener((tab) => {
   if (tab.openerTabId === undefined) return;
   const now = Date.now();
-  openedTabs = openedTabs.filter((t) => now - t.at < NEW_TAB_WAIT_MS * 2);
+  openedTabs = openedTabs.filter((t) => now - t.at < SETTLE_MS * 2);
   openedTabs.push({ tabId: tab.id, openerTabId: tab.openerTabId, at: now });
 });
 
-async function claimOpenedTab(openerId) {
-  const deadline = Date.now() + NEW_TAB_WAIT_MS;
-  while (Date.now() < deadline) {
-    const idx = openedTabs.findIndex((t) => t.openerTabId === openerId);
-    if (idx !== -1) return openedTabs.splice(idx, 1)[0].tabId;
-    await new Promise((r) => setTimeout(r, 100));
-  }
-  return null;
+function takeOpenedTab(openerId) {
+  const idx = openedTabs.findIndex((t) => t.openerTabId === openerId);
+  return idx === -1 ? null : openedTabs.splice(idx, 1)[0].tabId;
 }
 
-/** Run an input op on `openerId`, then take over any tab that op opened. */
-async function actThenFollow(chatId, openerId, act) {
+/**
+ * Wait until the action's effects have played out: the page went quiet, or
+ * it opened a new tab (returned, to be followed). A fixed wait used to sit
+ * here — 1.5s after every click and every field filled, whether or not
+ * anything could happen.
+ */
+async function settleOrOpen(openerId) {
+  let decided = false;
+  const watch = (async () => {
+    while (!decided) {
+      const id = takeOpenedTab(openerId);
+      if (id !== null) return id;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    return null;
+  })();
+  const idle = nav
+    .waitForIdle(openerId, { timeoutMs: SETTLE_MS, quietMs: SETTLE_QUIET_MS })
+    .then(() => null);
+  const opened = await Promise.race([watch, idle]);
+  decided = true;
+  // A tab can appear in the very moment the page went quiet.
+  return opened ?? takeOpenedTab(openerId);
+}
+
+// ── what the model sees after an action ─────────────────────────────────────
+//
+// Every action reports the page as it is afterwards, so the model does not
+// spend a whole turn on a snapshot to find out whether it worked. Refs are
+// stable (see snapshot.js), so on the same page that report is just what
+// changed; after a navigation, or a change too big to read as a list, it is
+// the whole page.
+
+// Past this many changed lines, the whole page reads better than the list.
+const DIFF_MAX_LINES = 40;
+
+/** A snapshot's text with site-specific help added: on a Google Sheet, the cells a snapshot cannot show. */
+async function fullPage(tabId, snap) {
+  if (!sheets.sheetOf(snap.url)) return { text: snap.text, weak: snap.weak };
+  const header = await sheets.sheetHeader(tabId);
+  const [title, url, ...rest] = snap.text.split("\n");
+  // No screenshot: the header shows the cells, and a picture of the grid
+  // gives the model nothing it can act on.
+  return { text: [title, url, header, ...rest].join("\n"), weak: null };
+}
+
+/** Snapshot `tabId` and describe it against the previous snapshot of that tab. */
+async function observe(chatId, tabId, { full = false } = {}) {
+  const prev = lastSnapshot(tabId);
+  let next;
+  try {
+    next = await snapshot(tabId);
+  } catch (err) {
+    return { error: String(err?.message ?? err) };
+  }
+  chatCtx(chatId).lastSnapshot = next;
+  const base = { url: next.url, title: next.title, interactiveCount: next.interactiveRefs.length };
+
+  if (!full && prev && prev.loaderId === next.loaderId && prev.url === next.url) {
+    const changes = diffSnapshots(prev, next);
+    const big = changes.length > DIFF_MAX_LINES ||
+      (changes.length > 8 && changes.length > next.entries.length / 2);
+    if (!big) {
+      return { ...base, full: false, changes: changes.length, text: changes.join("\n"), snapshot: next.text, weak: null };
+    }
+  }
+  const page = await fullPage(tabId, next);
+  return { ...base, full: true, text: page.text, snapshot: page.text, weak: page.weak };
+}
+
+/**
+ * Run an input op on `openerId`, let its effects settle, take over any tab it
+ * opened, and report the page afterwards. `settle: false` is for filling a
+ * field: nothing to load and nothing to open, so it is reported straight away.
+ */
+async function afterAction(chatId, openerId, act, { settle = true } = {}) {
   // Captured before the action, because the action is what disturbs it.
-  const before = await focusSnapshot();
+  const before = settle ? await focusSnapshot() : null;
   const result = await act();
-  const opened = await claimOpenedTab(openerId);
-  if (opened === null) return result;
+  const opened = settle ? await settleOrOpen(openerId) : null;
+  if (opened === null) return { ...result, page: await observe(chatId, openerId) };
 
   await keepInBackground(opened, before);
+  // This chat opened it, so it is one this chat may close when done with it.
+  void workspace.adopt(chatId, opened);
+
+  // Attached before it becomes the tab this chat drives. One that cannot be
+  // controlled (it never loaded, or landed on a page extensions may not
+  // touch) would otherwise fail every op after this one — while the action
+  // that opened it, which did work, got reported as an error.
+  try {
+    await attach(opened);
+  } catch (err) {
+    const t = await chrome.tabs.get(opened).catch(() => null);
+    return {
+      ...result,
+      newTabNotFollowed: {
+        tabId: opened,
+        url: t?.url || t?.pendingUrl || "",
+        reason: String(err?.message ?? err),
+      },
+      page: await observe(chatId, openerId),
+    };
+  }
 
   const ctx = chatCtx(chatId);
   ctx.tabId = opened;
-  await attach(ctx.tabId);
   persistTabs();
-  // This chat opened it, so it is one this chat may close when done with it.
-  void workspace.adopt(chatId, opened);
   driving(chatId, ctx.tabId); // the highlight and the group move with the agent
   try {
-    await nav.waitForIdle(ctx.tabId, { timeoutMs: 15000 });
+    await nav.waitForIdle(ctx.tabId, { timeoutMs: 10000 });
   } catch {
-    // Still loading is fine — the model snapshots next and can wait again.
+    // Still loading is fine — the model can wait again.
   }
   let info = {};
   try {
@@ -341,7 +468,11 @@ async function actThenFollow(chatId, openerId, act) {
   } catch {
     // Opened and closed again already.
   }
-  return { ...result, followedNewTab: { tabId: ctx.tabId, ...info } };
+  return {
+    ...result,
+    followedNewTab: { tabId: ctx.tabId, ...info },
+    page: await observe(chatId, ctx.tabId, { full: true }),
+  };
 }
 
 // ── op router ───────────────────────────────────────────────────────────────
@@ -400,7 +531,7 @@ const OPS = {
     void workspace.adopt(chatId, r.tabId);
     driving(chatId, ctx.tabId);
     await nav.waitForIdle(ctx.tabId);
-    return r;
+    return { ...r, page: await observe(chatId, ctx.tabId, { full: true }) };
   },
 
   async activate_tab({ chatId, tabId }) {
@@ -411,7 +542,7 @@ const OPS = {
     await attach(ctx.tabId);
     persistTabs();
     driving(chatId, ctx.tabId);
-    return r;
+    return { ...r, page: await observe(chatId, ctx.tabId, { full: true }) };
   },
 
   async navigate({ chatId, url, tabId }) {
@@ -429,26 +560,31 @@ const OPS = {
     await attach(id);
     persistTabs();
     driving(chatId, id);
-    return nav.navigate(id, url, { skipNavigate: wasRestricted });
+    const r = await nav.navigate(id, url, { skipNavigate: wasRestricted });
+    return { ...r, page: await observe(chatId, id, { full: true }) };
   },
 
   async go_back({ chatId, tabId }) {
-    return nav.goBack(await targetTab(chatId, tabId));
+    const id = await targetTab(chatId, tabId);
+    const r = await nav.goBack(id);
+    return { ...r, page: await observe(chatId, id, { full: true }) };
   },
 
   async wait_for_idle({ chatId, tabId, timeoutMs }) {
-    return nav.waitForIdle(await targetTab(chatId, tabId), { timeoutMs });
+    const id = await targetTab(chatId, tabId);
+    const r = await nav.waitForIdle(id, { timeoutMs });
+    return { ...r, page: await observe(chatId, id) };
   },
 
   async snapshot({ chatId, tabId }) {
     const id = await targetTab(chatId, tabId);
     const snap = await snapshot(id);
     chatCtx(chatId).lastSnapshot = snap;
+    const page = await fullPage(id, snap);
     return {
-      text: snap.text,
-      weak: snap.weak,
+      text: page.text,
+      weak: page.weak,
       interactiveCount: snap.interactiveRefs.length,
-      generation: snap.generation,
     };
   },
 
@@ -471,36 +607,61 @@ const OPS = {
 
   async click({ chatId, ref, tabId, button, clickCount }) {
     const id = await targetTab(chatId, tabId);
-    return actThenFollow(chatId, id, () => input.click(id, ref, { button, clickCount }));
+    return afterAction(chatId, id, () => input.click(id, ref, { button, clickCount }));
   },
 
   async hover({ chatId, ref, tabId }) {
-    return input.hover(await targetTab(chatId, tabId), ref);
+    const id = await targetTab(chatId, tabId);
+    return afterAction(chatId, id, () => input.hover(id, ref));
   },
 
-  async type({ chatId, ref, text, submit, clear, tabId }) {
+  // Filling a field sets nothing off, so only a submit waits to see what
+  // happens — and it can open results in a new tab just like a click can.
+  async type({ chatId, ref, text, submit, tabId }) {
     const id = await targetTab(chatId, tabId);
-    // Submitting a search can open results in a new tab just like a click can.
-    return actThenFollow(chatId, id, () => input.typeText(id, ref, text, { submit, clear }));
+    return afterAction(chatId, id, () => input.typeText(id, ref, text, { submit }), {
+      settle: Boolean(submit),
+    });
   },
 
-  async paste({ chatId, ref, text, submit, clear, tabId }) {
+  async paste({ chatId, ref, text, submit, tabId }) {
     const id = await targetTab(chatId, tabId);
-    // Same new-tab following as type: submitting a pasted value can open one.
-    return actThenFollow(chatId, id, () => input.pasteText(id, ref, text, { submit, clear }));
+    return afterAction(chatId, id, () => input.pasteText(id, ref, text, { submit }), {
+      settle: Boolean(submit),
+    });
   },
 
   async select_option({ chatId, ref, value, tabId }) {
-    return input.selectOption(await targetTab(chatId, tabId), ref, value);
+    const id = await targetTab(chatId, tabId);
+    return afterAction(chatId, id, () => input.selectOption(id, ref, value));
   },
 
-  async press_key({ chatId, key, tabId }) {
+  async press_key({ chatId, key, repeat, tabId }) {
     const id = await targetTab(chatId, tabId);
-    return actThenFollow(chatId, id, () => input.pressKey(id, key));
+    return afterAction(chatId, id, () => input.pressKey(id, key, { repeat }));
   },
 
   async scroll({ chatId, direction, amount, tabId }) {
-    return input.scroll(await targetTab(chatId, tabId), { direction, amount });
+    const id = await targetTab(chatId, tabId);
+    return afterAction(chatId, id, () => input.scroll(id, { direction, amount }));
+  },
+
+  async sheet_read({ chatId, range, tabId }) {
+    const id = await targetTab(chatId, tabId);
+    const { text } = await sheets.readRange(id, { range });
+    return { text };
+  },
+
+  // Both wait for what they need themselves: the write for Sheets to save,
+  // the selection for the Name box to take it.
+  async sheet_write({ chatId, start, rows, tabId }) {
+    const id = await targetTab(chatId, tabId);
+    return afterAction(chatId, id, () => sheets.writeCells(id, { start, rows }), { settle: false });
+  },
+
+  async sheet_select({ chatId, range, tabId }) {
+    const id = await targetTab(chatId, tabId);
+    return afterAction(chatId, id, () => sheets.gotoCell(id, range), { settle: false });
   },
 
   async screencast_start({ chatId, tabId }) {
@@ -601,12 +762,16 @@ function connect() {
       session.running = Boolean(msg.running);
       session.task = msg.task ?? null;
       session.approvalMode = msg.approvalMode ?? "submits";
-      if (!session.running) session.approval = null;
-      // A gate opened on this chat while it was in the background — surface
-      // it now that the chat is the one being viewed.
+      if (!session.running) {
+        session.approval = null;
+        session.ask = null;
+      }
+      // A gate or questions opened on this chat while it was in the
+      // background — surface them now that the chat is the one being viewed.
       if (session.pendingApprovals[msg.id]) session.approval = session.pendingApprovals[msg.id];
+      if (session.pendingAsks[msg.id]) session.ask = session.pendingAsks[msg.id];
       runChanged(session.chatId, session.running);
-      setBadge(Object.keys(session.pendingApprovals).length > 0);
+      setBadge(needsAttention());
 
       if (changedChat) {
         session.events = msg.events ?? [];
@@ -619,9 +784,10 @@ function connect() {
           task: session.task,
           events: session.events,
           approval: session.approval,
+          ask: session.ask,
           watching: session.watching,
           approvalMode: session.approvalMode,
-          pendingApprovalChatIds: Object.keys(session.pendingApprovals),
+          pendingApprovalChatIds: waitingChatIds(),
         });
         // The live view follows whichever chat is now being viewed.
         if (session.watching) {
@@ -736,9 +902,10 @@ chrome.runtime.onConnect.addListener((port) => {
         task: session.task,
         events: session.events,
         approval: session.approval,
+        ask: session.ask,
         watching: session.watching,
         approvalMode: session.approvalMode,
-        pendingApprovalChatIds: Object.keys(session.pendingApprovals),
+        pendingApprovalChatIds: waitingChatIds(),
       });
     } catch {
       panelPorts.delete(port);
@@ -779,7 +946,20 @@ chrome.runtime.onConnect.addListener((port) => {
       send({ type: "approval", id: msg.id, approved: msg.approved });
       session.approval = null;
       if (session.chatId) delete session.pendingApprovals[session.chatId];
-      setBadge(Object.keys(session.pendingApprovals).length > 0);
+      setBadge(needsAttention());
+      broadcastApprovalFlags();
+      persist();
+    }
+    if (msg.type === "answers") {
+      send({
+        type: "answers",
+        id: msg.id,
+        answers: Array.isArray(msg.answers) ? msg.answers : [],
+        dismissed: Boolean(msg.dismissed),
+      });
+      session.ask = null;
+      if (session.chatId) delete session.pendingAsks[session.chatId];
+      setBadge(needsAttention());
       broadcastApprovalFlags();
       persist();
     }

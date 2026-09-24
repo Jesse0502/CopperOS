@@ -74,9 +74,25 @@ The model acts with `click(ref: "e28")`. The extension resolves the ref to a
 `backendNodeId`, gets a live box model, and drives the pointer there. The model
 never handles coordinates, so it cannot invent one.
 
-Every snapshot regenerates the ref table. A ref from an older snapshot raises a
-`stale ref` error, which is returned to the model as a normal tool result — it
-reads it and re-snapshots. That is the intended recovery path, not a failure.
+A ref names one element for as long as it is on the page, across snapshots,
+and refs are kept per tab. A navigation clears the table, but numbering carries
+on, so a ref from the page before raises an `unknown ref` error instead of
+pointing at some other element. The error goes back to the model as a normal
+tool result, and it re-snapshots. That is the intended recovery path, not a
+failure.
+
+**Every action reports what it changed.** Since refs are stable, `click`,
+`paste`, `press_key` and the rest re-read the page afterwards and return the
+difference: `+` for what appeared, `~` for an element whose line changed (a
+value, `checked`, `expanded`), `-` for what is gone. After a navigation, or a
+change too big to read as a list, the result carries the whole page instead.
+The model no longer spends a turn on a snapshot after every action, and it can
+fill several fields in one response.
+
+Actions wait for what they set off before reporting: the page going quiet
+(300ms with no requests that matter), or a new tab opening. A click that
+changes nothing is back in about half a second. Filling a field without
+submitting sets nothing off, so it does not wait at all.
 
 **Vision escalates automatically.** `snapshot` scores the tree and attaches a
 badged screenshot when it looks unreliable: `>30%` of interactive elements
@@ -85,8 +101,39 @@ the image is ref `eN` — one vocabulary across both channels. Badges are drawn
 on the captured bitmap in an `OffscreenCanvas`, never injected into the page,
 so nothing shifts under the click you are about to make.
 
+A text-only model gets no screenshots at all: OpenRouter refuses a request
+with an image in it for such a model ("No endpoints found that support image
+input"). The broker checks OpenRouter's model catalog, or Ollama's
+`/api/show`, before each task. Without a screenshot, an unreliable snapshot
+comes with a note to wait and snapshot again. When a provider can't say
+(OpenAI), the first refusal marks the model as text-only, and the request
+is resent without its images.
+
 This is the main cost lever: an accessibility snapshot runs 2–5KB against
 100KB+ for a screenshot of the same page.
+
+## Google Sheets
+
+Sheets draws its grid on a canvas, so the accessibility tree has the toolbar,
+the menus and the sheet tabs, and not one cell. On a sheet, three tools reach
+the cells another way:
+
+- `sheet_read` fetches the sheet's own CSV export with your existing Google
+  login and renders it as a table with column letters and row numbers. A
+  snapshot of a sheet starts with a preview of `A1:J20` rendered the same way,
+  in place of a screenshot.
+- `sheet_write` enters a whole block of values in one call. It goes to the
+  first cell through the Name box, types each value (the first character as a
+  real key press, which opens the cell for editing), and presses Tab and Enter
+  between cells. Then it reads the block back and lists any cell that does not
+  show what was written, such as a value Sheets autocompleted from the column.
+- `sheet_select` selects a cell or range through the Name box, so toolbar
+  buttons, menus and `press_key` shortcuts (`Delete`, `Mod+b`, `Mod+z`) apply to it.
+
+`press_key` takes modifiers anywhere: `Shift+Tab`, `Mod+z` (⌘ on a Mac, Ctrl
+elsewhere), `Alt+Enter`, with an optional `repeat`. Copy, cut and paste
+shortcuts are refused, because they would use your clipboard. `type` and
+`paste` can leave out the ref to write into whatever has focus.
 
 ## Configuration
 
@@ -97,11 +144,40 @@ This is the main cost lever: an accessibility snapshot runs 2–5KB against
 | `OLLAMA_MODEL` | `minimax-m3:cloud` | Must support tools; vision too, or escalated screenshots are wasted. |
 | `OLLAMA_HOST` | `http://127.0.0.1:11434` | Ollama server. `/v1` is appended. |
 | `OLLAMA_NUM_CTX` | `32768` | Context window. Ollama's own default is far too small here — one snapshot can be several thousand tokens. |
+| `OPENROUTER_API_KEY` | — | Enables OpenRouter as a provider. Choose it in the extension's Settings page. |
+| `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Any [OpenRouter model id](https://openrouter.ai/models) that supports tools. |
 | `APPROVAL_MODE` | `submits` | `all` gates every click, `submits` gates form submissions and clicks the model flags `destructive`, `none` gates nothing. |
 | `PORT` | `7331` | Broker WebSocket port. Must match `BROKER_URL` in `extension/background.js`. |
+| `JEV_AI_API_KEY` | — | Enables Jev: task rounds, check-ins, memory ranking and the other judgments. Nothing else depends on it. |
+| `TASK_MAX_ROUNDS` | `15` | Most fresh-context rounds one message can start while Jev says there is more to do. |
+| `CHECK_IN_EVERY` | `10` | Steps between check-ins on a tracked task. `0` turns them off. |
+| `FRESH_CONTEXT_TOKENS` | `25000` | Context size at which a check-in hands the task over to a fresh round. |
+
+### Check-ins
+
+With Jev enabled, a long task doesn't run unsupervised. Every
+`CHECK_IN_EVERY` steps the model stops and says, in words, what it is doing,
+how, and what's next. Jev compares that, and the last 20 actions it actually
+took (each clicked element's label and how the page responded), with the
+user's instructions. On course, the model carries on. Off course (working on
+something nobody asked for, doing it a different way than asked, going in
+circles, or reporting work the page doesn't show), it gets a correction
+naming what's wrong. If it's still off course at the next check-in, the task
+continues in a fresh round, with the correction in its brief. At four
+off-course check-ins in a row, the task stops and waits for the user.
+
+Separately, a check-in hands over to a fresh round whenever the context has
+grown past `FRESH_CONTEXT_TOKENS`, including earlier turns of the chat. The
+model's check-in answer becomes the handover note, so the next round knows
+how the work was being done and keeps doing it that way.
 
 No API key is needed for a local model. `OLLAMA_API_KEY` is sent if set, for
 remote or cloud-hosted Ollama endpoints that require one.
+
+The provider, model and API keys can also be changed at any time from the
+extension's Settings page (Ollama, OpenAI or OpenRouter); those choices are
+saved to `storage/config.json` and take precedence over `.env`. With
+OpenRouter, the transcript cap follows the chosen model's context window.
 
 | `APPROVAL_TIMEOUT_MS` | `900000` | How long a gate waits for a human before giving up. |
 | `RECONNECT_GRACE_MS` | `30000` | How long an op waits for the extension to come back before failing. |
@@ -313,16 +389,17 @@ worker termination.
 | File | Role |
 |---|---|
 | `extension/cdp.js` | `chrome.debugger` attach/send. Enables Page, DOM, Accessibility — **not** Runtime. |
-| `extension/snapshot.js` | AX tree → ref-tagged text; the weak-snapshot heuristic. |
-| `extension/input.js` | Bezier pointer paths, keystroke timing, ref→box resolution. |
+| `extension/snapshot.js` | AX tree → ref-tagged text; stable per-tab refs; change lists between snapshots; the weak-snapshot heuristic. |
+| `extension/input.js` | Bezier pointer paths, the `PACE` timing table, key combos, ref→box resolution. |
+| `extension/sheets.js` | Google Sheets: CSV read, Name box navigation, block writes with read-back. |
 | `extension/som.js` | Badge compositing onto captured frames. |
 | `extension/nav.js` | Navigation, `networkAlmostIdle` waiting, AX-based text extraction. |
 | `extension/screencast.js` | Live view frames for the popup only. |
-| `extension/background.js` | WebSocket bridge and op router. |
+| `extension/background.js` | WebSocket bridge, op router, and the after-action settle-and-report step. |
 | `extension/workspace.js` | The one CopperOS tab group; which tabs are the agent's; closing them. |
 | `extension/presence.js` | Which tab carries the overlay; hiding it for screenshots. |
 | `extension/overlay.js` | The in-page frame, status pill, and agent cursor. |
-| `broker/src/tools.ts` | The 19 tool definitions. |
+| `broker/src/tools.ts` | The tool definitions, and how action results are shown to the model. |
 | `broker/src/agent.ts` | The loop, system prompt, history pruning. |
 | `broker/src/bridge.ts` | WebSocket RPC server. |
 | `broker/src/session.ts` | Chat transcripts on disk: load, sanitize, save. |
@@ -410,7 +487,7 @@ after a service-worker recycle and settles on its own.
 - **Model quality is the ceiling.** Ref discipline, `destructive` flagging, and
   not chaining blind actions are all instruction-following behaviours. Small
   local models drop them well before they run out of context. A model without
-  vision capability will silently waste every escalated screenshot.
+  vision works, but is blind wherever the accessibility tree is (canvas, icon-only UIs).
 - **No streaming.** The loop waits for each complete response, so the popup
   shows nothing between a tool call and the next event.
 - **One tab at a time.** The broker tracks a single current tab; `list_tabs`

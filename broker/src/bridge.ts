@@ -82,6 +82,12 @@ const approvals = new Map<
   string,
   { chatId: string; text: string; settle: (outcome: ApprovalOutcome) => void }
 >();
+// Open ask_user forms, kept for the same reason as approvals: a panel that
+// opens later, or a restarted service worker, must still be able to show them.
+const asks = new Map<
+  string,
+  { chatId: string; ask: AskRequest; settle: (outcome: AskOutcome) => void }
+>();
 const connectionWaiters: Array<() => void> = [];
 
 export function isConnected(): boolean {
@@ -125,6 +131,11 @@ export function start(port: number, handlers: BridgeHandlers): WebSocketServer {
     for (const [id, a] of approvals) {
       ws.send(JSON.stringify({
         type: "agent_event", event: "approval_request", id, chatId: a.chatId, text: a.text,
+      }));
+    }
+    for (const [id, a] of asks) {
+      ws.send(JSON.stringify({
+        type: "agent_event", event: "ask_request", id, chatId: a.chatId, ask: a.ask,
       }));
     }
 
@@ -182,6 +193,18 @@ export function start(port: number, handlers: BridgeHandlers): WebSocketServer {
       if (msg.type === "approval") {
         approvals.get(msg.id)?.settle(msg.approved ? "approved" : "denied");
         approvals.delete(msg.id);
+        return;
+      }
+      if (msg.type === "answers") {
+        const outcome: AskOutcome = msg.dismissed
+          ? "dismissed"
+          : {
+              answers: (Array.isArray(msg.answers) ? msg.answers : []).map((a: unknown) =>
+                typeof a === "string" && a.trim() ? a.trim() : null,
+              ),
+            };
+        asks.get(msg.id)?.settle(outcome);
+        asks.delete(msg.id);
         return;
       }
       if (msg.type === "get_config") {
@@ -363,6 +386,57 @@ export async function requestApproval(
     if (isConnected()) {
       client!.send(JSON.stringify({
         type: "agent_event", event: "approval_request", id, chatId, text,
+      }));
+    }
+  });
+}
+
+/** One question in an ask_user form. The panel always adds a free-text answer after `options`. */
+export type AskQuestion = { question: string; options: string[]; multiple: boolean };
+export type AskRequest = { intro: string; questions: AskQuestion[] };
+/** One answer per question, null where the user skipped it. */
+export type AskOutcome = { answers: Array<string | null> } | "dismissed" | "unanswered";
+
+/**
+ * Put questions to the human as a form in the panel, and wait for the
+ * answers. Held open, re-sent on reconnect, and reported as "unanswered"
+ * after APPROVAL_TIMEOUT_MS or on cancel — the same lifecycle as
+ * requestApproval, for the same reasons.
+ */
+export async function requestAnswers(
+  ask: AskRequest,
+  chatId: string,
+  timeoutMs = APPROVAL_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<AskOutcome> {
+  if (signal?.aborted) return "unanswered";
+  if (!isConnected() && !(await waitForReconnect(RECONNECT_GRACE_MS))) {
+    return "unanswered";
+  }
+  const id = `q${++seq}`;
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      asks.delete(id);
+      resolve("unanswered");
+    }, timeoutMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      asks.delete(id);
+      resolve("unanswered");
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    asks.set(id, {
+      chatId,
+      ask,
+      settle: (outcome) => {
+        signal?.removeEventListener("abort", onAbort);
+        clearTimeout(timer);
+        resolve(outcome);
+      },
+    });
+    if (isConnected()) {
+      client!.send(JSON.stringify({
+        type: "agent_event", event: "ask_request", id, chatId, ask,
       }));
     }
   });

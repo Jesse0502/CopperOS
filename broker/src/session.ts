@@ -33,6 +33,12 @@ export type Session = {
   model: string;
   /** The user's prompts, oldest first — a readable index of the transcript. */
   tasks: string[];
+  /**
+   * Answers the user gave to ask_user forms, as "question — answer". Kept
+   * beside `tasks` because they count as much as anything the user typed
+   * when form entries are checked against what the user said.
+   */
+  answers: string[];
   /** Full history minus the system prompt, which is a frozen constant. */
   messages: Msg[];
   /** Per-chat settings — each agent is independent, so these are not global. */
@@ -58,7 +64,7 @@ function newId(): string {
 export function blank(model: string): Session {
   const now = new Date().toISOString();
   return {
-    id: newId(), createdAt: now, updatedAt: now, model, tasks: [], messages: [],
+    id: newId(), createdAt: now, updatedAt: now, model, tasks: [], answers: [], messages: [],
     settings: { approvalMode: DEFAULT_APPROVAL_MODE },
   };
 }
@@ -66,8 +72,13 @@ export function blank(model: string): Session {
 /**
  * Screenshots are never worth keeping: they are megabytes of base64, and their
  * badge numbers refer to refs that stopped existing the moment the page moved.
+ * Also how agent.ts makes a request fit for a model that cannot take images,
+ * with its own `note` in place of each one.
  */
-function stripImages(messages: Msg[]): Msg[] {
+export function stripImages(
+  messages: Msg[],
+  note = "(screenshot not kept in the transcript)",
+): Msg[] {
   return messages.map((m) => {
     if (m.role !== "tool" || typeof m.content === "string") return m;
     const parts = m.content as unknown as Array<
@@ -75,7 +86,7 @@ function stripImages(messages: Msg[]): Msg[] {
     >;
     if (!parts.some((p) => p.type === "image_url")) return m;
     const kept = parts.filter((p) => p.type === "text");
-    kept.push({ type: "text", text: "(screenshot not kept in the transcript)" });
+    kept.push({ type: "text", text: note });
     return { ...m, content: kept as unknown as typeof m.content };
   });
 }
@@ -141,6 +152,7 @@ async function loadById(id: string, model: string): Promise<Session> {
     model,
     messages: sanitize(raw.messages ?? []),
     tasks: raw.tasks ?? [],
+    answers: raw.answers ?? [],
     settings: { approvalMode: raw.settings?.approvalMode ?? DEFAULT_APPROVAL_MODE },
   };
 }

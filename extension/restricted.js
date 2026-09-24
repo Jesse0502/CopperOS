@@ -4,10 +4,12 @@
 // background.js (to route around them with the plain tabs API instead).
 
 const RESTRICTED_PREFIXES = [
-  "chrome://", "chrome-extension://", "chrome-search://",
-  "edge://", "about:", "devtools://", "view-source:",
+  // "chrome://", "chrome-extension://", "chrome-search://",
+  // "edge://", "about:", "devtools://", "view-source:",
 ];
-const RESTRICTED_HOSTS = ["chromewebstore.google.com", "chrome.google.com"];
+const RESTRICTED_HOSTS = [
+  // "chromewebstore.google.com", "chrome.google.com"
+];
 
 export function isRestrictedUrl(url) {
   if (!url) return true; // no URL yet — e.g. a tab still initializing

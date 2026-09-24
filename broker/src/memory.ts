@@ -9,7 +9,7 @@
 
 import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { suggestMemoryTopic } from "./jev.js";
+import { LIKELY_AT, rankSources } from "./jev.js";
 import { storageDir } from "./session.js";
 
 const ROOT = path.join(storageDir, "memories");
@@ -91,6 +91,16 @@ export async function saveMemory(topic: string, title: string, content: string):
   return meta;
 }
 
+/** Every saved memory with its body. */
+export function allMemories(): Promise<MemoryHit[]> {
+  return walkMemories();
+}
+
+/** A memory's id in rankings and tool output: its topic path and slug. */
+export function memoryId(m: MemoryMeta): string {
+  return `${m.topic}/${m.slug}`;
+}
+
 /** Every saved memory with its body, tolerant of unreadable or corrupt files. */
 async function walkMemories(dir = ROOT, topicParts: string[] = []): Promise<MemoryHit[]> {
   let entries;
@@ -126,6 +136,16 @@ async function walkMemories(dir = ROOT, topicParts: string[] = []): Promise<Memo
   return hits;
 }
 
+/**
+ * Every memory last written before `cutoff` (an ISO time) — what tools.ts's
+ * grounding check may count as something the user told us. A memory saved
+ * or changed after the chat began is left out: the model writes memories
+ * itself, so otherwise it could `remember` a guess and then cite it as fact.
+ */
+export async function memoriesBefore(cutoff: string): Promise<MemoryHit[]> {
+  return (await walkMemories()).filter((h) => h.updated && h.updated < cutoff);
+}
+
 const STOPWORDS = new Set(["the", "a", "an", "of", "to", "for", "and", "or", "is", "are", "my", "me", "on", "in", "at"]);
 
 function words(s: string): string[] {
@@ -137,39 +157,64 @@ function score(query: string[], hit: MemoryHit): number {
   return query.reduce((n, q) => n + (haystack.includes(q) ? 1 : 0), 0);
 }
 
+const MAX_RESULTS = 5;
+const CONVERSATION = "conversation";
+
 /**
- * Local keyword search plus, when Jev is configured, its advisory pick of the
- * most relevant existing topic. Jev's answer only re-ranks results and is
- * surfaced as `verdict` — it never suppresses a keyword match, since search
- * is free and Jev's judgment here is new and unproven, unlike the
- * cost-driven approval gate in tools.ts.
+ * The saved memories most likely to hold what `query` is looking for, best
+ * first. With Jev configured, every memory — and what the user has said in
+ * this chat, as one more source — is ranked against the query (see
+ * rankSources), so a memory can come back without sharing a word with the
+ * query, and one that shares words but not meaning stays out. Without Jev,
+ * or if the ranking fails, this falls back to keyword overlap. `p` is Jev's
+ * probability, absent for keyword results; `inConversation` is how likely
+ * the user's own messages already hold the answer.
  */
 export async function searchMemories(
   query: string,
+  userSaid: string[],
   chatId: string,
-): Promise<{ verdict: string | null; results: MemoryHit[] }> {
+  signal?: AbortSignal,
+): Promise<{
+  note: string;
+  results: Array<MemoryHit & { p?: number }>;
+  inConversation?: number;
+}> {
   const all = await walkMemories();
-  const q = words(query);
+  if (all.length === 0) return { note: "", results: [] };
 
-  let boostTopic: string | null = null;
-  let verdict: string | null = null;
-  const topics = [...new Set(all.map((h) => h.topic))];
-  if (topics.length > 0) {
-    const suggestion = await suggestMemoryTopic(query, topics, chatId);
-    if (suggestion) {
-      boostTopic = suggestion.topic;
-      verdict = `Jev: likely relevant topic is "${suggestion.topic}" (confidence ${suggestion.confidence.toFixed(2)}).`;
-    } else {
-      verdict = "Jev: no existing topic looked relevant to this query — showing keyword matches anyway.";
-    }
+  const said = userSaid.join("\n\n");
+  const ranked = await rankSources(
+    [`the answer to: "${query}"`],
+    [
+      ...(said ? [{ id: CONVERSATION, text: `What the user has said in this chat: ${said.slice(0, 8000)}` }] : []),
+      ...all.map((h) => ({ id: memoryId(h), text: `Saved memory — ${h.title}: ${h.content}` })),
+    ],
+    chatId,
+    signal,
+  );
+  if (ranked) {
+    const byId = new Map(all.map((h) => [memoryId(h), h]));
+    const inConversation = ranked[0].find((r) => r.id === CONVERSATION)?.p;
+    const results = ranked[0]
+      .filter((r) => r.id !== CONVERSATION && r.p >= LIKELY_AT)
+      .slice(0, MAX_RESULTS)
+      .map((r) => ({ ...byId.get(r.id)!, p: r.p }));
+    return {
+      note: results.length
+        ? `Jev ranked all ${all.length} saved memories; these are the likeliest to hold it, best first.`
+        : `Jev checked all ${all.length} saved memories: none looks like it holds this.`,
+      results,
+      inConversation,
+    };
   }
 
-  const ranked = all
-    .map((hit) => ({ hit, s: score(q, hit) + (hit.topic === boostTopic ? 2 : 0) }))
+  const q = words(query);
+  const results = all
+    .map((hit) => ({ hit, s: score(q, hit) }))
     .filter(({ s }) => s > 0)
     .sort((a, b) => b.s - a.s)
-    .slice(0, 5)
+    .slice(0, MAX_RESULTS)
     .map(({ hit }) => hit);
-
-  return { verdict, results: ranked };
+  return { note: "Keyword matches (Jev ranking unavailable).", results };
 }
