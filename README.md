@@ -5,8 +5,9 @@
 change between versions. See [Known limits](#known-limits) before assuming
 something is a bug, and [Contributing](#contributing) if you'd like to help.
 
-Prompt-driven browser agent. You type a task, a local Ollama model drives a real
-Chrome tab — in your own profile, with your existing logins.
+Prompt-driven browser agent. You type a task, the model you choose (Ollama,
+OpenRouter or OpenAI) drives a real Chrome tab — in your own profile, with your
+existing logins.
 
 Perception is accessibility-tree first (cheap, exact), with badged screenshots
 escalated automatically only when the tree goes blind. Input goes through CDP
@@ -32,27 +33,39 @@ tool-result messages — which the vision escalation depends on.
 
 ## Setup
 
-You need Ollama running with a model that has both **tools** and **vision**
-capability (`ollama show <model>` lists them):
+Step-by-step guide: [copper.jassydev.com/setup](https://copper.jassydev.com/setup).
+
+You need Node.js 20 or newer and a model that supports **tool calling** — an
+OpenRouter or OpenAI API key, or a model in Ollama. Vision is optional: it lets
+the agent use screenshots when the accessibility tree goes blind.
+
+```bash
+git clone https://github.com/Jesse0502/CopperOS.git
+cd CopperOS/broker
+npm install
+npm start
+```
+
+Then load the extension: `chrome://extensions` → enable **Developer mode** →
+**Load unpacked** → select `extension/`. Keep only one copy of CopperOS enabled —
+the broker serves one client at a time (see [Troubleshooting](#troubleshooting)).
+
+Click the CopperOS toolbar icon to open the side panel. The dot turns green when
+it finds the broker; until then the panel shows how to start it. Choose a
+provider, key and model under ⋮ → **Settings**, then type a task.
+
+### Using Ollama
+
+Pick a model with **tools** capability (`ollama show <model>` lists them):
 
 ```bash
 ollama serve                  # or just run the desktop app
 ollama list                   # what you already have
-
-cd broker
-npm install
-cp .env.example .env          # set OLLAMA_MODEL to a model from `ollama list`
-npm start
+cp .env.example .env          # optional: set OLLAMA_MODEL to a model from `ollama list`
 ```
 
-The broker checks Ollama at startup and warns if it is unreachable or if
-`OLLAMA_MODEL` is not installed, rather than failing mid-task.
-
-Then load the extension: `chrome://extensions` → enable **Developer mode** →
-**Load unpacked** → select `extension/`.
-
-Open the extension popup. The dot turns green when it finds the broker. Type a
-task and hit Run.
+With Ollama as the provider, the broker checks it at startup and warns if it is
+unreachable or if the model is not installed, rather than failing mid-task.
 
 CLI alternative:
 

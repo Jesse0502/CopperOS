@@ -6,3 +6,5 @@ storage/
 .DS_Store
 *.log
 index.html
+website
+*.zip

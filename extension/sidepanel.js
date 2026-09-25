@@ -290,6 +290,26 @@ function renderStatus() {
   dot.classList.toggle("busy", running);
   dot.classList.toggle("on", connected);
   status.textContent = running ? "running…" : connected ? "connected" : "broker offline";
+  renderOffline();
+}
+
+// The setup card is held back briefly: every panel opens disconnected until
+// the service worker reports in, and a broker restarting under `npm run dev`
+// drops for a moment too. Neither should flash it.
+const OFFLINE_DELAY_MS = 1500;
+let offlineTimer = null;
+
+function renderOffline() {
+  if (connected) {
+    clearTimeout(offlineTimer);
+    offlineTimer = null;
+    document.body.classList.remove("offline");
+  } else if (!offlineTimer && !document.body.classList.contains("offline")) {
+    offlineTimer = setTimeout(() => {
+      offlineTimer = null;
+      if (!connected) document.body.classList.add("offline");
+    }, OFFLINE_DELAY_MS);
+  }
 }
 
 function updateSendDisabled() {

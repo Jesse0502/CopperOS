@@ -446,6 +446,79 @@
         transform: scale(0.98);
       }
 
+      /* ── no broker ──────────────────────────────────────────────────────── */
+      /* What a first run (or a store reviewer) sees before a broker is
+         running. Shown by sidepanel.js a moment after the connection drops. */
+      #offline {
+        display: none;
+        margin: 14px 12px 0;
+        padding: 16px 14px 14px;
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        background: var(--surface);
+      }
+      body.offline #offline {
+        display: block;
+        animation: riseIn 0.22s ease-out both;
+      }
+      body.offline #empty,
+      body.offline #composer {
+        display: none;
+      }
+      #offline h2 {
+        margin: 0 0 6px;
+        font-size: 14.5px;
+        font-weight: 650;
+      }
+      #offline p {
+        margin: 0 0 10px;
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+      #offline code {
+        display: block;
+        margin: 0 0 12px;
+        padding: 7px 10px;
+        border-radius: 7px;
+        background: var(--code-bg);
+        font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+        color: var(--text);
+      }
+      #offline .offline-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+      }
+      #offline a.btn {
+        display: inline-flex;
+        align-items: center;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 6px 11px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        color: var(--text);
+        text-decoration: none;
+        transition: background-color 0.15s ease;
+      }
+      #offline a.btn:hover {
+        background: var(--surface-2);
+      }
+      #offline a.btn.primary {
+        background: var(--brand);
+        border-color: var(--brand);
+        color: var(--brand-fg);
+      }
+      #offline a.btn.primary:hover {
+        background: var(--brand-strong);
+      }
+      #offline small {
+        display: block;
+        margin-top: 10px;
+        font-size: 11.5px;
+        color: var(--text-faint);
+      }
+
       .row {
         display: flex;
         gap: 7px;
@@ -1507,6 +1580,33 @@
             <span id="live-badge">LIVE</span>
             <img id="live" alt="live browser view" />
           </div>
+        </div>
+
+        <div id="offline" role="status">
+          <h2>Start the CopperOS broker</h2>
+          <p>
+            CopperOS runs on your own computer. This extension does the
+            clicking and typing; a small program called the broker does the
+            thinking. Start it and this panel connects on its own.
+          </p>
+          <code>cd CopperOS/broker &amp;&amp; npm start</code>
+          <div class="offline-actions">
+            <a
+              class="btn primary"
+              href="https://copper.jassydev.com/setup"
+              target="_blank"
+              rel="noopener"
+              >Setup guide</a
+            >
+            <a
+              class="btn"
+              href="https://github.com/Jesse0502/CopperOS"
+              target="_blank"
+              rel="noopener"
+              >Source on GitHub</a
+            >
+          </div>
+          <small>Looking for it at 127.0.0.1:7331</small>
         </div>
 
         <div id="log">
