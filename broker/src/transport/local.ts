@@ -5,6 +5,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import {
   abortedError,
+  requestMessage,
   type AskOutcome,
   type BridgeHandlers,
   type ChatState,
@@ -77,7 +78,7 @@ export class LocalServer implements Transport {
       // A reconnecting extension may have lost track of any open approval
       // prompts along with its service worker — for every chat, not just the
       // one it is about to ask to resume. Bring it back up to date.
-      for (const request of this.shown.values()) ws.send(frame(request));
+      for (const request of this.shown.values()) ws.send(JSON.stringify(requestMessage(request)));
 
       ws.on("message", (raw) => this.onMessage(ws, raw.toString(), handlers));
 
@@ -273,20 +274,10 @@ export class LocalServer implements Transport {
 
   show(request: PendingRequest): void {
     this.shown.set(request.id, request);
-    if (this.isConnected()) this.client!.send(frame(request));
+    if (this.isConnected()) this.client!.send(JSON.stringify(requestMessage(request)));
   }
 
   withdraw(requestId: string): void {
     this.shown.delete(requestId);
   }
-}
-
-/** A request as the panel expects it: an approval_request or ask_request event. */
-function frame(request: PendingRequest): string {
-  const { id, chatId } = request;
-  return JSON.stringify(
-    request.kind === "approval"
-      ? { type: "agent_event", event: "approval_request", id, chatId, text: request.text }
-      : { type: "agent_event", event: "ask_request", id, chatId, ask: request.ask },
-  );
 }

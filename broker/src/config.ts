@@ -21,8 +21,9 @@ export const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
 function defaults(): LLMConfig {
   return {
     // Ollama was the only provider before Settings existed — keep it the
-    // default so upgrading an .env-only setup doesn't change behavior.
-    provider: "ollama",
+    // default so upgrading an .env-only setup doesn't change behavior. The
+    // cloud, which cannot reach anyone's Ollama, sets LLM_PROVIDER.
+    provider: (process.env.LLM_PROVIDER as Provider | undefined) ?? "ollama",
     ollama: {
       host: process.env.OLLAMA_HOST ?? "http://127.0.0.1:11434",
       model: process.env.OLLAMA_MODEL ?? "minimax-m3:cloud",

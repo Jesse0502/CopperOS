@@ -25,4 +25,5 @@ new CopperStack(app, `CopperOS-${stage}`, {
   extensionId: context("extensionId"),
   emailDomain: context("emailDomain"),
   alertEmail: context("alertEmail"),
+  testModel: context("testModel") === "true",
 });

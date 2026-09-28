@@ -81,6 +81,14 @@ export function newRequestId(chatId: string): string {
   return `${chatId}/${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/** A request as the panel expects it: an approval_request or ask_request event. */
+export function requestMessage(request: PendingRequest): Record<string, unknown> {
+  const { id, chatId } = request;
+  return request.kind === "approval"
+    ? { type: "agent_event", event: "approval_request", id, chatId, text: request.text }
+    : { type: "agent_event", event: "ask_request", id, chatId, ask: request.ask };
+}
+
 /** The chat a request id belongs to, or null if it is not one of ours. */
 export function requestChatId(requestId: string): string | null {
   const i = requestId.lastIndexOf("/");

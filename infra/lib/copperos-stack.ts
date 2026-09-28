@@ -51,6 +51,8 @@ export type CopperStackProps = StackProps & {
   emailDomain: string;
   /** Where alarms go. */
   alertEmail: string;
+  /** Deploy the scripted test model (broker/src/cloud/testing/) — never in prod. */
+  testModel: boolean;
 };
 
 export class CopperStack extends Stack {
@@ -210,8 +212,14 @@ export class CopperStack extends Stack {
     const authorizerFn = fn("Authorize", "authorize.ts", {
       memorySize: 256,
       timeout: Duration.seconds(10),
-      environment: { USER_POOL_ID: users.userPoolId, CLIENT_ID: client.userPoolClientId },
+      environment: {
+        USER_POOL_ID: users.userPoolId,
+        CLIENT_ID: client.userPoolClientId,
+        CONNECTIONS_TABLE: connections.tableName,
+      },
     });
+    // Spends the one-time passes running tasks join the socket with.
+    connections.grantReadWriteData(authorizerFn);
 
     const shared = {
       STAGE: stage,
@@ -223,12 +231,17 @@ export class CopperStack extends Stack {
       TRANSCRIPTS_BUCKET: transcripts.bucketName,
       USER_KEYS_KEY: userKeys.keyArn,
       JEV_PARAM: jevParam,
+      // Nobody's Ollama is reachable from here.
+      LLM_PROVIDER: "openrouter",
     };
 
     const agentFn = fn("Agent", "agent-handler.ts", {
       memorySize: 512,
       timeout: Duration.minutes(15),
-      environment: shared,
+      environment: { ...shared, TASK_LIMIT_MS: String(15 * 60_000) },
+      // Never run a task twice by itself: a retry would repeat what the
+      // first attempt already did in the user's browser.
+      retryAttempts: 0,
     });
 
     const relayFn = fn("Relay", "relay.ts", {
@@ -301,5 +314,15 @@ export class CopperStack extends Stack {
     new CfnOutput(this, "UserPoolId", { value: users.userPoolId });
     new CfnOutput(this, "ClientId", { value: client.userPoolClientId });
     new CfnOutput(this, "SignInUrl", { value: signIn.baseUrl() });
+
+    // ── dev only: the scripted test model ───────────────────────────────
+    if (props.testModel && !prod) {
+      const fakeModel = fn("FakeModel", "testing/fake-model.ts", {
+        memorySize: 128,
+        timeout: Duration.seconds(10),
+      });
+      const url = fakeModel.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
+      new CfnOutput(this, "TestModelUrl", { value: url.url });
+    }
   }
 }

@@ -322,18 +322,26 @@ const FINISH_MS = 30_000;
 class Clock {
   private readonly start = Date.now();
   private readonly timer: NodeJS.Timeout | null = null;
+  // When whatever is still in flight gets stopped, or null for never.
+  private readonly hardAt: number | null;
+  private readonly margin: number = 0;
   timedOut = false;
 
   constructor(
     private readonly usedBefore: number,
-    private readonly limitMs: number | null,
+    limitMs: number | null,
     abort: AbortController,
+    endBy: number | null = null,
   ) {
-    if (limitMs === null) return;
+    const byLimit = limitMs === null ? null : this.start + limitMs - usedBefore;
+    this.hardAt =
+      byLimit === null ? endBy : endBy === null ? byLimit : Math.min(byLimit, endBy);
+    if (this.hardAt === null) return;
+    this.margin = Math.min(FINISH_MS, (limitMs ?? this.hardAt - this.start) / 4);
     this.timer = setTimeout(() => {
       this.timedOut = true;
       abort.abort(new TimeUp());
-    }, Math.max(0, limitMs - usedBefore));
+    }, Math.max(0, this.hardAt - this.start));
   }
 
   /** Active time spent on the task so far, this run included. */
@@ -343,8 +351,7 @@ class Clock {
 
   /** Whether it is too late to start another step. */
   late(): boolean {
-    if (this.limitMs === null) return false;
-    return this.used() >= this.limitMs - Math.min(FINISH_MS, this.limitMs / 4);
+    return this.hardAt !== null && Date.now() >= this.hardAt - this.margin;
   }
 
   stop(): void {
@@ -352,8 +359,12 @@ class Clock {
   }
 }
 
-/** A run's time limit: the task's, in ms of active time. Null or absent means none. */
-export type RunOptions = { limitMs?: number | null };
+/**
+ * A run's time limits. `limitMs` is the task's, in ms of active time across
+ * its pauses; `endBy` is when this run itself must have stopped (epoch ms) —
+ * a Lambda's own deadline. Null or absent means none.
+ */
+export type RunOptions = { limitMs?: number | null; endBy?: number | null };
 
 // How much of the chat classifyIntent sees: enough to read a short
 // follow-up in context, not the whole transcript.
@@ -790,7 +801,7 @@ export class Agent {
 
   async run(task: string, options: RunOptions = {}): Promise<RunResult> {
     const { abort, active, budget } = await this.begin();
-    this.clock = new Clock(0, options.limitMs ?? null, abort);
+    this.clock = new Clock(0, options.limitMs ?? null, abort, options.endBy ?? null);
 
     if (this.resumeNoticePending) {
       this.session.messages.push({ role: "user", content: RESUME_NOTICE });
@@ -898,7 +909,12 @@ export class Agent {
     }
     const { abort, active, budget } = setup;
     // Waiting on the person did not count against the limit; the time before it did.
-    this.clock = new Clock(paused.loop.timeUsedMs ?? 0, options.limitMs ?? null, abort);
+    this.clock = new Clock(
+      paused.loop.timeUsedMs ?? 0,
+      options.limitMs ?? null,
+      abort,
+      options.endBy ?? null,
+    );
     const usage: Usage = { input: 0, output: 0, cached: 0 };
     this.jobTask = paused.loop.jobTask;
     // The task file may be gone (deleted by hand); carry on untracked then.

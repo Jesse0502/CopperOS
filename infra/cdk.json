@@ -6,6 +6,7 @@
     "extensionId": "cpiaailfifjppgijgnjdepcpokkmeoje",
     "emailDomain": "copper.jassydev.com",
     "alertEmail": "hello@jassydev.com",
-    "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false
+    "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false,
+    "testModel": true
   }
 }

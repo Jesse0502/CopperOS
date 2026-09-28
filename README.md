@@ -420,11 +420,13 @@ worker termination.
 | `broker/src/agent.ts` | The loop, system prompt, history pruning. |
 | `broker/src/bridge.ts` | The agent core's link to the extension: ops, progress lines, approvals and questions, over whichever `Transport` is set. |
 | `broker/src/transport/local.ts` | The local broker's `Transport`: a WebSocket server on 127.0.0.1 that the extension connects to. |
+| `broker/src/transport/cloud.ts` | The hosted agent's `Transport`: ops straight to the browser through API Gateway, results back over the task's own worker connection, big results reassembled from chunks. |
 | `broker/src/session.ts` | Chat transcripts: load, sanitize, save. |
 | `broker/src/memory.ts` | Durable cross-chat facts: save, search. |
 | `broker/src/store/store.ts` | The `Store` interface: where chats, memories, task progress and settings are kept, per user. |
 | `broker/src/store/fs.ts` | The local broker's store: files under `storage/`, one user. |
-| `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect, the relay, and the agent. |
+| `broker/src/store/cloud.ts` | The hosted store: DynamoDB, S3 transcripts, and users' API keys encrypted with KMS. |
+| `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect (users and task workers), the relay (the hosted `index.ts`), and the agent. `testing/` holds a scripted model deployed to dev stacks only. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
 | `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB, S3, KMS, alarms. |
 
