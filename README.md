@@ -424,7 +424,9 @@ worker termination.
 | `broker/src/memory.ts` | Durable cross-chat facts: save, search. |
 | `broker/src/store/store.ts` | The `Store` interface: where chats, memories, task progress and settings are kept, per user. |
 | `broker/src/store/fs.ts` | The local broker's store: files under `storage/`, one user. |
+| `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect, the relay, and the agent. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
+| `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB, S3, KMS, alarms. |
 
 ## Testing without Chrome
 

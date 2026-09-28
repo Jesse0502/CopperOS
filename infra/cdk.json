@@ -1,0 +1,11 @@
+{
+  "app": "npx tsx bin/copperos.ts",
+  "context": {
+    "stage": "dev",
+    "google": false,
+    "extensionId": "cpiaailfifjppgijgnjdepcpokkmeoje",
+    "emailDomain": "copper.jassydev.com",
+    "alertEmail": "hello@jassydev.com",
+    "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false
+  }
+}

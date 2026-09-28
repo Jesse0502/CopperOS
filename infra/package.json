@@ -1,0 +1,25 @@
+{
+  "name": "copperos-infra",
+  "version": "0.1.0",
+  "description": "AWS CDK app for the hosted CopperOS backend.",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "synth": "cdk synth",
+    "diff": "cdk diff",
+    "deploy": "cdk deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "aws-cdk-lib": "^2.271.0",
+    "constructs": "^10.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.3",
+    "aws-cdk": "^2.1143.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3"
+  }
+}
