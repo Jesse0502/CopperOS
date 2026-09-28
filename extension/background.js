@@ -789,7 +789,7 @@ function wire(sock) {
       // The chat we already knew about, if any — the broker resumes it (or
       // falls back to the last-viewed chat on a true cold start) and answers
       // with a chat_state.
-      send({ type: "hello", client: "extension", version: "0.1.0", chatId: session.chatId });
+      send({ type: "hello", client: "extension", version: chrome.runtime.getManifest().version, chatId: session.chatId });
     })();
     clearInterval(pingTimer);
     // MV3 kills idle service workers; steady WebSocket traffic keeps this one
@@ -876,6 +876,18 @@ function wire(sock) {
         broadcastToPanels({ type: "run_state", running: session.running, task: session.task });
         broadcastToPanels({ type: "clock", clock: session.clock });
       }
+      return;
+    }
+
+    // "Delete my account" is done: everything on the server is gone,
+    // including the sign-in, so sign out here too.
+    if (msg.type === "account_deleted") {
+      disconnect();
+      await auth.signOut().catch(() => {});
+      signedIn = null;
+      await clearSession();
+      announce(false);
+      broadcastToPanels({ type: "account_deleted" });
       return;
     }
 
@@ -1060,6 +1072,7 @@ chrome.runtime.onConnect.addListener((port) => {
       announce(false);
       return;
     }
+    if (msg.type === "delete_account" && backend === "cloud") send({ type: "delete_account" });
     if (msg.type === "task") send({ type: "task", text: msg.text, chatId: session.chatId });
     if (msg.type === "cancel") send({ type: "cancel", chatId: session.chatId });
     if (msg.type === "reset") send({ type: "reset" });
@@ -1114,6 +1127,18 @@ chrome.runtime.onConnect.addListener((port) => {
       }
     }
   });
+});
+
+// Anyone updating from 0.1 used the broker on their own computer — it was
+// the only kind. Keep them there; only new installs start on the cloud.
+chrome.runtime.onInstalled.addListener(({ reason, previousVersion }) => {
+  if (reason !== "update" || !previousVersion?.startsWith("0.1.")) return;
+  void (async () => {
+    const { backend: chosen } = await chrome.storage.local.get("backend").catch(() => ({}));
+    if (chosen) return;
+    await setBackend("local");
+    await switchBackend("local");
+  })();
 });
 
 /** The panel as a freshly opened one would get it. */

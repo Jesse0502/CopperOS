@@ -661,6 +661,8 @@ function renderAccount() {
   row.hidden = backend !== "cloud";
   $("account-who").textContent = account ? `Signed in as ${account.email ?? "you"}` : "Not signed in";
   $("account-btn").textContent = account ? "Sign out" : "Sign in";
+  $("delete-account").hidden = !(backend === "cloud" && account);
+  $("delete-account").disabled = false;
   // Nobody's Ollama is reachable from the cloud.
   $("cfg-provider").querySelector('option[value="ollama"]').hidden = backend === "cloud";
 }
@@ -732,6 +734,20 @@ for (const b of document.querySelectorAll(".segmented [data-backend]")) {
 $("account-btn").addEventListener("click", () => {
   port.postMessage({ type: account ? "sign_out" : "sign_in" });
 });
+$("delete-account").addEventListener("click", () => {
+  const sure = confirm(
+    "Delete your CopperOS account?\n\nThis permanently deletes your chats, memories and settings " +
+      "(including your saved API keys) and signs you out. It cannot be undone.",
+  );
+  if (!sure) return;
+  if (!connected) {
+    setSettingsStatus("Connect to CopperOS first, then try again.", "err");
+    return;
+  }
+  $("delete-account").disabled = true;
+  setSettingsStatus("Deleting your account…");
+  port.postMessage({ type: "delete_account" });
+});
 $("offline-signin-btn").addEventListener("click", () => {
   $("offline-signin-note").textContent = "";
   port.postMessage({ type: "sign_in" });
@@ -801,6 +817,11 @@ port.onMessage.addListener((msg) => {
 
     case "clock":
       setClock(msg.clock);
+      break;
+
+    case "account_deleted":
+      setSettingsStatus("Your account and everything in it were deleted.", "ok");
+      $("offline-signin-note").textContent = "Your account and everything in it were deleted.";
       break;
 
     case "auth_error":

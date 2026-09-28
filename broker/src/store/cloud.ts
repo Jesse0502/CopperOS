@@ -13,9 +13,17 @@
 // for the same chat can never both start it (see claimRun).
 
 import { DecryptCommand, EncryptCommand, KMSClient } from "@aws-sdk/client-kms";
-import { GetObjectCommand, NoSuchKey, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import {
+  DeleteObjectsCommand,
+  GetObjectCommand,
+  ListObjectsV2Command,
+  NoSuchKey,
+  PutObjectCommand,
+  S3Client,
+} from "@aws-sdk/client-s3";
 import { ConditionalCheckFailedException, DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import {
+  DeleteCommand,
   DynamoDBDocumentClient,
   GetCommand,
   PutCommand,
@@ -233,7 +241,8 @@ export class CloudStore implements Store {
         TableName: T.chats(),
         Key: { userId, chatId },
         UpdateExpression: paused ? "SET #run.#until = :zero, #run.#used = :used" : "REMOVE #run",
-        ...(paused ? { ConditionExpression: "attribute_exists(#run)" } : {}),
+        // Never brings back a chat that was deleted meanwhile.
+        ConditionExpression: "attribute_exists(#run)",
         ExpressionAttributeNames: { "#run": "run", ...(paused ? { "#until": "until", "#used": "usedMs" } : {}) },
         ...(paused ? { ExpressionAttributeValues: { ":zero": 0, ":used": usedMs } } : {}),
       }),
@@ -356,6 +365,54 @@ export class CloudStore implements Store {
       }),
     );
   }
+}
+
+/**
+ * Everything kept for a user: chats and their transcripts, tracked tasks,
+ * memories and settings. For "Delete my account" — there is no undo.
+ */
+export async function deleteUserData(userId: string): Promise<{ items: number; transcripts: number }> {
+  let items = 0;
+  for (const [table, sortKey] of [
+    [T.chats(), "chatId"],
+    [T.tasks(), "chatId"],
+    [T.memories(), "key"],
+  ] as const) {
+    let start: Record<string, unknown> | undefined;
+    do {
+      const res = await db.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: "userId = :u",
+          ExpressionAttributeValues: { ":u": userId },
+          ProjectionExpression: "userId, #k",
+          ExpressionAttributeNames: { "#k": sortKey },
+          ExclusiveStartKey: start,
+        }),
+      );
+      for (const item of res.Items ?? []) {
+        await db.send(new DeleteCommand({ TableName: table, Key: { userId, [sortKey]: item[sortKey] } }));
+        items++;
+      }
+      start = res.LastEvaluatedKey;
+    } while (start);
+  }
+  await db.send(new DeleteCommand({ TableName: T.accounts(), Key: { userId } }));
+
+  let transcripts = 0;
+  let token: string | undefined;
+  do {
+    const res = await s3.send(
+      new ListObjectsV2Command({ Bucket: T.bucket(), Prefix: `chats/${userId}/`, ContinuationToken: token }),
+    );
+    const keys = (res.Contents ?? []).map((o) => ({ Key: o.Key! }));
+    if (keys.length) {
+      await s3.send(new DeleteObjectsCommand({ Bucket: T.bucket(), Delete: { Objects: keys } }));
+      transcripts += keys.length;
+    }
+    token = res.IsTruncated ? res.NextContinuationToken : undefined;
+  } while (token);
+  return { items, transcripts };
 }
 
 function toMemory(item: Record<string, any>): MemoryRecord {

@@ -500,6 +500,22 @@
         text-overflow: ellipsis;
         white-space: nowrap;
       }
+      .link-danger {
+        align-self: flex-start;
+        font: inherit;
+        font-size: 12px;
+        padding: 0;
+        border: none;
+        background: none;
+        color: var(--err);
+        cursor: pointer;
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      .link-danger:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
       #model-offline {
         font-size: 12.5px;
         color: var(--text-muted);
@@ -1469,6 +1485,7 @@
               <span class="who" id="account-who"></span>
               <button id="account-btn" class="btn" type="button"></button>
             </div>
+            <button id="delete-account" class="link-danger" type="button" hidden>Delete my account</button>
             <hr class="settings-divider" />
             <div id="model-offline" hidden></div>
             <div id="model-settings" style="display: flex; flex-direction: column; gap: 12px">

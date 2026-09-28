@@ -13,6 +13,7 @@
 // Lambda code lives in broker/src/cloud/ and shares the agent core with the
 // local broker.
 
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
   CfnOutput,
@@ -40,6 +41,9 @@ import { EmailSubscription } from "aws-cdk-lib/aws-sns-subscriptions";
 import type { Construct } from "constructs";
 
 const BROKER = path.resolve(import.meta.dirname, "../../broker");
+// The sign-in page's look: Cognito's own design recoloured to CopperOS's
+// copper and warm greys, with its logo (see infra/sign-in/).
+const SIGN_IN = path.resolve(import.meta.dirname, "../sign-in");
 
 export type CopperStackProps = StackProps & {
   stage: string;
@@ -101,8 +105,10 @@ export class CopperStack extends Stack {
       });
     }
 
+    // Cognito's hosted sign-in page, in CopperOS's look (SignInStyle below):
+    // copperos.auth… for prod, copperos-<stage>.auth… for the others.
     const signIn = users.addDomain("SignIn", {
-      cognitoDomain: { domainPrefix: `copperos-${stage}` },
+      cognitoDomain: { domainPrefix: prod ? "copperos" : `copperos-${stage}` },
       managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
     });
 
@@ -134,10 +140,19 @@ export class CopperStack extends Stack {
     if (google) client.node.addDependency(google);
 
     // The newer managed login pages render only once a style is assigned.
+    const asset = (category: string, file: string, extension: string) =>
+      (["LIGHT", "DARK"] as const).map((colorMode) => ({
+        category,
+        colorMode,
+        extension,
+        bytes: readFileSync(path.join(SIGN_IN, file)).toString("base64"),
+      }));
     new cognito.CfnManagedLoginBranding(this, "SignInStyle", {
       userPoolId: users.userPoolId,
       clientId: client.userPoolClientId,
-      useCognitoProvidedValues: true,
+      useCognitoProvidedValues: false,
+      settings: JSON.parse(readFileSync(path.join(SIGN_IN, "style.json"), "utf8")),
+      assets: [...asset("FORM_LOGO", "logo.png", "PNG"), ...asset("FAVICON_ICO", "favicon.ico", "ICO")],
     });
 
     // ── storage ──────────────────────────────────────────────────────────
@@ -254,8 +269,15 @@ export class CopperStack extends Stack {
     const relayFn = fn("Relay", "relay.ts", {
       memorySize: 256,
       timeout: Duration.seconds(30),
-      environment: { ...shared, AGENT_FUNCTION: agentFn.functionName },
+      environment: { ...shared, AGENT_FUNCTION: agentFn.functionName, USER_POOL_ID: users.userPoolId },
     });
+    // "Delete my account" removes the sign-in too.
+    relayFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["cognito-idp:ListUsers", "cognito-idp:AdminDeleteUser"],
+        resources: [users.userPoolArn],
+      }),
+    );
 
     for (const f of [relayFn, agentFn]) {
       for (const t of [usersTable, memories, chats, tasks, connections]) t.grantReadWriteData(f);
@@ -315,6 +337,18 @@ export class CopperStack extends Stack {
       }).addAlarmAction(new SnsAction(alerts));
     ses("Reputation.BounceRate", 0.04, "EmailBounces");
     ses("Reputation.ComplaintRate", 0.0008, "EmailComplaints");
+    // Any function failing outright — not a task's own error, which the
+    // agent reports to the user, but a crash or a timeout.
+    for (const [id, f] of [["Authorize", authorizerFn], ["Relay", relayFn], ["Agent", agentFn]] as const) {
+      new cloudwatch.Alarm(this, `${id}Errors`, {
+        alarmName: name(`${id.toLowerCase()}-errors`),
+        metric: f.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new SnsAction(alerts));
+    }
 
     // ── what the extension needs to know ─────────────────────────────────
     new CfnOutput(this, "SocketUrl", { value: socketStage.url });

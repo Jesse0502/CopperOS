@@ -6,13 +6,18 @@
 // browser; the extension's op results come back through here and are handed
 // to that task's worker connection.
 
+import {
+  AdminDeleteUserCommand,
+  CognitoIdentityProviderClient,
+  ListUsersCommand,
+} from "@aws-sdk/client-cognito-identity-provider";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import type { APIGatewayProxyResultV2, APIGatewayProxyWebsocketEventV2 } from "aws-lambda";
 import { Agent, listChats } from "../agent.js";
 import { requestChatId, requestMessage, type AskOutcome } from "../bridge.js";
 import { getConfig, initConfig, listModels, setConfig, type LLMConfig, type Provider } from "../config.js";
 import { setCurrent, type ApprovalMode } from "../session.js";
-import { busy, CloudStore, type ChatItem } from "../store/cloud.js";
+import { busy, CloudStore, deleteUserData, type ChatItem } from "../store/cloud.js";
 import { useStore } from "../store/store.js";
 import {
   createGrant,
@@ -29,6 +34,7 @@ import type { AgentJob, AgentRequest } from "./jobs.js";
 const store = new CloudStore();
 useStore(store);
 const lambda = new LambdaClient({});
+const cognito = new CognitoIdentityProviderClient({});
 // A task's active time on the free plan; the panel counts it down.
 const TASK_LIMIT_MS = Number(process.env.TASK_LIMIT_MS ?? 15 * 60_000);
 
@@ -223,6 +229,20 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
       return;
     }
 
+    case "delete_account": {
+      // Stop anything still running first, and wait for it to finish, so
+      // nothing writes after the delete.
+      for (const w of await workersOf(userId)) await post(w.connectionId, { type: "cancel" });
+      for (let waited = 0; waited < 20_000 && (await workersOf(userId)).length > 0; waited += 1000) {
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+      const removed = await deleteUserData(userId);
+      await deleteSignIn(userId);
+      console.log(`[relay] deleted an account: ${removed.items} items, ${removed.transcripts} transcripts`);
+      await postToExtensions(userId, { type: "account_deleted" });
+      return;
+    }
+
     case "list_models": {
       const provider = msg.provider as Provider;
       try {
@@ -273,6 +293,16 @@ function withoutKeys(config: LLMConfig) {
     openai: { model: config.openai.model, apiKey: "", hasKey: Boolean(config.openai.apiKey) },
     openrouter: { model: config.openrouter.model, apiKey: "", hasKey: Boolean(config.openrouter.apiKey) },
   };
+}
+
+/** The user's Cognito sign-in, found by the id the token carries (for Google users it differs from their username). */
+async function deleteSignIn(userId: string): Promise<void> {
+  const pool = process.env.USER_POOL_ID;
+  const found = await cognito.send(
+    new ListUsersCommand({ UserPoolId: pool, Filter: `sub = "${userId.replace(/"/g, "")}"`, Limit: 1 }),
+  );
+  const username = found.Users?.[0]?.Username;
+  if (username) await cognito.send(new AdminDeleteUserCommand({ UserPoolId: pool, Username: username }));
 }
 
 async function startAgent(job: AgentRequest): Promise<void> {
