@@ -23,6 +23,10 @@ new CopperStack(app, `CopperOS-${stage}`, {
   stage,
   google: context("google") === "true",
   extensionId: context("extensionId"),
+  devExtensionIds: String(app.node.tryGetContext("devExtensionIds") ?? "")
+    .split(",")
+    .map((id) => id.trim())
+    .filter(Boolean),
   emailDomain: context("emailDomain"),
   alertEmail: context("alertEmail"),
   testModel: context("testModel") === "true",

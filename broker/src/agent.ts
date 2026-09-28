@@ -434,6 +434,8 @@ export type RunResult = {
   paused?: PendingRequest;
   /** Set when the task stopped at its time limit. */
   timeUp?: boolean;
+  /** Active time spent on the task so far, across its pauses. */
+  timeUsedMs?: number;
 };
 
 type Active = ReturnType<typeof resolveActive>;
@@ -938,6 +940,7 @@ export class Agent {
           usage,
           model: active.label,
           paused: this.pause(again, loop),
+          timeUsedMs: this.clock.used(),
         };
       }
       return await this.drive(active, budget, usage, abort.signal, loop, "high", rest);
@@ -1009,6 +1012,7 @@ export class Agent {
       steps: loop.steps,
       usage,
       model: active.label,
+      timeUsedMs: this.clock?.used() ?? 0,
       ...(paused ? { paused } : {}),
     });
 
@@ -1142,6 +1146,7 @@ export class Agent {
       usage,
       model: active.label,
       timeUp: true,
+      timeUsedMs: this.clock?.used() ?? 0,
     };
   }
 

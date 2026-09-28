@@ -11,7 +11,8 @@
     "alarms",
     "scripting",
     "tabGroups",
-    "sidePanel"
+    "sidePanel",
+    "identity"
   ],
   "host_permissions": ["<all_urls>"],
   "background": {

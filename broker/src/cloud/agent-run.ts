@@ -38,6 +38,7 @@ export async function runJob(job: AgentJob, lambdaMsLeft: number): Promise<void>
   useTransport(transport);
 
   let paused = false;
+  let usedMs = 0;
   try {
     await transport.open(job.grant);
     agent = await Agent.forChat(userId, chatId);
@@ -48,9 +49,12 @@ export async function runJob(job: AgentJob, lambdaMsLeft: number): Promise<void>
         ? await agent.run(job.text, options)
         : await agent.resume(job.requestId, job.answer, options);
 
+    usedMs = result.timeUsedMs ?? 0;
     if (result.paused) {
       paused = true;
       showRequest(result.paused);
+      // Waiting on the person does not count against the limit.
+      transport.notify({ type: "clock", chatId, limitMs: TASK_LIMIT_MS, usedMs, ticking: false });
       console.log(`[agent ${chatId}] waiting on the user: ${result.paused.kind}`);
     } else if (cancelled) {
       // The relay told the panel the moment Cancel was clicked.
@@ -68,7 +72,7 @@ export async function runJob(job: AgentJob, lambdaMsLeft: number): Promise<void>
     if (!cancelled) emit("error", chatId, text);
   } finally {
     // A paused task keeps its request on the chat; anything else frees it.
-    await store.endRun(userId, chatId, paused).catch((err) =>
+    await store.endRun(userId, chatId, paused, usedMs).catch((err) =>
       console.error(`[agent ${chatId}] could not free the chat: ${String(err)}`),
     );
     await transport.close();

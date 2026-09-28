@@ -446,6 +446,70 @@
         transform: scale(0.98);
       }
 
+      /* ── task time limit ───────────────────────────────────────────────── */
+      #clock {
+        font-size: 11.5px;
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        color: var(--text-muted);
+        padding: 1px 7px;
+        border-radius: 999px;
+        background: var(--surface-2);
+      }
+      #clock.low {
+        color: var(--warn);
+        background: var(--warn-soft);
+      }
+
+      /* ── where CopperOS runs ──────────────────────────────────────────── */
+      .segmented {
+        display: flex;
+        padding: 3px;
+        gap: 3px;
+        border-radius: 9px;
+        background: var(--surface-2);
+      }
+      .segmented button {
+        flex: 1;
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 600;
+        padding: 6px 8px;
+        border: none;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--text-muted);
+        cursor: pointer;
+      }
+      .segmented button[aria-checked="true"] {
+        background: var(--bg);
+        color: var(--text);
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
+      }
+      #account-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      #account-row .who {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+      #model-offline {
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      .settings-divider {
+        border: none;
+        border-top: 1px solid var(--border);
+        margin: 2px 0;
+      }
+
       /* ── no broker ──────────────────────────────────────────────────────── */
       /* What a first run (or a store reviewer) sees before a broker is
          running. Shown by sidepanel.js a moment after the connection drops. */
@@ -489,7 +553,8 @@
         flex-wrap: wrap;
         gap: 6px;
       }
-      #offline a.btn {
+      #offline a.btn,
+      #offline button.btn {
         display: inline-flex;
         align-items: center;
         font-size: 13px;
@@ -501,16 +566,20 @@
         text-decoration: none;
         transition: background-color 0.15s ease;
       }
-      #offline a.btn:hover {
+      #offline a.btn:hover,
+      #offline button.btn:hover {
         background: var(--surface-2);
       }
-      #offline a.btn.primary {
+      #offline .btn.primary {
         background: var(--brand);
         border-color: var(--brand);
         color: var(--brand-fg);
       }
-      #offline a.btn.primary:hover {
+      #offline .btn.primary:hover {
         background: var(--brand-strong);
+      }
+      #offline [hidden] {
+        display: none !important;
       }
       #offline small {
         display: block;
@@ -1242,6 +1311,7 @@
       <div id="status-indicator" class="status-indicator">
         <span id="dot"></span>
         <span id="status">connecting…</span>
+        <span id="clock" hidden></span>
       </div>
 
       <div class="header-actions">
@@ -1388,6 +1458,20 @@
             <span class="page-title">Settings</span>
           </div>
           <div id="settings-body">
+            <div class="field">
+              <label id="backend-label">Where CopperOS runs</label>
+              <div class="segmented" role="radiogroup" aria-labelledby="backend-label">
+                <button type="button" role="radio" data-backend="cloud" aria-checked="false">Cloud</button>
+                <button type="button" role="radio" data-backend="local" aria-checked="false">This computer</button>
+              </div>
+            </div>
+            <div id="account-row" hidden>
+              <span class="who" id="account-who"></span>
+              <button id="account-btn" class="btn" type="button"></button>
+            </div>
+            <hr class="settings-divider" />
+            <div id="model-offline" hidden></div>
+            <div id="model-settings" style="display: flex; flex-direction: column; gap: 12px">
             <div class="field">
               <label for="cfg-provider">Model provider</label>
               <select id="cfg-provider">
@@ -1572,6 +1656,7 @@
               </svg>
               Save
             </button>
+            </div>
           </div>
         </div>
 
@@ -1583,6 +1668,28 @@
         </div>
 
         <div id="offline" role="status">
+          <!-- The hosted CopperOS, signed out -->
+          <div id="offline-signin" hidden>
+            <h2>Sign in to CopperOS</h2>
+            <p>
+              Sign in with Google or your email to start. CopperOS does the
+              thinking in the cloud; this extension does the clicking and
+              typing in your own tabs.
+            </p>
+            <div class="offline-actions">
+              <button id="offline-signin-btn" class="btn primary" type="button">Sign in</button>
+              <button id="offline-use-local" class="btn" type="button">Run it on my computer instead</button>
+            </div>
+            <small id="offline-signin-note"></small>
+          </div>
+          <!-- The hosted CopperOS, signed in but unreachable -->
+          <div id="offline-cloud" hidden>
+            <h2>Connecting to CopperOS…</h2>
+            <p>The connection dropped. It will come back on its own, usually within a few seconds.</p>
+            <small id="offline-cloud-note"></small>
+          </div>
+          <!-- The broker on this computer, not running -->
+          <div id="offline-local">
           <h2>Start the CopperOS broker</h2>
           <p>
             CopperOS runs on your own computer. This extension does the
@@ -1607,6 +1714,7 @@
             >
           </div>
           <small>Looking for it at 127.0.0.1:7331</small>
+          </div>
         </div>
 
         <div id="log">

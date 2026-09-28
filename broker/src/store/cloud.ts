@@ -48,8 +48,12 @@ const T = {
   userKeys: () => env("USER_KEYS_KEY"),
 };
 
-/** A task under way in a chat. `until` is when a run nobody ended counts as dead. */
-export type Run = { task: string | null; startedAt: number; until: number };
+/**
+ * A task under way in a chat. `until` is when a run nobody ended counts as
+ * dead; `usedMs` is the task's active time before this run started (its
+ * earlier runs, split by pauses), against its time limit.
+ */
+export type Run = { task: string | null; startedAt: number; until: number; usedMs: number };
 
 /** A chat's item as the Chats table keeps it. */
 export type ChatItem = Partial<ChatSummary> & { chatId: string; pending?: PendingRequest; run?: Run };
@@ -166,6 +170,7 @@ export class CloudStore implements Store {
     chatId: string,
     task: string | null,
     resuming?: string,
+    usedMs = 0,
   ): Promise<boolean> {
     const now = Date.now();
     try {
@@ -183,7 +188,7 @@ export class CloudStore implements Store {
             ...(resuming ? { "#id": "id" } : { "#until": "until" }),
           },
           ExpressionAttributeValues: {
-            ":run": { task, startedAt: now, until: now + RUN_LEASE_MS } satisfies Run,
+            ":run": { task, startedAt: now, until: now + RUN_LEASE_MS, usedMs } satisfies Run,
             ...(resuming ? { ":rid": resuming } : { ":now": now }),
           },
         }),
@@ -222,15 +227,15 @@ export class CloudStore implements Store {
    * (the panel shows it as the task waiting on you) but no longer holds the
    * chat through the run: its pending request does.
    */
-  async endRun(userId: string, chatId: string, paused: boolean): Promise<void> {
+  async endRun(userId: string, chatId: string, paused: boolean, usedMs = 0): Promise<void> {
     await db.send(
       new UpdateCommand({
         TableName: T.chats(),
         Key: { userId, chatId },
-        UpdateExpression: paused ? "SET #run.#until = :zero" : "REMOVE #run",
+        UpdateExpression: paused ? "SET #run.#until = :zero, #run.#used = :used" : "REMOVE #run",
         ...(paused ? { ConditionExpression: "attribute_exists(#run)" } : {}),
-        ExpressionAttributeNames: { "#run": "run", ...(paused ? { "#until": "until" } : {}) },
-        ...(paused ? { ExpressionAttributeValues: { ":zero": 0 } } : {}),
+        ExpressionAttributeNames: { "#run": "run", ...(paused ? { "#until": "until", "#used": "usedMs" } : {}) },
+        ...(paused ? { ExpressionAttributeValues: { ":zero": 0, ":used": usedMs } } : {}),
       }),
     ).catch((err) => {
       if (!(err instanceof ConditionalCheckFailedException)) throw err;

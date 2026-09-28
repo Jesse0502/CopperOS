@@ -12,6 +12,12 @@ const TERMINAL = ["done", "error", "cancelled"];
 const EMPTY_HTML = log.innerHTML; // restored by "new chat" and on reset
 
 let connected = false;
+// Which broker, and who is signed in to it when it is the hosted one.
+let backend = "local";
+let account = null; // { email } or null
+// The viewed task's time limit on the hosted broker, or null: { limitMs, usedMs, ticking, at }.
+let clock = null;
+let clockTimer = null;
 let running = false;
 let watching = false;
 let historyOpen = false;
@@ -289,8 +295,14 @@ function renderEvent(kind, text) {
 function renderStatus() {
   dot.classList.toggle("busy", running);
   dot.classList.toggle("on", connected);
-  status.textContent = running ? "running…" : connected ? "connected" : "broker offline";
+  const offline =
+    backend === "local" ? "broker offline" : account ? "reconnecting…" : "signed out";
+  status.textContent = running ? "running…" : connected ? "connected" : offline;
+  $("offline-local").hidden = backend !== "local";
+  $("offline-signin").hidden = !(backend === "cloud" && !account);
+  $("offline-cloud").hidden = !(backend === "cloud" && account);
   renderOffline();
+  renderClock();
 }
 
 // The setup card is held back briefly: every panel opens disconnected until
@@ -300,6 +312,13 @@ const OFFLINE_DELAY_MS = 1500;
 let offlineTimer = null;
 
 function renderOffline() {
+  // Signed out is a steady state, not a blip: no reason to hold the card back.
+  if (!connected && backend === "cloud" && !account) {
+    clearTimeout(offlineTimer);
+    offlineTimer = null;
+    document.body.classList.add("offline");
+    return;
+  }
   if (connected) {
     clearTimeout(offlineTimer);
     offlineTimer = null;
@@ -310,6 +329,33 @@ function renderOffline() {
       if (!connected) document.body.classList.add("offline");
     }, OFFLINE_DELAY_MS);
   }
+}
+
+// ── task time limit ──────────────────────────────────────────────────────
+
+function setClock(next) {
+  clock = next ?? null;
+  clearInterval(clockTimer);
+  clockTimer = clock?.ticking ? setInterval(renderClock, 1000) : null;
+  renderClock();
+}
+
+function renderClock() {
+  const el = $("clock");
+  if (!clock || !running) {
+    el.hidden = true;
+    return;
+  }
+  const used = clock.usedMs + (clock.ticking ? Date.now() - clock.at : 0);
+  const left = Math.max(0, clock.limitMs - used);
+  const minutes = Math.floor(left / 60000);
+  const seconds = Math.floor((left % 60000) / 1000);
+  el.textContent = `${minutes}:${String(seconds).padStart(2, "0")} left${clock.ticking ? "" : " · paused"}`;
+  el.title = clock.ticking
+    ? "Time this task has left"
+    : "Paused while it waits for you — waiting does not count";
+  el.classList.toggle("low", left < 2 * 60_000);
+  el.hidden = false;
 }
 
 function updateSendDisabled() {
@@ -563,7 +609,7 @@ function openHistory() {
   const list = $("history-list");
   list.innerHTML = "";
   if (!connected) {
-    list.innerHTML = '<div id="history-loading">Broker offline — can’t load chats.</div>';
+    list.innerHTML = '<div id="history-loading">Not connected — can’t load chats.</div>';
     return;
   }
   list.innerHTML = '<div id="history-loading">Loading…</div>';
@@ -606,6 +652,32 @@ function fillModelSelect(select, models, selected) {
   if (selected) select.value = selected;
 }
 
+/** The "Where CopperOS runs" switch and the account row under it. */
+function renderAccount() {
+  for (const b of document.querySelectorAll(".segmented [data-backend]")) {
+    b.setAttribute("aria-checked", String(b.dataset.backend === backend));
+  }
+  const row = $("account-row");
+  row.hidden = backend !== "cloud";
+  $("account-who").textContent = account ? `Signed in as ${account.email ?? "you"}` : "Not signed in";
+  $("account-btn").textContent = account ? "Sign out" : "Sign in";
+  // Nobody's Ollama is reachable from the cloud.
+  $("cfg-provider").querySelector('option[value="ollama"]').hidden = backend === "cloud";
+}
+
+/** Model settings come from the broker, so they are only there while connected. */
+function renderSettingsAvailability() {
+  const note = $("model-offline");
+  $("model-settings").style.display = connected ? "flex" : "none";
+  note.hidden = connected;
+  note.textContent =
+    backend === "local"
+      ? "Start the broker on this computer to change model settings."
+      : account
+        ? "Connecting to CopperOS…"
+        : "Sign in to choose your model and API key.";
+}
+
 function applyConfig(cfg) {
   currentConfig = cfg;
   $("cfg-provider").value = cfg.provider;
@@ -613,10 +685,13 @@ function applyConfig(cfg) {
   $("cfg-ollama-host").value = cfg.ollama.host;
   fillModelSelect($("cfg-ollama-model"), [], cfg.ollama.model);
   $("cfg-openai-key").value = cfg.openai.apiKey || "";
+  // The hosted broker never sends a key back, only whether one is saved.
+  $("cfg-openai-key").placeholder = cfg.openai.hasKey ? "Saved — leave blank to keep it" : "sk-…";
   fillModelSelect($("cfg-openai-model"), [], cfg.openai.model);
   // Absent from a broker older than the extension.
   const openrouter = cfg.openrouter ?? { model: "", apiKey: "" };
   $("cfg-openrouter-key").value = openrouter.apiKey || "";
+  $("cfg-openrouter-key").placeholder = openrouter.hasKey ? "Saved — leave blank to keep it" : "sk-or-…";
   fillModelSelect($("cfg-openrouter-model"), [], openrouter.model);
   requestModels(cfg.provider);
 }
@@ -633,11 +708,9 @@ function openSettings() {
   $("settings-page").classList.add("on");
   $("settings").classList.add("active");
   setSettingsStatus("");
-  if (!connected) {
-    setSettingsStatus("Broker offline — can’t load settings.", "err");
-    return;
-  }
-  port.postMessage({ type: "get_config" });
+  renderAccount();
+  renderSettingsAvailability();
+  if (connected) port.postMessage({ type: "get_config" });
 }
 
 function closeSettings() {
@@ -649,6 +722,22 @@ function closeSettings() {
 $("settings").addEventListener("click", () => {
   openSettings();
   closeMenu();
+});
+
+for (const b of document.querySelectorAll(".segmented [data-backend]")) {
+  b.addEventListener("click", () => {
+    if (b.dataset.backend !== backend) port.postMessage({ type: "set_backend", backend: b.dataset.backend });
+  });
+}
+$("account-btn").addEventListener("click", () => {
+  port.postMessage({ type: account ? "sign_out" : "sign_in" });
+});
+$("offline-signin-btn").addEventListener("click", () => {
+  $("offline-signin-note").textContent = "";
+  port.postMessage({ type: "sign_in" });
+});
+$("offline-use-local").addEventListener("click", () => {
+  port.postMessage({ type: "set_backend", backend: "local" });
 });
 $("settings-close").addEventListener("click", closeSettings);
 
@@ -700,7 +789,23 @@ port.onMessage.addListener((msg) => {
   switch (msg.type) {
     case "connection":
       connected = msg.connected;
+      if ("backend" in msg) backend = msg.backend;
+      if ("account" in msg) account = msg.account;
       renderStatus();
+      renderAccount();
+      if (settingsOpen) {
+        renderSettingsAvailability();
+        if (connected && !currentConfig) port.postMessage({ type: "get_config" });
+      }
+      break;
+
+    case "clock":
+      setClock(msg.clock);
+      break;
+
+    case "auth_error":
+      $("offline-signin-note").textContent = msg.text ?? "";
+      if (settingsOpen) setSettingsStatus(msg.text ?? "Sign-in failed.", "err");
       break;
 
     // Sent on connect and whenever the viewed chat changes. Unlike a popup, a
@@ -708,6 +813,12 @@ port.onMessage.addListener((msg) => {
     // the service worker being recycled out from under it.
     case "restore":
       connected = msg.connected;
+      if ("backend" in msg) {
+        // Another broker's chats: its settings are not this one's.
+        if (msg.backend !== backend) currentConfig = null;
+        backend = msg.backend;
+      }
+      if ("account" in msg) account = msg.account;
       viewedChatId = msg.chatId ?? null;
       resetLog();
       for (const ev of msg.events ?? []) renderEvent(ev.event, ev.text ?? "");
@@ -717,6 +828,10 @@ port.onMessage.addListener((msg) => {
       setWatching(Boolean(msg.watching));
       setApprovalMode(msg.approvalMode ?? "submits");
       setPendingApprovalChatIds(msg.pendingApprovalChatIds ?? []);
+      setClock(msg.clock);
+      renderStatus();
+      renderAccount();
+      if (settingsOpen) renderSettingsAvailability();
       break;
 
     case "run_state":
@@ -786,6 +901,7 @@ port.onMessage.addListener((msg) => {
         setRunning(false);
         showApproval(null);
         showAsk(null);
+        setClock(null);
       }
       break;
   }

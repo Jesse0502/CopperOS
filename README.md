@@ -412,7 +412,9 @@ worker termination.
 | `extension/som.js` | Badge compositing onto captured frames. |
 | `extension/nav.js` | Navigation, `networkAlmostIdle` waiting, AX-based text extraction. |
 | `extension/screencast.js` | Live view frames for the popup only. |
-| `extension/background.js` | WebSocket bridge, op router, and the after-action settle-and-report step. |
+| `extension/background.js` | WebSocket bridge, op router, and the after-action settle-and-report step. Splits big results into pieces for the hosted broker. |
+| `extension/backend.js` | Which broker the extension talks to — this computer's or the hosted one — and the hosted one's addresses. |
+| `extension/auth.js` | Signing in to the hosted broker: Cognito's page, OAuth code flow with PKCE, token refresh. |
 | `extension/workspace.js` | The one CopperOS tab group; which tabs are the agent's; closing them. |
 | `extension/presence.js` | Which tab carries the overlay; hiding it for screenshots. |
 | `extension/overlay.js` | The in-page frame, status pill, and agent cursor. |

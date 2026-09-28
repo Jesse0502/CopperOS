@@ -47,6 +47,8 @@ export type CopperStackProps = StackProps & {
   google: boolean;
   /** The Chrome Web Store extension id: its chromiumapp.org URL is where sign-in returns. */
   extensionId: string;
+  /** Unpacked development copies' ids, allowed to sign in to non-prod stacks too. */
+  devExtensionIds: string[];
   /** SES-verified domain the sign-in emails come from. */
   emailDomain: string;
   /** Where alarms go. */
@@ -104,8 +106,11 @@ export class CopperStack extends Stack {
       managedLoginVersion: cognito.ManagedLoginVersion.NEWER_MANAGED_LOGIN,
     });
 
-    // chrome.identity.launchWebAuthFlow returns to the extension's own URL.
-    const extensionUrl = `https://${props.extensionId}.chromiumapp.org/`;
+    // chrome.identity.launchWebAuthFlow returns to the extension's own URL —
+    // the store copy's, and on a dev stack any unpacked copy's too.
+    const extensionUrls = [props.extensionId, ...(prod ? [] : props.devExtensionIds)].map(
+      (id) => `https://${id}.chromiumapp.org/`,
+    );
     const client = users.addClient("Extension", {
       userPoolClientName: "extension",
       // A browser extension cannot keep a secret; PKCE protects the code instead.
@@ -114,8 +119,8 @@ export class CopperStack extends Stack {
       oAuth: {
         flows: { authorizationCodeGrant: true },
         scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL, cognito.OAuthScope.PROFILE],
-        callbackUrls: [extensionUrl],
-        logoutUrls: [extensionUrl],
+        callbackUrls: extensionUrls,
+        logoutUrls: extensionUrls,
       },
       supportedIdentityProviders: [
         cognito.UserPoolClientIdentityProvider.COGNITO,
@@ -233,12 +238,14 @@ export class CopperStack extends Stack {
       JEV_PARAM: jevParam,
       // Nobody's Ollama is reachable from here.
       LLM_PROVIDER: "openrouter",
+      // A task's active time on the free plan.
+      TASK_LIMIT_MS: String(15 * 60_000),
     };
 
     const agentFn = fn("Agent", "agent-handler.ts", {
       memorySize: 512,
       timeout: Duration.minutes(15),
-      environment: { ...shared, TASK_LIMIT_MS: String(15 * 60_000) },
+      environment: shared,
       // Never run a task twice by itself: a retry would repeat what the
       // first attempt already did in the user's browser.
       retryAttempts: 0,

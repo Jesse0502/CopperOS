@@ -1,5 +1,10 @@
 // Service worker: WebSocket bridge to the broker + op router.
 //
+// The broker is either the one on this computer or the hosted CopperOS
+// (backend.js); the protocol is the same, so everything below works with
+// both. The hosted one needs a signed-in user (auth.js), and takes big
+// results in pieces.
+//
 // The extension is "hands only". It owns CDP and the timing model; it holds
 // no API key and makes no decisions. The broker sends high-level ops keyed by
 // accessibility refs and gets structured results back.
@@ -18,6 +23,8 @@ import * as som from "./som.js";
 import * as screencast from "./screencast.js";
 import * as presence from "./presence.js";
 import * as workspace from "./workspace.js";
+import * as auth from "./auth.js";
+import { CLOUD, LOCAL_URL, getBackend, setBackend } from "./backend.js";
 
 // The UI lives in the side panel, not a popup: it stays open across tab
 // switches within a window instead of closing the moment focus leaves.
@@ -40,8 +47,9 @@ function runChanged(chatId, on) {
   void workspace.setRunning(chatId, on, chatCtx(chatId).tabId);
 }
 
-const BROKER_URL = "ws://127.0.0.1:7331";
 const RECONNECT_MS = 2000;
+// After the hosted socket has turned us away a few times in a row, try less often.
+const REFUSED_BACKOFF_MS = 30000;
 const PING_MS = 20000;
 const KEEPALIVE_ALARM = "broker-keepalive";
 const MAX_EVENTS = 80;
@@ -50,7 +58,15 @@ const TERMINAL = ["done", "error", "cancelled"];
 let ws = null;
 let pingTimer = null;
 let reconnectTimer = null;
+let connecting = false;
 const panelPorts = new Set();
+
+// Where the broker is, and who is signed in to it when it is the hosted one.
+let backend = "local";
+let signedIn = null; // { email } or null
+// Connection attempts in a row that the hosted socket refused before opening
+// — an expired or revoked token. The next one refreshes the token first.
+let refused = 0;
 
 // ── per-chat tab context ─────────────────────────────────────────────────────
 //
@@ -101,12 +117,20 @@ let session = {
   ask: null, // { id, ask: { intro, questions } } while an ask_user form is open on the viewed chat
   // chatId -> { id, ask }, for every chat with questions waiting, like pendingApprovals.
   pendingAsks: {},
+  // The viewed chat's task time limit, from the hosted broker:
+  // { limitMs, usedMs, ticking, at } — `at` is when usedMs was true.
+  clock: null,
 };
 
+// Each backend keeps its own panel state; switching never mixes them.
+const sessionKey = () => `session:${backend}`;
+
 const ready = (async () => {
+  backend = await getBackend();
+  signedIn = await auth.account().catch(() => null);
   try {
-    const { session: saved, tabsByChat: savedTabs } =
-      await chrome.storage.session.get(["session", "tabsByChat"]);
+    const { [sessionKey()]: saved, tabsByChat: savedTabs } =
+      await chrome.storage.session.get([sessionKey(), "tabsByChat"]);
     if (saved) {
       session = {
         ...session,
@@ -126,7 +150,7 @@ const ready = (async () => {
 })();
 
 function persist() {
-  chrome.storage.session.set({ session }).catch(() => {});
+  chrome.storage.session.set({ [sessionKey()]: session }).catch(() => {});
 }
 
 // Visible while any chat has an open gate, so an approval waiting behind a
@@ -199,6 +223,7 @@ function recordEvent(msg) {
       session.running = false;
       session.approval = null;
       session.ask = null;
+      session.clock = null;
       runChanged(session.chatId, false);
     }
     setBadge(needsAttention());
@@ -693,25 +718,60 @@ function socketAlive() {
   return ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN);
 }
 
-function connect() {
+/** Where to connect now, or null when there is nothing to connect to (hosted, signed out). */
+async function socketUrl() {
+  if (backend === "local") return LOCAL_URL;
+  let token;
+  try {
+    token = await auth.accessToken({ force: refused > 0 });
+  } catch {
+    // Could not refresh right now (offline): the saved token may still do;
+    // if not, the socket turns it away and we try again.
+    token = (await chrome.storage.local.get("auth").catch(() => ({}))).auth?.access ?? null;
+  }
+  if (!token) {
+    signedIn = await auth.account().catch(() => null);
+    return null;
+  }
+  return `${CLOUD.socketUrl}?token=${encodeURIComponent(token)}`;
+}
+
+async function connect() {
   // Several paths ask to reconnect — onclose, the keepalive alarm, and a fresh
   // service worker running this file top to bottom. Without this guard they
   // can open a second socket, and because the broker keeps only the newest
   // client and closes the older one, that older socket's onclose reconnects
   // and supersedes the other, whose onclose reconnects… a permanent
   // connected/disconnected flap.
-  if (socketAlive()) return;
+  if (socketAlive() || connecting) return;
+  connecting = true;
   clearTimeout(reconnectTimer);
   reconnectTimer = null;
-
-  let sock;
   try {
-    sock = new WebSocket(BROKER_URL);
-  } catch {
-    scheduleReconnect();
-    return;
+    await ready;
+    const url = await socketUrl();
+    if (!url) {
+      // Signed out of the hosted broker: nothing to do until sign-in.
+      announce(false);
+      return;
+    }
+    if (socketAlive()) return;
+    let sock;
+    try {
+      sock = new WebSocket(url);
+    } catch {
+      scheduleReconnect();
+      return;
+    }
+    ws = sock;
+    wire(sock);
+  } finally {
+    connecting = false;
   }
-  ws = sock;
+}
+
+function wire(sock) {
+  let opened = false;
 
   // Every handler below is bound to `sock` and checks it is still the current
   // socket, so a superseded one cannot clear the live ping timer or trigger
@@ -721,7 +781,9 @@ function connect() {
       try { sock.close(); } catch { /* already closing */ }
       return;
     }
-    broadcastToPanels({ type: "connection", connected: true });
+    opened = true;
+    refused = 0;
+    announce(true);
     void (async () => {
       await ready;
       // The chat we already knew about, if any — the broker resumes it (or
@@ -751,6 +813,17 @@ function connect() {
       return;
     }
 
+    // The hosted broker's time limit for a chat's task: running down, paused
+    // while it waits on the person, or reset.
+    if (msg.type === "clock") {
+      if (msg.chatId === session.chatId) {
+        session.clock = { limitMs: msg.limitMs, usedMs: msg.usedMs, ticking: Boolean(msg.ticking), at: Date.now() };
+        persist();
+        broadcastToPanels({ type: "clock", clock: session.clock });
+      }
+      return;
+    }
+
     // A chat's full status: sent in answer to hello, and after a reset or a
     // successful switch_chat. Replaces the transcript on screen only when the
     // chat actually changed — a reconnect blip that lands back on the same
@@ -762,6 +835,7 @@ function connect() {
       session.running = Boolean(msg.running);
       session.task = msg.task ?? null;
       session.approvalMode = msg.approvalMode ?? "submits";
+      session.clock = msg.clock ? { ...msg.clock, at: Date.now() } : null;
       if (!session.running) {
         session.approval = null;
         session.ask = null;
@@ -779,6 +853,9 @@ function connect() {
         broadcastToPanels({
           type: "restore",
           connected: true,
+          backend,
+          account: signedIn,
+          clock: session.clock,
           chatId: session.chatId,
           running: session.running,
           task: session.task,
@@ -797,6 +874,7 @@ function connect() {
       } else {
         persist();
         broadcastToPanels({ type: "run_state", running: session.running, task: session.task });
+        broadcastToPanels({ type: "clock", clock: session.clock });
       }
       return;
     }
@@ -822,17 +900,17 @@ function connect() {
 
     const handler = OPS[msg.op];
     if (!handler) {
-      send({ id: msg.id, ok: false, error: `unknown op "${msg.op}"` });
+      sendResult({ id: msg.id, ok: false, error: `unknown op "${msg.op}"` });
       return;
     }
 
     try {
       const data = await handler({ ...(msg.params ?? {}), chatId: msg.chatId });
-      send({ id: msg.id, ok: true, data });
+      sendResult({ id: msg.id, ok: true, data });
     } catch (err) {
       // Errors go back as values, not dropped connections — the model reads
       // them as tool results and recovers (e.g. re-snapshots on a stale ref).
-      send({ id: msg.id, ok: false, error: String(err?.message ?? err) });
+      sendResult({ id: msg.id, ok: false, error: String(err?.message ?? err) });
     }
   };
 
@@ -840,7 +918,10 @@ function connect() {
     if (ws !== sock) return; // superseded socket closing; not our problem
     clearInterval(pingTimer);
     pingTimer = null;
-    broadcastToPanels({ type: "connection", connected: false });
+    ws = null;
+    // The hosted socket refuses a bad token before it ever opens.
+    if (!opened && backend === "cloud") refused++;
+    announce(false);
     scheduleReconnect();
   };
 
@@ -855,8 +936,24 @@ function scheduleReconnect() {
   if (reconnectTimer) return; // at most one pending attempt
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    connect();
-  }, RECONNECT_MS);
+    void connect();
+  }, refused >= 3 ? REFUSED_BACKOFF_MS : RECONNECT_MS);
+}
+
+/** Close the socket on purpose — switching backend, or signing out — without reconnecting. */
+function disconnect() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
+  clearInterval(pingTimer);
+  pingTimer = null;
+  const sock = ws;
+  ws = null;
+  try { sock?.close(); } catch { /* already closing */ }
+}
+
+/** Tell the panels whether the broker is reachable, which one it is, and who is signed in. */
+function announce(connected) {
+  broadcastToPanels({ type: "connection", connected, backend, account: signedIn });
 }
 
 // setTimeout does not survive service-worker termination, so it cannot be the
@@ -866,11 +963,33 @@ chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
   // connect() is a no-op unless the socket is genuinely gone.
-  connect();
+  void connect();
 });
 
 function send(obj) {
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+// API Gateway takes WebSocket frames of at most 32 KB, and Chrome sends each
+// message as one frame. A bigger op result — a screenshot, a long page —
+// goes to the hosted broker as numbered pieces instead. 8000 characters is
+// at most 24 KB even at three UTF-8 bytes a character.
+const WHOLE_MAX_BYTES = 28000;
+const PIECE_CHARS = 8000;
+const utf8 = new TextEncoder();
+
+function sendResult(obj) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const text = JSON.stringify(obj);
+  if (backend !== "cloud" || utf8.encode(text).length <= WHOLE_MAX_BYTES) {
+    ws.send(text);
+    return;
+  }
+  const of = Math.ceil(text.length / PIECE_CHARS);
+  for (let seq = 0; seq < of; seq++) {
+    const data = text.slice(seq * PIECE_CHARS, (seq + 1) * PIECE_CHARS);
+    ws.send(JSON.stringify({ type: "chunk", id: obj.id, seq, of, data }));
+  }
 }
 
 // ── side panel wiring ────────────────────────────────────────────────────────
@@ -894,19 +1013,7 @@ chrome.runtime.onConnect.addListener((port) => {
   void (async () => {
     await ready;
     try {
-      port.postMessage({
-        type: "restore",
-        connected: Boolean(ws && ws.readyState === WebSocket.OPEN),
-        chatId: session.chatId,
-        running: session.running,
-        task: session.task,
-        events: session.events,
-        approval: session.approval,
-        ask: session.ask,
-        watching: session.watching,
-        approvalMode: session.approvalMode,
-        pendingApprovalChatIds: waitingChatIds(),
-      });
+      port.postMessage(restoreMessage());
     } catch {
       panelPorts.delete(port);
       return;
@@ -929,6 +1036,30 @@ chrome.runtime.onConnect.addListener((port) => {
     if (panelPorts.size === 0) void screencast.stop();
   });
   port.onMessage.addListener(async (msg) => {
+    if (msg.type === "set_backend" && (msg.backend === "local" || msg.backend === "cloud")) {
+      await switchBackend(msg.backend);
+      return;
+    }
+    if (msg.type === "sign_in") {
+      try {
+        signedIn = await auth.signIn();
+        refused = 0;
+        disconnect();
+        announce(false);
+        void connect();
+      } catch (err) {
+        broadcastToPanels({ type: "auth_error", text: String(err?.message ?? err) });
+      }
+      return;
+    }
+    if (msg.type === "sign_out") {
+      disconnect();
+      await auth.signOut();
+      signedIn = null;
+      await clearSession();
+      announce(false);
+      return;
+    }
     if (msg.type === "task") send({ type: "task", text: msg.text, chatId: session.chatId });
     if (msg.type === "cancel") send({ type: "cancel", chatId: session.chatId });
     if (msg.type === "reset") send({ type: "reset" });
@@ -985,4 +1116,61 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-connect();
+/** The panel as a freshly opened one would get it. */
+function restoreMessage() {
+  return {
+    type: "restore",
+    connected: Boolean(ws && ws.readyState === WebSocket.OPEN),
+    backend,
+    account: signedIn,
+    clock: session.clock,
+    chatId: session.chatId,
+    running: session.running,
+    task: session.task,
+    events: session.events,
+    approval: session.approval,
+    ask: session.ask,
+    watching: session.watching,
+    approvalMode: session.approvalMode,
+    pendingApprovalChatIds: waitingChatIds(),
+  };
+}
+
+function blankSession() {
+  return {
+    chatId: null, running: false, task: null, approvalMode: "submits", events: [],
+    approval: null, watching: false, pendingApprovals: {}, ask: null, pendingAsks: {}, clock: null,
+  };
+}
+
+/** Forget this backend's panel state — after signing out, it belongs to nobody. */
+async function clearSession() {
+  session = blankSession();
+  await chrome.storage.session.remove(sessionKey()).catch(() => {});
+  setBadge(false);
+  broadcastToPanels(restoreMessage());
+}
+
+/**
+ * Move to the other broker. Its chats and panel state are its own: this
+ * backend's are put away as they are, and the other's come back.
+ */
+async function switchBackend(next) {
+  await ready;
+  if (next === backend) return;
+  persist();
+  disconnect();
+  void screencast.stop();
+  backend = next;
+  await setBackend(next);
+  refused = 0;
+  signedIn = await auth.account().catch(() => null);
+  const { [sessionKey()]: saved } = await chrome.storage.session.get(sessionKey()).catch(() => ({}));
+  session = { ...blankSession(), ...(saved ?? {}), watching: false };
+  setBadge(needsAttention());
+  broadcastToPanels(restoreMessage());
+  announce(false);
+  void connect();
+}
+
+void connect();
