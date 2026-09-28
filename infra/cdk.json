@@ -8,6 +8,6 @@
     "alertEmail": "hello@jassydev.com",
     "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false,
     "testModel": true,
-    "devExtensionIds": ""
+    "devExtensionIds": "ejckjligpgelpgjompeglfjinckfbkai"
   }
 }
