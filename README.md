@@ -192,8 +192,8 @@ extension's Settings page (Ollama, OpenAI or OpenRouter); those choices are
 saved to `storage/config.json` and take precedence over `.env`. With
 OpenRouter, the transcript cap follows the chosen model's context window.
 
-| `APPROVAL_TIMEOUT_MS` | `900000` | How long a gate waits for a human before giving up. |
 | `RECONNECT_GRACE_MS` | `30000` | How long an op waits for the extension to come back before failing. |
+| `TASK_BUDGET_MS` | — (no limit) | Optional limit on each task's active time, in ms. Time spent waiting on you does not count. The task stops cleanly before the limit, and "continue" picks it up. |
 | `STORAGE_DIR` | `<repo>/storage` | Where chat transcripts are written. |
 | `HISTORY_BUDGET_CHARS` | 60% of `OLLAMA_NUM_CTX` | Transcript size cap before old turns are dropped. |
 
@@ -376,11 +376,15 @@ The extension popup is a transient window: Chrome destroys it the moment focus
 leaves, including when you click another tab. MV3 also recycles idle service
 workers. Neither may end a run, so nothing that matters lives only in memory.
 
-- **Gates outlive the popup.** An unanswered approval is `"unanswered"`, not
-  `"denied"` — a distinct tool result that tells the model to stop and say which
-  action is waiting, instead of reporting a refusal the user never made. The
-  toolbar icon shows a badge while one is open, and the prompt is re-shown when
-  the popup reopens or the worker reconnects.
+- **Approvals and questions pause the task.** Nothing waits in memory: the
+  task is saved with the tool call that asked still open, and where the agent
+  loop stood (round, step, check-in history). Your answer resumes it from
+  there — an approved action runs for real, a denied one tells the model so,
+  and form answers become the call's result. There is no timeout, and a
+  waiting task survives the popup closing, the worker being recycled, and the
+  broker restarting: the prompt is re-shown whenever the panel reconnects, and
+  the toolbar icon shows a badge while one is open. Cancel ends a waiting task
+  like a running one.
 - **Ops tolerate a dropped socket.** `call` waits `RECONNECT_GRACE_MS` for the
   extension to return rather than failing immediately, so a worker restart
   costs a pause instead of the run.
@@ -414,9 +418,12 @@ worker termination.
 | `extension/overlay.js` | The in-page frame, status pill, and agent cursor. |
 | `broker/src/tools.ts` | The tool definitions, and how action results are shown to the model. |
 | `broker/src/agent.ts` | The loop, system prompt, history pruning. |
-| `broker/src/bridge.ts` | WebSocket RPC server. |
-| `broker/src/session.ts` | Chat transcripts on disk: load, sanitize, save. |
-| `broker/src/memory.ts` | Durable cross-chat facts on disk: save, search. |
+| `broker/src/bridge.ts` | The agent core's link to the extension: ops, progress lines, approvals and questions, over whichever `Transport` is set. |
+| `broker/src/transport/local.ts` | The local broker's `Transport`: a WebSocket server on 127.0.0.1 that the extension connects to. |
+| `broker/src/session.ts` | Chat transcripts: load, sanitize, save. |
+| `broker/src/memory.ts` | Durable cross-chat facts: save, search. |
+| `broker/src/store/store.ts` | The `Store` interface: where chats, memories, task progress and settings are kept, per user. |
+| `broker/src/store/fs.ts` | The local broker's store: files under `storage/`, one user. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
 
 ## Testing without Chrome

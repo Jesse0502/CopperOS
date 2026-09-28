@@ -1,12 +1,11 @@
 // User-editable LLM settings: which provider/model the agent talks to, and
-// the API key it needs. Persisted under storage/config.json so the Settings
-// page in the side panel can change them without restarting the broker or
-// touching .env. First load seeds itself from the existing env vars, so
-// upgrading from an .env-only setup keeps working with no action needed.
+// the API key it needs. Kept by the store (store/store.ts; the local broker
+// uses storage/config.json) so the Settings page in the side panel can change
+// them without restarting the broker or touching .env. First load seeds
+// itself from the existing env vars, so upgrading from an .env-only setup
+// keeps working with no action needed.
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { storageDir } from "./session.js";
+import { store } from "./store/store.js";
 
 export type Provider = "ollama" | "openai" | "openrouter";
 
@@ -18,8 +17,6 @@ export type LLMConfig = {
 };
 
 export const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
-
-const FILE = path.join(storageDir, "config.json");
 
 function defaults(): LLMConfig {
   return {
@@ -42,10 +39,10 @@ function defaults(): LLMConfig {
   };
 }
 
-// Loaded once at startup and kept in memory; every read is synchronous so the
-// agent loop never blocks on disk mid-run. Writes go to disk in the
-// background, same pattern as session.ts's save().
-let cache: LLMConfig | null = null;
+// Loaded per user and kept in memory; every read is synchronous so the agent
+// loop never blocks on storage mid-run. initConfig() always reloads, so an
+// entry point that serves a user again can pick up changes made elsewhere.
+const cache = new Map<string, LLMConfig>();
 
 function merge(base: LLMConfig, patch: DeepPartial<LLMConfig>): LLMConfig {
   return {
@@ -58,36 +55,32 @@ function merge(base: LLMConfig, patch: DeepPartial<LLMConfig>): LLMConfig {
 
 type DeepPartial<T> = { [K in keyof T]?: Partial<T[K]> extends T[K] ? T[K] : DeepPartial<T[K]> };
 
-export async function initConfig(): Promise<LLMConfig> {
+export async function initConfig(userId: string): Promise<LLMConfig> {
+  let cfg: LLMConfig;
   try {
-    const raw = JSON.parse(await readFile(FILE, "utf8")) as Partial<LLMConfig>;
-    cache = merge(defaults(), raw as DeepPartial<LLMConfig>);
+    const raw = (await store().loadConfig(userId)) as DeepPartial<LLMConfig> | null;
+    cfg = raw ? merge(defaults(), raw) : defaults();
   } catch {
-    // No config yet, or it is unreadable — start from env-seeded defaults.
-    cache = defaults();
+    // Unreadable — start from env-seeded defaults.
+    cfg = defaults();
   }
-  return cache;
+  cache.set(userId, cfg);
+  return cfg;
 }
 
-/** Synchronous — call initConfig() once at startup before using this. */
-export function getConfig(): LLMConfig {
-  if (!cache) throw new Error("config not initialized — call initConfig() first");
-  return cache;
+/** Synchronous — call initConfig() for the user before using this. */
+export function getConfig(userId: string): LLMConfig {
+  const cfg = cache.get(userId);
+  if (!cfg) throw new Error(`config not initialized for ${userId} — call initConfig() first`);
+  return cfg;
 }
 
-async function persist(cfg: LLMConfig): Promise<void> {
-  await mkdir(storageDir, { recursive: true });
-  const tmp = `${FILE}.tmp`;
-  await writeFile(tmp, JSON.stringify(cfg, null, 2), "utf8");
-  await rename(tmp, FILE);
-}
-
-/** Merges `patch` into the current config, applies it immediately, and saves it. */
-export async function setConfig(patch: DeepPartial<LLMConfig>): Promise<LLMConfig> {
-  const next = merge(getConfig(), patch);
-  cache = next;
+/** Merges `patch` into the user's config, applies it immediately, and saves it. */
+export async function setConfig(userId: string, patch: DeepPartial<LLMConfig>): Promise<LLMConfig> {
+  const next = merge(getConfig(userId), patch);
+  cache.set(userId, next);
   try {
-    await persist(next);
+    await store().saveConfig(userId, next);
   } catch (err) {
     console.error(`[config] could not save settings: ${String(err)}`);
   }
@@ -174,9 +167,9 @@ export async function acceptsImages(cfg: LLMConfig): Promise<boolean | null> {
   }
 }
 
-/** Model ids available right now for `provider`, given its current settings. */
-export async function listModels(provider: Provider): Promise<string[]> {
-  const cfg = getConfig();
+/** Model ids available right now for `provider`, given the user's current settings. */
+export async function listModels(userId: string, provider: Provider): Promise<string[]> {
+  const cfg = getConfig(userId);
   if (provider === "openrouter") {
     // The agent cannot work without tool calling. ":batch" variants are for
     // OpenRouter's batch API, not chat completions.

@@ -8,9 +8,9 @@ import type OpenAI from "openai";
 import {
   call,
   emit,
-  requestAnswers,
-  requestApproval,
+  type AskOutcome,
   type AskQuestion,
+  type AskRequest,
 } from "./bridge.js";
 import {
   checkGrounded,
@@ -58,7 +58,7 @@ export type ToolDef = {
 };
 
 /**
- * Which chat a tool call belongs to, that chat's own approval setting, and
+ * Whose chat a tool call belongs to, that chat's own approval setting, and
  * the run's abort signal — every call() below passes it through so Cancel
  * interrupts whatever is in flight immediately instead of waiting out that
  * op's own timeout. `userMessages`, `answers` and `chatStartedAt` are what
@@ -67,6 +67,7 @@ export type ToolDef = {
  * `answers` is the chat's own list: ask_user adds to it.
  */
 export type ToolCtx = {
+  userId: string;
   chatId: string;
   approvalMode: ApprovalMode;
   signal: AbortSignal;
@@ -77,7 +78,30 @@ export type ToolCtx = {
   seesImages: boolean;
   /** Whether the task is about finding or applying to jobs. Job checks only run when it is. */
   jobTask: boolean;
+  /**
+   * Set only when a call is run again after the person approved it: the
+   * approval it paused for is already given, so the gate lets it through.
+   */
+  preApproved?: boolean;
 };
+
+/** What a paused task is waiting on the person for. */
+export type UserRequest = { kind: "approval"; text: string } | { kind: "ask"; ask: AskRequest };
+
+/**
+ * Thrown by a tool that cannot go on without the person — an approval gate or
+ * ask_user. It is not a failure: the agent loop saves the task, shows the
+ * request, and ends the run; the answer resumes it (see Agent.resume).
+ */
+export class PauseForUser extends Error {
+  constructor(readonly request: UserRequest) {
+    super(`waiting on the user: ${request.kind}`);
+  }
+}
+
+/** The tool result for an action the person denied at its gate. */
+export const APPROVAL_DENIED =
+  "User declined this action. Do not retry it; choose a different approach or ask the user what to do.";
 
 /** Everything the user has said in this chat: what they typed, then what they answered. */
 function userSaid(ctx: ToolCtx): string[] {
@@ -86,7 +110,7 @@ function userSaid(ctx: ToolCtx): string[] {
 
 /** The backdrop for Jev's judgments: what the user said here, and every saved memory. */
 async function userContext(ctx: ToolCtx): Promise<UserContext> {
-  const memories = await allMemories();
+  const memories = await allMemories(ctx.userId);
   return {
     instructions: userSaid(ctx),
     memories: memories.map((m) => `${m.title}: ${m.content}`),
@@ -107,7 +131,13 @@ export type BrowserTool = {
 // 0.96–1.00. The gap is wide, so the line sits well clear of both.
 const AUTO_APPROVE_BELOW = 0.2;
 
-async function gate(kind: "click" | "submit", what: string, ctx: ToolCtx): Promise<string | null> {
+/**
+ * Pauses the task for the person's approval when this action needs it
+ * (throws PauseForUser); returns when it can go ahead. A denial never comes
+ * back here — the paused call gets APPROVAL_DENIED as its result instead.
+ */
+async function gate(kind: "click" | "submit", what: string, ctx: ToolCtx): Promise<void> {
+  if (ctx.preApproved) return;
   // Judged on every gated action; logged even when nothing waits on it.
   const verdict = jevEnabled
     ? judgeAction(kind, what, await userContext(ctx), ctx.chatId, ctx.signal)
@@ -116,7 +146,7 @@ async function gate(kind: "click" | "submit", what: string, ctx: ToolCtx): Promi
   const needed =
     ctx.approvalMode === "all" ||
     (ctx.approvalMode === "submits" && kind === "submit");
-  if (!needed) return null;
+  if (!needed) return;
 
   // "All actions" mode keeps asking about everything — that is what it is
   // for. A failed or unsure verdict falls through to asking, too.
@@ -128,25 +158,12 @@ async function gate(kind: "click" | "submit", what: string, ctx: ToolCtx): Promi
         ctx.chatId,
         `${what} · Jev: nothing risky you did not ask for (${v.p.unsanctioned.toFixed(2)})`,
       );
-      return null;
+      return;
     }
   }
 
   emit("awaiting-approval", ctx.chatId, what);
-  const outcome = await requestApproval(what, ctx.chatId, undefined, ctx.signal);
-  if (outcome === "approved") return null;
-  if (outcome === "denied") {
-    return "User declined this action. Do not retry it; choose a different approach or ask the user what to do.";
-  }
-  // Nobody answered — the popup was closed, or the user walked away. This is
-  // not a refusal, and must not be reported to them as one.
-  return (
-    "This action needs the user's approval and nobody answered the prompt " +
-    "(the extension popup was most likely closed). Nothing was done and the " +
-    "page is unchanged. Stop here and tell the user that this step is waiting " +
-    "on their approval, naming the action, so they can reopen the popup and " +
-    "ask you to continue. Do not retry it and do not attempt a workaround."
-  );
+  throw new PauseForUser({ kind: "approval", text: what });
 }
 
 // ── job fit ─────────────────────────────────────────────────────────────────
@@ -191,7 +208,7 @@ async function assessJob(
   );
   const recorded = fit.apply
     ? false
-    : (await recordProgress(ctx.chatId, { done: [], skipped: [`${which} — ${fit.reason}`], note: "" })) !== null;
+    : (await recordProgress(ctx.userId, ctx.chatId, { done: [], skipped: [`${which} — ${fit.reason}`], note: "" })) !== null;
   return { fit, recorded };
 }
 
@@ -312,7 +329,7 @@ async function checkEntry(field: string, value: string, where: string, ctx: Tool
     { field, value },
     {
       user_messages: userSaid(ctx),
-      saved_memories: (await memoriesBefore(ctx.chatStartedAt)).map((m) => `${m.title}: ${m.content}`),
+      saved_memories: (await memoriesBefore(ctx.userId, ctx.chatStartedAt)).map((m) => `${m.title}: ${m.content}`),
     },
     ctx.chatId,
     ctx.signal,
@@ -608,8 +625,7 @@ const click: BrowserTool = {
       const blocked = await groundingGate(ref, target.label, ctx);
       if (blocked) return blocked;
     }
-    const denied = await gate(destructive ? "submit" : "click", what, ctx);
-    if (denied) return denied;
+    await gate(destructive ? "submit" : "click", what, ctx);
     emit("click", ctx.chatId, `${ref} — ${why}`);
     const r = await call("click", ctx.chatId, { ref }, undefined, ctx.signal);
     return describeAction(what, r, ctx);
@@ -647,8 +663,7 @@ const type: BrowserTool = {
     const blocked = await groundingGate(ref, String(text ?? ""), ctx);
     if (blocked) return blocked;
     if (submit) {
-      const denied = await gate("submit", what, ctx);
-      if (denied) return denied;
+      await gate("submit", what, ctx);
     }
     emit("type", ctx.chatId, `${where} ← "${text}"${submit ? " ⏎" : ""}`);
     const r = await call("type", ctx.chatId, { ref, text, submit }, undefined, ctx.signal);
@@ -740,8 +755,7 @@ const paste: BrowserTool = {
     const blocked = await groundingGate(ref, String(text ?? ""), ctx);
     if (blocked) return blocked;
     if (submit) {
-      const denied = await gate("submit", what, ctx);
-      if (denied) return denied;
+      await gate("submit", what, ctx);
     }
     emit("paste", ctx.chatId, `${where} ⇐ ${preview(text)}${submit ? " ⏎" : ""}`);
     const r = await call("paste", ctx.chatId, { ref, text, submit }, undefined, ctx.signal);
@@ -944,8 +958,7 @@ const sheetWrite: BrowserTool = {
       ctx,
     );
     if (blocked) return blocked;
-    const denied = await gate("click", what, ctx);
-    if (denied) return denied;
+    await gate("click", what, ctx);
 
     emit("sheet", ctx.chatId, `${at} ⇐ ${grid.length} row${grid.length === 1 ? "" : "s"}, ${filled} cells`);
     const r = await call<any>(
@@ -1178,7 +1191,7 @@ const remember: BrowserTool = {
         `already on file. Carry on.`
       );
     }
-    const meta = await saveMemory(topic, title, content);
+    const meta = await saveMemory(ctx.userId, topic, title, content);
     emit("remember", ctx.chatId, `${meta.topic}/${meta.slug}`);
     return `Saved to ${meta.topic}/${meta.slug}.md`;
   },
@@ -1201,6 +1214,7 @@ const searchMemory: BrowserTool = {
   },
   async run({ query }, ctx) {
     const { note, results, inConversation } = await searchMemories(
+      ctx.userId,
       String(query ?? ""),
       userSaid(ctx),
       ctx.chatId,
@@ -1255,7 +1269,7 @@ const findAnswers: BrowserTool = {
     // Only memories from before this chat, and the user's own words — the
     // same things groundingGate accepts, so a field this points to a source
     // for can actually be filled.
-    const memories = await memoriesBefore(ctx.chatStartedAt);
+    const memories = await memoriesBefore(ctx.userId, ctx.chatStartedAt);
     const saidText = userSaid(ctx).join("\n\n");
     const sources: Source[] = [
       {
@@ -1350,71 +1364,76 @@ const askUser: BrowserTool = {
     },
   },
   async run({ intro, questions }, ctx) {
-    const qs = (Array.isArray(questions) ? questions : [])
-      .filter((q: any) => q && typeof q.question === "string" && q.question.trim())
-      .slice(0, MAX_QUESTIONS)
-      .map((q: any) => ({
-        question: q.question.trim() as string,
-        options: strings(q.options).slice(0, MAX_OPTIONS),
-        multiple: Boolean(q.multiple),
-        title: typeof q.title === "string" && q.title.trim() ? q.title.trim() : q.question.trim().slice(0, 60),
-      }));
+    const qs = askedQuestions(questions);
     if (qs.length === 0) return 'Pass at least one question, e.g. questions: [{"question": "…"}].';
 
     emit("ask", ctx.chatId, `${qs.length} question${qs.length === 1 ? "" : "s"} for you`);
-    const outcome = await requestAnswers(
-      {
+    throw new PauseForUser({
+      kind: "ask",
+      ask: {
         intro: typeof intro === "string" ? intro.trim() : "",
         questions: qs.map(({ question, options, multiple }): AskQuestion => ({ question, options, multiple })),
       },
-      ctx.chatId,
-      undefined,
-      ctx.signal,
-    );
-    if (outcome === "unanswered") {
-      return (
-        "The user has not answered yet (the panel may be closed). Stop here: say " +
-        "you are waiting on their answers and that they can answer in the side panel."
-      );
-    }
-    if (outcome === "dismissed") {
-      return (
-        "The user closed the questions without answering. Do not ask them again. " +
-        "Finish what you can without them, and say what is still missing."
-      );
-    }
-
-    const context = await userContext(ctx);
-    const lines = await Promise.all(
-      qs.map(async (q, i) => {
-        const answer = outcome.answers[i] ?? null;
-        if (answer === null) return `${i + 1}. ${q.question} → (skipped)`;
-        ctx.answers.push(`${q.question} — ${answer}`);
-        if (!jevEnabled) return `${i + 1}. ${q.question} → ${answer}`;
-        const verdict = await judgeMemoryWorth({ question: q.question, answer }, context, ctx.chatId, ctx.signal);
-        if (!verdict) {
-          return `${i + 1}. ${q.question} → ${answer}  (not saved: the check failed — remember it yourself if it is a lasting fact)`;
-        }
-        if (!verdict.worth) return `${i + 1}. ${q.question} → ${answer}  (not saved: only about this task)`;
-        const meta = await saveMemory("user/answers", q.title, `Asked "${q.question}" — answered: ${answer}`);
-        emit("remember", ctx.chatId, `${meta.topic}/${meta.slug}`);
-        return `${i + 1}. ${q.question} → ${answer}  (saved to memory: ${meta.topic}/${meta.slug})`;
-      }),
-    );
-    const answered = outcome.answers.filter((a) => a !== null).length;
-    const saved = lines.filter((l) => l.includes("(saved to memory")).length;
-    emit(
-      "answered",
-      ctx.chatId,
-      `${answered} answered · ${qs.length - answered} skipped · ${saved} saved to memory`,
-    );
-    return (
-      `The user answered:\n${lines.join("\n")}\n\n` +
-      `These count as things the user told you — enter them as given, and do ` +
-      `not ask again for the skipped ones.`
-    );
+    });
   },
 };
+
+/** ask_user's questions as the model gave them, cleaned up and capped. */
+function askedQuestions(questions: unknown) {
+  return (Array.isArray(questions) ? questions : [])
+    .filter((q: any) => q && typeof q.question === "string" && q.question.trim())
+    .slice(0, MAX_QUESTIONS)
+    .map((q: any) => ({
+      question: q.question.trim() as string,
+      options: strings(q.options).slice(0, MAX_OPTIONS),
+      multiple: Boolean(q.multiple),
+      title: typeof q.title === "string" && q.title.trim() ? q.title.trim() : q.question.trim().slice(0, 60),
+    }));
+}
+
+/**
+ * ask_user's result, once the person has answered the form it paused for.
+ * `input` is the call's own arguments, so the questions match the form shown.
+ */
+export async function askResult(input: any, outcome: AskOutcome, ctx: ToolCtx): Promise<string> {
+  if (outcome === "dismissed") {
+    return (
+      "The user closed the questions without answering. Do not ask them again. " +
+      "Finish what you can without them, and say what is still missing."
+    );
+  }
+  const qs = askedQuestions(input?.questions);
+
+  const context = await userContext(ctx);
+  const lines = await Promise.all(
+    qs.map(async (q, i) => {
+      const answer = outcome.answers[i] ?? null;
+      if (answer === null) return `${i + 1}. ${q.question} → (skipped)`;
+      ctx.answers.push(`${q.question} — ${answer}`);
+      if (!jevEnabled) return `${i + 1}. ${q.question} → ${answer}`;
+      const verdict = await judgeMemoryWorth({ question: q.question, answer }, context, ctx.chatId, ctx.signal);
+      if (!verdict) {
+        return `${i + 1}. ${q.question} → ${answer}  (not saved: the check failed — remember it yourself if it is a lasting fact)`;
+      }
+      if (!verdict.worth) return `${i + 1}. ${q.question} → ${answer}  (not saved: only about this task)`;
+      const meta = await saveMemory(ctx.userId, "user/answers", q.title, `Asked "${q.question}" — answered: ${answer}`);
+      emit("remember", ctx.chatId, `${meta.topic}/${meta.slug}`);
+      return `${i + 1}. ${q.question} → ${answer}  (saved to memory: ${meta.topic}/${meta.slug})`;
+    }),
+  );
+  const answered = outcome.answers.filter((a) => a !== null).length;
+  const saved = lines.filter((l) => l.includes("(saved to memory")).length;
+  emit(
+    "answered",
+    ctx.chatId,
+    `${answered} answered · ${qs.length - answered} skipped · ${saved} saved to memory`,
+  );
+  return (
+    `The user answered:\n${lines.join("\n")}\n\n` +
+    `These count as things the user told you — enter them as given, and do ` +
+    `not ask again for the skipped ones.`
+  );
+}
 
 const checkJobFit: BrowserTool = {
   def: {
@@ -1497,7 +1516,7 @@ const updateProgress: BrowserTool = {
     },
   },
   async run({ done, skipped, note }, ctx) {
-    const task = await recordProgress(ctx.chatId, {
+    const task = await recordProgress(ctx.userId, ctx.chatId, {
       done: strings(done),
       skipped: strings(skipped),
       note: typeof note === "string" ? note.trim() : "",

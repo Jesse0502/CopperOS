@@ -9,15 +9,26 @@
 
 import { setTimeout as sleep } from "node:timers/promises";
 import OpenAI from "openai";
-import { emit } from "./bridge.js";
 import {
+  emit,
+  newRequestId,
+  TimeUp,
+  type ApprovalOutcome,
+  type AskOutcome,
+  type PendingRequest,
+} from "./bridge.js";
+import {
+  APPROVAL_DENIED,
+  askResult,
   missingArgs,
+  PauseForUser,
   refLabel,
   TOOL_DEFS,
   TOOL_BY_NAME,
   type ToolCtx,
   type ToolResult,
   type ContentPart,
+  type UserRequest,
 } from "./tools.js";
 import {
   acceptsImages,
@@ -59,7 +70,6 @@ import {
   loadCurrent,
   loadSession,
   save,
-  storageDir,
   stripImages,
   type ApprovalMode,
   type Session,
@@ -291,6 +301,60 @@ const CANCEL_NOTICE =
   "to continue, pick it back up from where it stopped — take a fresh " +
   "snapshot first, since the page may have moved on.]";
 
+// Pushed when a task stops at its time limit, for the same reason as
+// CANCEL_NOTICE, and filtered out of replay() the same way.
+const TIME_UP_NOTICE =
+  "[The task above stopped at its time limit before it finished. If the " +
+  "user asks you to continue, pick it back up from where it stopped — take " +
+  "a fresh snapshot first, since the page may have moved on.]";
+
+// How long before a time limit no new step starts, so the one in progress
+// can finish and the turn be saved. A quarter of the limit, if that is less.
+const FINISH_MS = 30_000;
+
+/**
+ * A task's time limit, across the runs a pause splits it into — time spent
+ * waiting on the person never counts. Past the margin before the limit no
+ * new step starts; at the limit itself, whatever is still in flight is
+ * stopped (the run's signal aborts with TimeUp), so the turn is saved
+ * cleanly rather than cut off.
+ */
+class Clock {
+  private readonly start = Date.now();
+  private readonly timer: NodeJS.Timeout | null = null;
+  timedOut = false;
+
+  constructor(
+    private readonly usedBefore: number,
+    private readonly limitMs: number | null,
+    abort: AbortController,
+  ) {
+    if (limitMs === null) return;
+    this.timer = setTimeout(() => {
+      this.timedOut = true;
+      abort.abort(new TimeUp());
+    }, Math.max(0, limitMs - usedBefore));
+  }
+
+  /** Active time spent on the task so far, this run included. */
+  used(): number {
+    return this.usedBefore + (Date.now() - this.start);
+  }
+
+  /** Whether it is too late to start another step. */
+  late(): boolean {
+    if (this.limitMs === null) return false;
+    return this.used() >= this.limitMs - Math.min(FINISH_MS, this.limitMs / 4);
+  }
+
+  stop(): void {
+    if (this.timer) clearTimeout(this.timer);
+  }
+}
+
+/** A run's time limit: the task's, in ms of active time. Null or absent means none. */
+export type RunOptions = { limitMs?: number | null };
+
 // How much of the chat classifyIntent sees: enough to read a short
 // follow-up in context, not the whole transcript.
 const INTENT_TURNS = 3;
@@ -329,6 +393,11 @@ function earlierTurns(messages: Msg[]): EarlierTurn[] {
         if (last) last.outcome = "cancelled by the user before it finished";
         continue;
       }
+      if (m.content === TIME_UP_NOTICE) {
+        const last = turns.at(-1);
+        if (last) last.outcome = "stopped at its time limit before it finished";
+        continue;
+      }
       turns.push({ user: clip(m.content) });
     } else if (
       m.role === "assistant" &&
@@ -350,6 +419,10 @@ export type RunResult = {
   steps: number;
   usage: Usage;
   model: string;
+  /** Set when the run stopped to wait on the person; resume() carries it on. */
+  paused?: PendingRequest;
+  /** Set when the task stopped at its time limit. */
+  timeUp?: boolean;
 };
 
 type Active = ReturnType<typeof resolveActive>;
@@ -365,6 +438,32 @@ type Watch = {
    */
   trail: string[];
 };
+
+/**
+ * Where a turn's rounds stand. Lives on the stack while a run goes, and is
+ * saved with the chat when the turn pauses (session.ts's Paused) so resuming
+ * carries on from the same round and step.
+ */
+type Loop = {
+  round: number;
+  /** Steps taken in this round. */
+  step: number;
+  /** Steps taken in the whole turn. */
+  steps: number;
+  stalls: number;
+  /** progressMark at the start of this round, or false for an untracked turn. */
+  markBefore: string | false;
+  tracked: TaskState | null;
+  watch: Watch | null;
+  /** Where this round's context starts: null for the whole chat, or a fresh round's brief. */
+  from: Msg | null;
+  finalText: string;
+};
+
+type ToolCall = OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
+
+/** A call waiting on the person: which one, and what for. */
+type Waiting = { callId: string; request: UserRequest };
 
 /** Why a check-in ended a round early. */
 type Handover = {
@@ -600,6 +699,9 @@ function trimTurns(history: Msg[], budget: number): Msg[] {
  */
 export class Agent {
   private abort: AbortController | null = null;
+  // The running run's time limit, if it has one.
+  private clock: Clock | null = null;
+  private readonly userId: string;
   private session: Session;
   // Whether the model a run started with takes images — see acceptsImages.
   private images: boolean | null = null;
@@ -609,28 +711,29 @@ export class Agent {
   // told once, on the first task after a chat is loaded from disk.
   private resumeNoticePending: boolean;
 
-  private constructor(session: Session) {
+  private constructor(userId: string, session: Session) {
+    this.userId = userId;
     this.session = session;
     this.resumeNoticePending = session.messages.length > 0;
   }
 
   /** A brand-new, empty chat — never resumes anything. */
-  static blank(): Agent {
-    return new Agent(blank(activeLabel(getConfig())));
+  static blank(userId: string): Agent {
+    return new Agent(userId, blank(activeLabel(getConfig(userId))));
   }
 
-  /** The last-viewed chat (current.json), or a blank one if there is none yet. */
-  static async resumeLast(): Promise<Agent> {
-    return new Agent(await loadCurrent(activeLabel(getConfig())));
+  /** The last-viewed chat, or a blank one if there is none yet. */
+  static async resumeLast(userId: string): Promise<Agent> {
+    return new Agent(userId, await loadCurrent(userId, activeLabel(getConfig(userId))));
   }
 
   /** A specific past chat by id. Falls back to a blank chat under that same id if it is somehow gone. */
-  static async forChat(id: string): Promise<Agent> {
-    const label = activeLabel(getConfig());
+  static async forChat(userId: string, id: string): Promise<Agent> {
+    const label = activeLabel(getConfig(userId));
     try {
-      return new Agent(await loadSession(id, label));
+      return new Agent(userId, await loadSession(userId, id, label));
     } catch {
-      return new Agent({ ...blank(label), id });
+      return new Agent(userId, { ...blank(label), id });
     }
   }
 
@@ -640,7 +743,7 @@ export class Agent {
       turns: this.session.tasks.length,
       messages: this.session.messages.length,
       approvalMode: this.session.settings.approvalMode,
-      dir: storageDir,
+      lastTask: this.session.tasks.at(-1) ?? null,
     };
   }
 
@@ -667,6 +770,7 @@ export class Agent {
         if (
           m.content === RESUME_NOTICE ||
           m.content === CANCEL_NOTICE ||
+          m.content === TIME_UP_NOTICE ||
           isBrief(m.content) ||
           isSupervisorNote(m.content)
         )
@@ -684,16 +788,9 @@ export class Agent {
     return out;
   }
 
-  async run(task: string): Promise<RunResult> {
-    const abort = new AbortController();
-    this.abort = abort;
-
-    // Resolved once per run: the model a task started with sees it through,
-    // even if Settings is changed while it is still working.
-    const active = resolveActive(getConfig());
-    this.session.model = active.label;
-    const budget = await historyBudgetChars(getConfig());
-    this.images = await acceptsImages(getConfig());
+  async run(task: string, options: RunOptions = {}): Promise<RunResult> {
+    const { abort, active, budget } = await this.begin();
+    this.clock = new Clock(0, options.limitMs ?? null, abort);
 
     if (this.resumeNoticePending) {
       this.session.messages.push({ role: "user", content: RESUME_NOTICE });
@@ -702,15 +799,14 @@ export class Agent {
 
     // Taken before this task is pushed, so it is only the turns before it.
     const earlier = earlierTurns(this.session.messages);
-    const recorded = jevEnabled ? await loadTask(this.session.id) : null;
+    const recorded = jevEnabled ? await loadTask(this.userId, this.session.id) : null;
 
     // A task is a turn, not a new conversation.
     this.session.messages.push({ role: "user", content: task });
     this.session.tasks.push(task);
 
     const usage: Usage = { input: 0, output: 0, cached: 0 };
-    let steps = 0;
-    let finalText = "";
+    let loop: Loop | null = null;
 
     try {
       // A no-op without JEV_AI_API_KEY set. When configured, this lets a
@@ -730,95 +826,388 @@ export class Agent {
         abort.signal,
       );
       this.jobTask = intent.jobs;
-      let tracked = await this.track(task, intent, recorded);
+      const tracked = await this.track(task, intent, recorded);
 
-      // Round 1 sees the whole chat, so a follow-up reads in context. Each
-      // later round starts from a brief instead (see progress.ts), so a long
-      // task does not drag every earlier round's pages along with it.
-      let from: Msg | null = null;
-      let stalls = 0;
-      // Check-ins hold the model to a task on record, so only a tracked one
-      // gets them. Strikes carry across rounds: a fresh round that goes off
-      // course again is closer to stopping, not back at the start.
-      const watch: Watch | null =
-        tracked && CHECK_IN_EVERY > 0 ? { strikes: 0, trail: [] } : null;
-      for (let round = 1; ; round++) {
-        const markBefore = tracked && progressMark(tracked);
-        const r = await this.round(
-          active,
-          budget,
-          usage,
-          abort.signal,
-          from,
-          round === 1 && intent.greeting ? "none" : "high",
-          watch,
-        );
-        steps += r.steps;
-        if (r.text) finalText = r.text;
-        if (r.cancelled) {
-          return {
-            text: "Cancelled by user.",
-            steps,
-            usage,
-            model: active.label,
-          };
-        }
-        if (!tracked) break;
-
-        // Re-read: update_progress wrote to the file during the round.
-        tracked = (await loadTask(this.session.id)) ?? tracked;
-        tracked.rounds++;
-        tracked.lastReport = r.handover
-          ? `(Handed over at a check-in, mid-task.) ${r.handover.report}`
-          : r.outOfSteps
-            ? `Ran out of steps for this round (${MAX_STEPS}) before finishing.` +
-              (r.text ? ` Last message: ${r.text}` : "")
-            : r.text;
-        tracked.supervisor = r.handover?.note ?? "";
-        // A round a check-in handed over was cut short on purpose, so
-        // recording nothing in it is not a stall.
-        if (progressMark(tracked) !== markBefore) stalls = 0;
-        else if (!r.handover) stalls++;
-
-        const stop = await this.checkRound(
-          tracked,
-          round,
-          stalls,
-          r.handover,
-          abort.signal,
-        );
-        await saveTask(this.session.id, tracked);
-        if (abort.signal.aborted) {
-          // Cancelled while Jev was judging the round: same as a cancel
-          // mid-round, not a stop the check decided on.
-          this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
-          return {
-            text: "Cancelled by user.",
-            steps,
-            usage,
-            model: active.label,
-          };
-        }
-        if (stop) break;
-
-        const next: Msg = { role: "user", content: brief(tracked) };
-        this.session.messages.push(next);
-        from = next;
-      }
+      loop = {
+        round: 1,
+        step: 0,
+        steps: 0,
+        stalls: 0,
+        markBefore: false,
+        tracked,
+        // Check-ins hold the model to a task on record, so only a tracked one
+        // gets them. Strikes carry across rounds: a fresh round that goes off
+        // course again is closer to stopping, not back at the start.
+        watch: tracked && CHECK_IN_EVERY > 0 ? { strikes: 0, trail: [] } : null,
+        from: null,
+        finalText: "",
+      };
+      return await this.drive(
+        active,
+        budget,
+        usage,
+        abort.signal,
+        loop,
+        intent.greeting ? "none" : "high",
+      );
     } catch (err) {
       // Cancelling mid-completion rejects the request instead of reaching
       // the check at the top of the loop — the same outcome, so the same note.
+      if (this.clock.timedOut) return await this.timeUp(loop, usage, active, true);
       if (abort.signal.aborted) {
         this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
       }
       throw err;
     } finally {
-      // Every exit — finished, cancelled, or failed — saves the turn, so the
-      // user's message and how it ended are never missing from the chat.
+      this.clock.stop();
+      // Every exit — finished, paused, cancelled, or failed — saves the turn,
+      // so the user's message and how it ended are never missing from the chat.
       await this.persist();
     }
+  }
 
-    return { text: finalText, steps, usage, model: active.label };
+  /**
+   * Carry on a paused task with the person's answer. The call that waited
+   * gets its result — the form's answers, the approved action actually run,
+   * or a denial — then the rest of its step runs, and the turn goes on from
+   * the round and step it paused at, as if it never stopped.
+   */
+  async resume(
+    requestId: string,
+    answer: ApprovalOutcome | AskOutcome,
+    options: RunOptions = {},
+  ): Promise<RunResult> {
+    const paused = this.session.paused;
+    if (!paused || paused.request.id !== requestId) {
+      throw new Error(`chat ${this.session.id} is not waiting on ${requestId}`);
+    }
+    const isApproval = answer === "approved" || answer === "denied";
+    if (isApproval !== (paused.request.kind === "approval")) {
+      throw new Error(`a ${paused.request.kind} request cannot take that answer`);
+    }
+
+    // Claimed before anything is awaited, so the same answer arriving twice
+    // finds nothing waiting the second time.
+    this.session.paused = undefined;
+    let setup: Awaited<ReturnType<Agent["begin"]>>;
+    try {
+      setup = await this.begin();
+    } catch (err) {
+      this.session.paused = paused;
+      throw err;
+    }
+    const { abort, active, budget } = setup;
+    // Waiting on the person did not count against the limit; the time before it did.
+    this.clock = new Clock(paused.loop.timeUsedMs ?? 0, options.limitMs ?? null, abort);
+    const usage: Usage = { input: 0, output: 0, cached: 0 };
+    this.jobTask = paused.loop.jobTask;
+    // The task file may be gone (deleted by hand); carry on untracked then.
+    const tracked = paused.loop.tracked ? await loadTask(this.userId, this.session.id) : null;
+    const loop: Loop = {
+      ...paused.loop,
+      tracked,
+      watch: tracked ? paused.loop.watch : null,
+      // A fresh round's context starts at its brief — the latest one, since
+      // briefs are only ever pushed at the start of a round.
+      from: paused.loop.round > 1 ? this.lastBrief() : null,
+    };
+
+    try {
+      const [waiting, ...rest] = this.openCalls(paused.callId);
+      const again = await this.answerCall(waiting, paused.request, answer, active, abort.signal, loop);
+      if (again) {
+        return {
+          text: loop.finalText,
+          steps: loop.steps,
+          usage,
+          model: active.label,
+          paused: this.pause(again, loop),
+        };
+      }
+      return await this.drive(active, budget, usage, abort.signal, loop, "high", rest);
+    } catch (err) {
+      if (this.clock.timedOut) return await this.timeUp(loop, usage, active, true);
+      if (abort.signal.aborted) {
+        this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
+      }
+      throw err;
+    } finally {
+      this.clock.stop();
+      await this.persist();
+    }
+  }
+
+  /** What this chat's task is waiting on the person for, if it is paused. */
+  waitingOn(): PendingRequest | null {
+    return this.session.paused?.request ?? null;
+  }
+
+  /**
+   * Cancel a paused task. Its waiting calls are answered as cancelled — what a
+   * cancel mid-run leaves behind — so the chat can take a new task. Returns
+   * the request it was waiting on, or null if it was not paused.
+   */
+  async cancelPause(): Promise<PendingRequest | null> {
+    const paused = this.session.paused;
+    if (!paused) return null;
+    this.session.paused = undefined;
+    for (const c of this.openCalls(paused.callId)) {
+      this.session.messages.push({ role: "tool", tool_call_id: c.id, content: "Error: Cancelled by user." });
+    }
+    this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
+    await this.persist();
+    return paused.request;
+  }
+
+  /** Per-run setup: a fresh abort signal, and the model resolved once for the whole run. */
+  private async begin() {
+    const abort = new AbortController();
+    this.abort = abort;
+
+    // Resolved once per run: the model a task started with sees it through,
+    // even if Settings is changed while it is still working.
+    const config = getConfig(this.userId);
+    const active = resolveActive(config);
+    this.session.model = active.label;
+    const budget = await historyBudgetChars(config);
+    this.images = await acceptsImages(config);
+    return { abort, active, budget };
+  }
+
+  /**
+   * The turn's rounds, from wherever `loop` stands — a new turn, or a paused
+   * one resuming. `resumed` is the rest of the step a pause interrupted: calls
+   * still to run before the next completion.
+   */
+  private async drive(
+    active: Active,
+    budget: number,
+    usage: Usage,
+    signal: AbortSignal,
+    loop: Loop,
+    firstEffort: Effort,
+    resumed?: ToolCall[],
+  ): Promise<RunResult> {
+    const result = (text: string, paused?: PendingRequest): RunResult => ({
+      text,
+      steps: loop.steps,
+      usage,
+      model: active.label,
+      ...(paused ? { paused } : {}),
+    });
+
+    // Round 1 sees the whole chat, so a follow-up reads in context. Each
+    // later round starts from a brief instead (see progress.ts), so a long
+    // task does not drag every earlier round's pages along with it.
+    for (; ; loop.round++) {
+      if (!resumed) {
+        loop.step = 0;
+        loop.markBefore = loop.tracked ? progressMark(loop.tracked) : false;
+      }
+      const r = await this.round(
+        active,
+        budget,
+        usage,
+        signal,
+        loop,
+        loop.round === 1 ? firstEffort : "high",
+        resumed,
+      );
+      resumed = undefined;
+      if (r.text) loop.finalText = r.text;
+      if (r.waiting) return result(loop.finalText, this.pause(r.waiting, loop));
+      if (r.timeUp) return this.timeUp(loop, usage, active, true);
+      if (r.cancelled) return result("Cancelled by user.");
+      if (!loop.tracked) break;
+
+      // Re-read: update_progress wrote to the file during the round.
+      const tracked = (await loadTask(this.userId, this.session.id)) ?? loop.tracked;
+      loop.tracked = tracked;
+      tracked.rounds++;
+      tracked.lastReport = r.handover
+        ? `(Handed over at a check-in, mid-task.) ${r.handover.report}`
+        : r.outOfSteps
+          ? `Ran out of steps for this round (${MAX_STEPS}) before finishing.` +
+            (r.text ? ` Last message: ${r.text}` : "")
+          : r.text;
+      tracked.supervisor = r.handover?.note ?? "";
+      // A round a check-in handed over was cut short on purpose, so
+      // recording nothing in it is not a stall.
+      if (progressMark(tracked) !== loop.markBefore) loop.stalls = 0;
+      else if (!r.handover) loop.stalls++;
+
+      const stop = await this.checkRound(
+        tracked,
+        loop.round,
+        loop.stalls,
+        r.handover,
+        signal,
+      );
+      await saveTask(this.userId, this.session.id, tracked);
+      if (this.clock?.timedOut) return this.timeUp(loop, usage, active, false);
+      if (signal.aborted) {
+        // Cancelled while Jev was judging the round: same as a cancel
+        // mid-round, not a stop the check decided on.
+        this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
+        return result("Cancelled by user.");
+      }
+      if (stop) break;
+      if (this.clock?.late()) return this.timeUp(loop, usage, active, false);
+
+      const next: Msg = { role: "user", content: brief(tracked) };
+      this.session.messages.push(next);
+      loop.from = next;
+    }
+
+    return result(loop.finalText);
+  }
+
+  /**
+   * Save the turn as waiting on the person, and say what for. The run ends
+   * here; the caller shows the request, and the answer comes to resume().
+   */
+  private pause(waiting: Waiting, loop: Loop): PendingRequest {
+    const id = newRequestId(this.session.id);
+    const chatId = this.session.id;
+    const request: PendingRequest =
+      waiting.request.kind === "approval"
+        ? { id, chatId, kind: "approval", text: waiting.request.text }
+        : { id, chatId, kind: "ask", ask: waiting.request.ask };
+    this.session.paused = {
+      request,
+      callId: waiting.callId,
+      at: new Date().toISOString(),
+      loop: {
+        round: loop.round,
+        step: loop.step,
+        steps: loop.steps,
+        stalls: loop.stalls,
+        markBefore: loop.markBefore,
+        tracked: loop.tracked !== null,
+        watch: loop.watch,
+        jobTask: this.jobTask,
+        finalText: loop.finalText,
+        timeUsedMs: this.clock?.used() ?? 0,
+      },
+    };
+    return request;
+  }
+
+  /**
+   * End the turn at its time limit: noted in the transcript so "continue"
+   * picks it up, and recorded on a tracked task — `midRound` when the round
+   * it was in never finished, so it counts as a round cut short.
+   */
+  private async timeUp(
+    loop: Loop | null,
+    usage: Usage,
+    active: Active,
+    midRound: boolean,
+  ): Promise<RunResult> {
+    this.session.messages.push({ role: "user", content: TIME_UP_NOTICE });
+    const task = loop?.tracked ? await loadTask(this.userId, this.session.id) : null;
+    if (task) {
+      if (midRound) {
+        task.rounds++;
+        task.lastReport =
+          "Stopped at the time limit partway through this round." +
+          (loop!.finalText ? ` Last message: ${loop!.finalText}` : "");
+      }
+      task.lastCheck = `Round ${task.rounds}: stopped: time limit`;
+      await saveTask(this.userId, this.session.id, task);
+    }
+    const minutes = Math.round((this.clock?.used() ?? 0) / 60_000);
+    return {
+      text:
+        `Time's up — stopped after ${minutes ? `${minutes} min` : "less than a minute"}` +
+        (task ? ` with ${task.done.length} done and ${task.skipped.length} skipped` : "") +
+        `. Say "continue" to pick it up.`,
+      steps: loop?.steps ?? 0,
+      usage,
+      model: active.label,
+      timeUp: true,
+    };
+  }
+
+  /** The call a paused turn waits on, then the calls after it in its step that have not run yet. */
+  private openCalls(callId: string): ToolCall[] {
+    const msgs = this.session.messages;
+    const i = msgs.findLastIndex(
+      (m) => m.role === "assistant" && (m.tool_calls ?? []).some((c) => c.id === callId),
+    );
+    if (i === -1) throw new Error(`the paused call ${callId} is missing from the transcript`);
+    const calls = (msgs[i] as Extract<Msg, { role: "assistant" }>).tool_calls!;
+    const answered = new Set(
+      msgs.slice(i + 1).flatMap((m) => (m.role === "tool" ? [m.tool_call_id] : [])),
+    );
+    return calls.slice(calls.findIndex((c) => c.id === callId)).filter((c) => !answered.has(c.id));
+  }
+
+  /** The latest fresh round's brief in the transcript. */
+  private lastBrief(): Msg | null {
+    return (
+      this.session.messages.findLast(
+        (m) => m.role === "user" && typeof m.content === "string" && isBrief(m.content),
+      ) ?? null
+    );
+  }
+
+  /**
+   * The waiting call's result, from the person's answer. An approved action
+   * is run for real, past its gate; anything else is answered in place.
+   * Returns a new wait only if running the approved action asked again.
+   */
+  private async answerCall(
+    call: ToolCall,
+    request: PendingRequest,
+    answer: ApprovalOutcome | AskOutcome,
+    active: Active,
+    signal: AbortSignal,
+    loop: Loop,
+  ): Promise<Waiting | null> {
+    if (answer === "approved") return this.runCalls([call], active, signal, loop, true);
+    if (call.type !== "function") throw new Error(`the paused call ${call.id} is not a function call`);
+
+    let input: unknown = {};
+    try {
+      input = JSON.parse(call.function.arguments || "{}");
+    } catch {
+      // It parsed when the call first ran; nothing to recover here.
+    }
+    let content: string;
+    try {
+      content =
+        request.kind === "approval"
+          ? APPROVAL_DENIED
+          : await askResult(input, answer as AskOutcome, this.toolCtx(active, signal));
+    } catch (err) {
+      content = `Error: ${String((err as Error)?.message ?? err)}`;
+    }
+    this.session.messages.push({ role: "tool", tool_call_id: call.id, content });
+    this.logAction(loop, describeAction(call.function.name, input, null, content));
+    return null;
+  }
+
+  private toolCtx(active: Active, signal: AbortSignal, preApproved = false): ToolCtx {
+    return {
+      userId: this.userId,
+      chatId: this.session.id,
+      approvalMode: this.session.settings.approvalMode,
+      signal,
+      userMessages: this.session.tasks,
+      answers: this.session.answers,
+      chatStartedAt: this.session.createdAt,
+      seesImages: this.images !== false && !noImages.has(active.label),
+      jobTask: this.jobTask,
+      ...(preApproved ? { preApproved } : {}),
+    };
+  }
+
+  /** What the model did, for check-ins to judge it on — kept only for a watched turn. */
+  private logAction(loop: Loop, entry: string): void {
+    if (!loop.watch) return;
+    loop.watch.trail.push(entry);
+    loop.watch.trail.splice(0, loop.watch.trail.length - TRAIL_LENGTH);
   }
 
   /**
@@ -845,7 +1234,7 @@ export class Agent {
       // either way the progress on record must survive for a later "continue".
       return null;
     }
-    await saveTask(this.session.id, task);
+    await saveTask(this.userId, this.session.id, task);
     return task;
   }
 
@@ -928,7 +1317,7 @@ export class Agent {
     step: number,
     watch: Watch,
   ): Promise<Handover | null> {
-    const task = await loadTask(this.session.id);
+    const task = await loadTask(this.userId, this.session.id);
     if (!task) return null;
     const start = from ? Math.max(0, this.session.messages.indexOf(from)) : 0;
     const ask: Msg = { role: "user", content: checkInPrompt(task, step) };
@@ -1058,184 +1447,204 @@ export class Agent {
 
   /**
    * One round: completions and tool calls until the model stops calling
-   * tools, runs out of steps, the user cancels, or a check-in hands over.
-   * `from` is where this round's context starts — null for the whole chat,
-   * or a fresh round's brief, so nothing before it is sent. `watch`, for a
-   * tracked task, turns on check-ins.
+   * tools, runs out of steps, the user cancels, a check-in hands over, or a
+   * call has to wait on the person. `loop.from` is where this round's context
+   * starts — null for the whole chat, or a fresh round's brief, so nothing
+   * before it is sent; `loop.watch`, for a tracked task, turns on check-ins.
+   * `resumed` carries on the step a pause interrupted: the rest of its calls,
+   * then its check-in, then on as normal.
    */
   private async round(
     active: Active,
     budget: number,
     usage: Usage,
     signal: AbortSignal,
-    from: Msg | null,
+    loop: Loop,
     firstEffort: Effort,
-    watch: Watch | null,
+    resumed?: ToolCall[],
   ): Promise<{
-    steps: number;
     text: string;
     cancelled: boolean;
     outOfSteps: boolean;
     handover: Handover | null;
+    waiting: Waiting | null;
+    timeUp: boolean;
   }> {
-    let steps = 0;
     let text = "";
-    const logAction = (entry: string) => {
-      if (!watch) return;
-      watch.trail.push(entry);
-      watch.trail.splice(0, watch.trail.length - TRAIL_LENGTH);
-    };
+    const ended = { cancelled: false, outOfSteps: false, handover: null, waiting: null, timeUp: false };
+    let pending = resumed ?? null;
 
-    while (steps < MAX_STEPS) {
-      if (signal.aborted) {
-        this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
-        return { steps, text, cancelled: true, outOfSteps: false, handover: null };
-      }
-      steps++;
-
-      this.session.messages = trimTurns(
-        pruneHistory(this.session.messages),
-        budget,
-      );
-      // trimTurns never drops the turn in progress, and a brief starts one,
-      // so `from` is always still there — both keep message identity.
-      const start = from ? Math.max(0, this.session.messages.indexOf(from)) : 0;
-      // The system prompt is a frozen constant and is never stored, so it is
-      // prepended per request rather than kept in the transcript.
-      const messages: Msg[] = [
-        { role: "system", content: SYSTEM },
-        ...this.session.messages.slice(start),
-      ];
-
-      const res = await createCompletion(
-        active,
-        messages,
-        signal,
-        steps === 1 ? firstEffort : "high",
-      );
-
-      usage.input += res.usage?.prompt_tokens ?? 0;
-      usage.output += res.usage?.completion_tokens ?? 0;
-      usage.cached += res.usage?.prompt_tokens_details?.cached_tokens ?? 0;
-
-      // createCompletion never returns without a choice.
-      const msg = res.choices[0]!.message;
-
-      this.session.messages.push(msg);
-
-      // Non-standard field: Ollama surfaces thinking-model output here rather
-      // than in content. Shown to the user, never fed back to the model.
-      const reasoning = (msg as { reasoning?: string }).reasoning;
-      if (reasoning?.trim()) emit("think", this.session.id, reasoning);
-
-      if (msg.content?.trim()) {
-        text = msg.content;
-        emit("say", this.session.id, msg.content);
-      }
-
-      const calls = msg.tool_calls ?? [];
-      if (calls.length === 0) {
-        return { steps, text, cancelled: false, outOfSteps: false, handover: null };
-      }
-
-      for (const c of calls) {
-        // The compat endpoint only emits function calls, but the union in the
-        // SDK also covers custom tools.
-        if (c.type !== "function") {
-          this.session.messages.push({
-            role: "tool",
-            tool_call_id: c.id,
-            content: `Unsupported tool call type "${c.type}".`,
-          });
-          continue;
+    while (pending || loop.step < MAX_STEPS) {
+      let calls: ToolCall[];
+      if (pending) {
+        calls = pending;
+        pending = null;
+      } else {
+        // The time limit, whether it stopped something in flight or is just
+        // too close to start another step. drive() notes it.
+        if (this.clock?.timedOut || this.clock?.late()) return { ...ended, text, timeUp: true };
+        if (signal.aborted) {
+          this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
+          return { ...ended, text, cancelled: true };
         }
-        const tool = TOOL_BY_NAME.get(c.function.name);
-        if (!tool) {
-          this.session.messages.push({
-            role: "tool",
-            tool_call_id: c.id,
-            content: `No such tool "${c.function.name}".`,
-          });
-          continue;
+        loop.step++;
+        loop.steps++;
+
+        this.session.messages = trimTurns(
+          pruneHistory(this.session.messages),
+          budget,
+        );
+        // trimTurns never drops the turn in progress, and a brief starts one,
+        // so `from` is always still there — both keep message identity.
+        const start = loop.from ? Math.max(0, this.session.messages.indexOf(loop.from)) : 0;
+        // The system prompt is a frozen constant and is never stored, so it is
+        // prepended per request rather than kept in the transcript.
+        const messages: Msg[] = [
+          { role: "system", content: SYSTEM },
+          ...this.session.messages.slice(start),
+        ];
+
+        const res = await createCompletion(
+          active,
+          messages,
+          signal,
+          loop.step === 1 ? firstEffort : "high",
+        );
+
+        usage.input += res.usage?.prompt_tokens ?? 0;
+        usage.output += res.usage?.completion_tokens ?? 0;
+        usage.cached += res.usage?.prompt_tokens_details?.cached_tokens ?? 0;
+
+        // createCompletion never returns without a choice.
+        const msg = res.choices[0]!.message;
+
+        this.session.messages.push(msg);
+
+        // Non-standard field: Ollama surfaces thinking-model output here rather
+        // than in content. Shown to the user, never fed back to the model.
+        const reasoning = (msg as { reasoning?: string }).reasoning;
+        if (reasoning?.trim()) emit("think", this.session.id, reasoning);
+
+        if (msg.content?.trim()) {
+          text = msg.content;
+          emit("say", this.session.id, msg.content);
         }
-        let input: unknown;
-        let label: string | null = null;
-        try {
-          // Local models emit malformed argument JSON often enough that this
-          // has to be a normal tool error the model can read and retry, not a
-          // crash of the run.
-          try {
-            input = c.function.arguments
-              ? JSON.parse(c.function.arguments)
-              : {};
-          } catch {
-            throw new Error(
-              `Arguments were not valid JSON: ${c.function.arguments}. Re-issue the call with valid JSON.`,
-            );
-          }
-          const missing = missingArgs(tool.def, input);
-          if (missing) throw new Error(missing);
-          // Named now: the call's result replaces the snapshot it names from.
-          const ref = (input as { ref?: unknown }).ref;
-          if (typeof ref === "string") label = refLabel(this.session.id, ref);
-          const ctx: ToolCtx = {
-            chatId: this.session.id,
-            approvalMode: this.session.settings.approvalMode,
-            signal,
-            userMessages: this.session.tasks,
-            answers: this.session.answers,
-            chatStartedAt: this.session.createdAt,
-            seesImages: this.images !== false && !noImages.has(active.label),
-            jobTask: this.jobTask,
-          };
-          const out: ToolResult = await tool.run(input, ctx);
-          this.session.messages.push({
-            role: "tool",
-            tool_call_id: c.id,
-            content: out as any,
-          });
-          logAction(describeAction(c.function.name, input, label, out));
-        } catch (err) {
-          // Failures are values, not exceptions. A stale ref or a timeout is
-          // recoverable and the model handles it well when it can see it.
-          const text = String((err as Error)?.message ?? err);
-          emit("tool-error", this.session.id, `${c.function.name}: ${text}`);
-          this.session.messages.push({
-            role: "tool",
-            tool_call_id: c.id,
-            content: `Error: ${text}`,
-          });
-          logAction(describeAction(c.function.name, input, label, new Error(text)));
-        }
+
+        calls = msg.tool_calls ?? [];
+        if (calls.length === 0) return { ...ended, text };
       }
+
+      const waiting = await this.runCalls(calls, active, signal, loop);
+      if (waiting) return { ...ended, text, waiting };
 
       // Written every step, so an interrupted run still leaves a resumable
       // chat rather than losing the whole turn.
       await this.persist();
 
-      if (watch && steps % CHECK_IN_EVERY === 0 && steps < MAX_STEPS) {
+      if (
+        loop.watch &&
+        loop.step % CHECK_IN_EVERY === 0 &&
+        loop.step < MAX_STEPS &&
+        !this.clock?.late()
+      ) {
         const handover = await this.checkIn(
-          active, budget, usage, signal, from, steps, watch,
+          active, budget, usage, signal, loop.from, loop.step, loop.watch,
         );
         if (handover) {
           if (handover.message) text = handover.message;
-          return { steps, text, cancelled: false, outOfSteps: false, handover };
+          return { ...ended, text, handover };
         }
       }
     }
 
     return {
-      steps,
+      ...ended,
       text: text || `Stopped after ${MAX_STEPS} steps without finishing.`,
-      cancelled: false,
       outOfSteps: true,
-      handover: null,
     };
+  }
+
+  /**
+   * A step's tool calls, in order, each result added to the transcript. Stops
+   * at a call that has to wait on the person and says which: it and the calls
+   * after it stay unanswered until the turn resumes. `preApproved` is for
+   * running again a call the person has just approved.
+   */
+  private async runCalls(
+    calls: ToolCall[],
+    active: Active,
+    signal: AbortSignal,
+    loop: Loop,
+    preApproved = false,
+  ): Promise<Waiting | null> {
+    for (const c of calls) {
+      // The compat endpoint only emits function calls, but the union in the
+      // SDK also covers custom tools.
+      if (c.type !== "function") {
+        this.session.messages.push({
+          role: "tool",
+          tool_call_id: c.id,
+          content: `Unsupported tool call type "${c.type}".`,
+        });
+        continue;
+      }
+      const tool = TOOL_BY_NAME.get(c.function.name);
+      if (!tool) {
+        this.session.messages.push({
+          role: "tool",
+          tool_call_id: c.id,
+          content: `No such tool "${c.function.name}".`,
+        });
+        continue;
+      }
+      let input: unknown;
+      let label: string | null = null;
+      try {
+        // Local models emit malformed argument JSON often enough that this
+        // has to be a normal tool error the model can read and retry, not a
+        // crash of the run.
+        try {
+          input = c.function.arguments
+            ? JSON.parse(c.function.arguments)
+            : {};
+        } catch {
+          throw new Error(
+            `Arguments were not valid JSON: ${c.function.arguments}. Re-issue the call with valid JSON.`,
+          );
+        }
+        const missing = missingArgs(tool.def, input);
+        if (missing) throw new Error(missing);
+        // Named now: the call's result replaces the snapshot it names from.
+        const ref = (input as { ref?: unknown }).ref;
+        if (typeof ref === "string") label = refLabel(this.session.id, ref);
+        const out: ToolResult = await tool.run(input, this.toolCtx(active, signal, preApproved));
+        this.session.messages.push({
+          role: "tool",
+          tool_call_id: c.id,
+          content: out as any,
+        });
+        this.logAction(loop, describeAction(c.function.name, input, label, out));
+      } catch (err) {
+        // Not a failure: the call is waiting on the person, and so is the turn.
+        if (err instanceof PauseForUser) return { callId: c.id, request: err.request };
+        // Failures are values, not exceptions. A stale ref or a timeout is
+        // recoverable and the model handles it well when it can see it.
+        const text = String((err as Error)?.message ?? err);
+        emit("tool-error", this.session.id, `${c.function.name}: ${text}`);
+        this.session.messages.push({
+          role: "tool",
+          tool_call_id: c.id,
+          content: `Error: ${text}`,
+        });
+        this.logAction(loop, describeAction(c.function.name, input, label, new Error(text)));
+      }
+    }
+    return null;
   }
 
   private async persist() {
     try {
-      await save(this.session);
+      await save(this.userId, this.session);
     } catch (err) {
       // A failed write must not take the run down with it.
       console.error(`[session] could not save transcript: ${String(err)}`);
@@ -1249,9 +1658,10 @@ export function formatUsage(r: Pick<RunResult, "usage" | "model">): string {
 
 /** Every saved chat, newest first, flagged with which ones are running right now. */
 export async function listChats(
+  userId: string,
   runningIds: Set<string>,
 ): Promise<(SessionSummary & { running: boolean })[]> {
-  const chats = await listSessions();
+  const chats = await listSessions(userId);
   // A chat with nothing said in it yet is not worth its own history entry —
   // unless it is somehow already running (defensive; practically never true,
   // since a task pushes its own text into `tasks` before the run starts).
@@ -1261,6 +1671,6 @@ export async function listChats(
 }
 
 /** Human-readable label for whatever provider/model Settings currently point at. */
-export function activeModelLabel(): string {
-  return activeLabel(getConfig());
+export function activeModelLabel(userId: string): string {
+  return activeLabel(getConfig(userId));
 }

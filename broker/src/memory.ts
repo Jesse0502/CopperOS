@@ -1,34 +1,22 @@
 // Durable, cross-chat facts about the user — unlike session.ts's transcripts,
-// these outlive any one chat. Flat markdown files with hand-parsed
-// frontmatter, grouped by topic folders the model chooses, e.g.
-// "user/career". No yaml dependency and no search index: the corpus is
-// personal facts, not documents, so a full scan on every search is cheap.
-//
-// Layout, under storageDir (see session.ts):
-//   memories/<topic>/<slug>.md
+// these outlive any one chat. Grouped by topic paths the model chooses, e.g.
+// "user/career". No search index: the corpus is personal facts, not
+// documents, so a full scan on every search is cheap. Where they are kept is
+// the store's business (store/store.ts): the local broker writes one
+// markdown file per fact.
 
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
 import { LIKELY_AT, rankSources } from "./jev.js";
-import { storageDir } from "./session.js";
+import { store, type MemoryRecord } from "./store/store.js";
 
-const ROOT = path.join(storageDir, "memories");
+export type MemoryMeta = Omit<MemoryRecord, "content">;
 
-export type MemoryMeta = {
-  topic: string;
-  slug: string;
-  title: string;
-  created: string;
-  updated: string;
-};
-
-export type MemoryHit = MemoryMeta & { content: string };
+export type MemoryHit = MemoryRecord;
 
 function sanitizeSegment(s: string): string {
   return s.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "") || "misc";
 }
 
-/** Slash-separated path the model supplies, made safe to join onto ROOT. */
+/** Slash-separated path the model supplies, made safe to use as a folder path. */
 function sanitizeTopic(topic: string): string {
   return topic.split("/").map(sanitizeSegment).filter(Boolean).join("/") || "misc";
 }
@@ -37,103 +25,38 @@ function slugify(title: string): string {
   return sanitizeSegment(title);
 }
 
-function toFile(meta: MemoryMeta, content: string): string {
-  return (
-    `---\n` +
-    `title: ${meta.title}\n` +
-    `topic: ${meta.topic}\n` +
-    `created: ${meta.created}\n` +
-    `updated: ${meta.updated}\n` +
-    `---\n\n${content.trim()}\n`
-  );
-}
-
-function parseFile(raw: string): { title: string; topic: string; created: string; updated: string; content: string } | null {
-  const m = raw.match(/^---\n([\s\S]*?)\n---\n\n?([\s\S]*)$/);
-  if (!m) return null;
-  const fields: Record<string, string> = {};
-  for (const line of m[1].split("\n")) {
-    const i = line.indexOf(":");
-    if (i === -1) continue;
-    fields[line.slice(0, i).trim()] = line.slice(i + 1).trim();
-  }
-  if (!fields.title || !fields.topic) return null;
-  return {
-    title: fields.title,
-    topic: fields.topic,
-    created: fields.created ?? "",
-    updated: fields.updated ?? "",
-    content: m[2].trim(),
-  };
-}
-
 /** Save (or overwrite, keeping the original `created`) a fact under `topic`. */
-export async function saveMemory(topic: string, title: string, content: string): Promise<MemoryMeta> {
+export async function saveMemory(
+  userId: string,
+  topic: string,
+  title: string,
+  content: string,
+): Promise<MemoryMeta> {
   const safeTopic = sanitizeTopic(topic);
   const slug = slugify(title);
-  const dir = path.join(ROOT, safeTopic);
-  const file = path.join(dir, `${slug}.md`);
   const now = new Date().toISOString();
 
   let created = now;
   try {
-    const existing = parseFile(await readFile(file, "utf8"));
+    const existing = await store().getMemory(userId, safeTopic, slug);
     if (existing?.created) created = existing.created;
   } catch {
-    // No existing file — this is a new memory.
+    // Unreadable — save it as a new memory.
   }
 
   const meta: MemoryMeta = { topic: safeTopic, slug, title, created, updated: now };
-  await mkdir(dir, { recursive: true });
-  const tmp = `${file}.tmp`;
-  await writeFile(tmp, toFile(meta, content), "utf8");
-  await rename(tmp, file);
+  await store().putMemory(userId, { ...meta, content: content.trim() });
   return meta;
 }
 
 /** Every saved memory with its body. */
-export function allMemories(): Promise<MemoryHit[]> {
-  return walkMemories();
+export function allMemories(userId: string): Promise<MemoryHit[]> {
+  return store().listMemories(userId);
 }
 
 /** A memory's id in rankings and tool output: its topic path and slug. */
 export function memoryId(m: MemoryMeta): string {
   return `${m.topic}/${m.slug}`;
-}
-
-/** Every saved memory with its body, tolerant of unreadable or corrupt files. */
-async function walkMemories(dir = ROOT, topicParts: string[] = []): Promise<MemoryHit[]> {
-  let entries;
-  try {
-    entries = await readdir(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
-
-  const hits: MemoryHit[] = [];
-  for (const entry of entries) {
-    const full = path.join(dir, entry.name);
-    if (entry.isDirectory()) {
-      hits.push(...(await walkMemories(full, [...topicParts, entry.name])));
-      continue;
-    }
-    if (!entry.isFile() || !entry.name.endsWith(".md")) continue;
-    try {
-      const parsed = parseFile(await readFile(full, "utf8"));
-      if (!parsed) throw new Error("unrecognized frontmatter");
-      hits.push({
-        topic: parsed.topic,
-        slug: entry.name.slice(0, -3),
-        title: parsed.title,
-        created: parsed.created,
-        updated: parsed.updated,
-        content: parsed.content,
-      });
-    } catch (err) {
-      console.warn(`[memory] skipping unreadable file ${full}: ${String(err)}`);
-    }
-  }
-  return hits;
 }
 
 /**
@@ -142,8 +65,8 @@ async function walkMemories(dir = ROOT, topicParts: string[] = []): Promise<Memo
  * or changed after the chat began is left out: the model writes memories
  * itself, so otherwise it could `remember` a guess and then cite it as fact.
  */
-export async function memoriesBefore(cutoff: string): Promise<MemoryHit[]> {
-  return (await walkMemories()).filter((h) => h.updated && h.updated < cutoff);
+export async function memoriesBefore(userId: string, cutoff: string): Promise<MemoryHit[]> {
+  return (await allMemories(userId)).filter((h) => h.updated && h.updated < cutoff);
 }
 
 const STOPWORDS = new Set(["the", "a", "an", "of", "to", "for", "and", "or", "is", "are", "my", "me", "on", "in", "at"]);
@@ -171,6 +94,7 @@ const CONVERSATION = "conversation";
  * the user's own messages already hold the answer.
  */
 export async function searchMemories(
+  userId: string,
   query: string,
   userSaid: string[],
   chatId: string,
@@ -180,7 +104,7 @@ export async function searchMemories(
   results: Array<MemoryHit & { p?: number }>;
   inConversation?: number;
 }> {
-  const all = await walkMemories();
+  const all = await allMemories(userId);
   if (all.length === 0) return { note: "", results: [] };
 
   const said = userSaid.join("\n\n");

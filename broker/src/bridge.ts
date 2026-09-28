@@ -1,10 +1,15 @@
-// WebSocket RPC bridge to the extension.
+// The agent core's line to the extension: run an op in a tab and wait for its
+// result, show a progress line in the panel, and show an approval or a
+// question the person has to answer. Which connection carries it is set once
+// at startup — the local broker's WebSocket server (transport/local.ts) today.
 //
-// The broker is the server so the extension can reconnect freely across
-// service-worker restarts. Every op is a request/response pair with an id;
-// unsolicited traffic (tasks from the popup, approvals) is typed instead.
+// Nothing waits on the person here. A task that needs them pauses (see
+// agent.ts): the request is shown, and the answer comes back as a new message
+// that resumes it, whenever that is.
+//
+// Every op is a request/response pair with an id; unsolicited traffic (tasks
+// from the panel, approvals) is typed instead.
 
-import { WebSocketServer, WebSocket } from "ws";
 import type { LLMConfig, Provider } from "./config.js";
 
 /**
@@ -21,6 +26,7 @@ export type ChatState = {
   approvalMode: string;
 };
 
+/** What the panel can ask of the broker, besides answering ops. */
 export type BridgeHandlers = {
   onTask: (text: string, chatId: string | undefined) => void;
   onCancel: (chatId: string) => void;
@@ -32,6 +38,10 @@ export type BridgeHandlers = {
   onSwitchChat: (id: string) => void;
   /** Per-chat setting change. */
   onSetApprovalMode: (chatId: string, mode: string) => void;
+  /** The person approved or denied a request shown with show(). */
+  onApproval: (requestId: string, approved: boolean) => void;
+  /** The person answered (or closed) a question form shown with show(). */
+  onAnswers: (requestId: string, outcome: AskOutcome) => void;
   /** The Settings page wants the current LLM provider/model/key config. */
   onGetConfig: () => LLMConfig | Promise<LLMConfig>;
   /** The Settings page changed something — merge and persist it. */
@@ -45,236 +55,78 @@ export type BridgeHandlers = {
   onHello: (chatId: string | undefined) => Promise<ChatState>;
 };
 
-/**
- * Three states, not two. "unanswered" means nobody was watching — the popup is
- * a transient window and closes the moment the user clicks another tab — and
- * must never be reported to the model as a refusal.
- */
-export type ApprovalOutcome = "approved" | "denied" | "unanswered";
+export type ApprovalOutcome = "approved" | "denied";
 
-type Pending = {
-  resolve: (v: unknown) => void;
-  reject: (e: Error) => void;
-  timer: NodeJS.Timeout;
-};
+/** One question in an ask_user form. The panel always adds a free-text answer after `options`. */
+export type AskQuestion = { question: string; options: string[]; multiple: boolean };
+export type AskRequest = { intro: string; questions: AskQuestion[] };
+/** One answer per question, null where the user skipped it. */
+export type AskOutcome = { answers: Array<string | null> } | "dismissed";
+
+/**
+ * Something a paused task is waiting on the person for. Kept with the chat
+ * until it is answered, so it can be shown again to a panel that opens later,
+ * a restarted service worker, or after the broker itself restarts.
+ */
+export type PendingRequest = { id: string; chatId: string } & (
+  | { kind: "approval"; text: string }
+  | { kind: "ask"; ask: AskRequest }
+);
+
+/**
+ * A request id carries its chat, so an answer finds the task it resumes with
+ * nothing else to look up.
+ */
+export function newRequestId(chatId: string): string {
+  return `${chatId}/${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** The chat a request id belongs to, or null if it is not one of ours. */
+export function requestChatId(requestId: string): string | null {
+  const i = requestId.lastIndexOf("/");
+  return i > 0 ? requestId.slice(0, i) : null;
+}
+
+/** A connection to the extension, as the agent core needs it. */
+export interface Transport {
+  call<T>(
+    op: string,
+    chatId: string,
+    params: Record<string, unknown>,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<T>;
+  emit(event: string, chatId: string | null, text?: string): void;
+  /** Show a request, and keep showing it to a (re)connecting panel until withdrawn or answered. */
+  show(request: PendingRequest): void;
+  withdraw(requestId: string): void;
+}
+
+let active: Transport | null = null;
+
+/** Set once at startup, by whichever entry point is running. */
+export function useTransport(transport: Transport): void {
+  active = transport;
+}
+
+function transport(): Transport {
+  if (!active) throw new Error("no transport configured — call useTransport() at startup");
+  return active;
+}
 
 const DEFAULT_TIMEOUT_MS = 45_000;
-// MV3 recycles idle service workers, which drops the socket for a few seconds.
-// Ops wait that out instead of failing the run.
-const RECONNECT_GRACE_MS = Number(process.env.RECONNECT_GRACE_MS ?? 30_000);
-// Generous, because the human may be in another app entirely. Expiry is
-// reported as "unanswered", so a long wait does not become a fake denial.
-const APPROVAL_TIMEOUT_MS = Number(process.env.APPROVAL_TIMEOUT_MS ?? 900_000);
 
-let client: WebSocket | null = null;
-let seq = 0;
-// Flap detection. One well-behaved extension reconnects rarely; a stream of
-// connections that each displace a live one means two clients are fighting
-// over the single slot, which no amount of retrying will resolve.
-const FLAP_WINDOW_MS = 5_000;
-let lastConnectAt = 0;
-let rapidConnects = 0;
-let flapWarned = false;
-const pending = new Map<string, Pending>();
-// Outstanding gates keep their prompt text so they can be re-sent to a popup
-// that opens later, or to a restarted service worker.
-const approvals = new Map<
-  string,
-  { chatId: string; text: string; settle: (outcome: ApprovalOutcome) => void }
->();
-// Open ask_user forms, kept for the same reason as approvals: a panel that
-// opens later, or a restarted service worker, must still be able to show them.
-const asks = new Map<
-  string,
-  { chatId: string; ask: AskRequest; settle: (outcome: AskOutcome) => void }
->();
-const connectionWaiters: Array<() => void> = [];
-
-export function isConnected(): boolean {
-  return client !== null && client.readyState === WebSocket.OPEN;
+/** Aborts a run's signal when it reaches its time limit, rather than the person cancelling. */
+export class TimeUp extends Error {
+  constructor() {
+    super("Stopped at the time limit.");
+    this.name = "TimeUp";
+  }
 }
 
-export function start(port: number, handlers: BridgeHandlers): WebSocketServer {
-  const wss = new WebSocketServer({ host: "127.0.0.1", port });
-
-  wss.on("connection", (ws) => {
-    const now = Date.now();
-    // Displacing a socket that was still OPEN is the signature: a clean
-    // reconnect follows a close, so there is nothing live to displace.
-    const displacedLiveClient =
-      client !== null && client !== ws && client.readyState === WebSocket.OPEN;
-    rapidConnects = now - lastConnectAt < FLAP_WINDOW_MS ? rapidConnects + 1 : 0;
-    lastConnectAt = now;
-
-    // One extension at a time; a reconnect supersedes the previous socket.
-    if (client && client !== ws) {
-      try { client.close(); } catch { /* already gone */ }
-    }
-    client = ws;
-    console.log("[bridge] extension connected");
-
-    if (displacedLiveClient && rapidConnects >= 3 && !flapWarned) {
-      flapWarned = true;
-      console.warn(
-        "[bridge] connections are flapping: clients keep displacing each other.\n" +
-        "[bridge] this is almost always two CopperOS instances talking to one broker —\n" +
-        "[bridge]   • check chrome://extensions for a second copy loaded unpacked\n" +
-        "[bridge]   • or a second Chrome profile/window with the extension installed\n" +
-        "[bridge] remove one; the broker only ever keeps the newest connection.",
-      );
-    }
-    while (connectionWaiters.length) connectionWaiters.shift()!();
-
-    // A reconnecting extension may have lost track of any open approval
-    // prompts along with its service worker — for every chat, not just the
-    // one it is about to ask to resume. Bring it back up to date.
-    for (const [id, a] of approvals) {
-      ws.send(JSON.stringify({
-        type: "agent_event", event: "approval_request", id, chatId: a.chatId, text: a.text,
-      }));
-    }
-    for (const [id, a] of asks) {
-      ws.send(JSON.stringify({
-        type: "agent_event", event: "ask_request", id, chatId: a.chatId, ask: a.ask,
-      }));
-    }
-
-    ws.on("message", (raw) => {
-      let msg: any;
-      try {
-        msg = JSON.parse(raw.toString());
-      } catch {
-        return;
-      }
-
-      if (msg.type === "ping") {
-        ws.send(JSON.stringify({ type: "pong" }));
-        return;
-      }
-      if (msg.type === "hello") {
-        void (async () => {
-          const state = await handlers.onHello(
-            typeof msg.chatId === "string" ? msg.chatId : undefined,
-          );
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: "chat_state", ...state }));
-          }
-        })();
-        return;
-      }
-      if (msg.type === "task" && typeof msg.text === "string") {
-        handlers.onTask(msg.text, typeof msg.chatId === "string" ? msg.chatId : undefined);
-        return;
-      }
-      if (msg.type === "cancel" && typeof msg.chatId === "string") {
-        handlers.onCancel(msg.chatId);
-        return;
-      }
-      if (msg.type === "reset") {
-        handlers.onReset();
-        return;
-      }
-      if (msg.type === "list_chats") {
-        handlers.onListChats();
-        return;
-      }
-      if (msg.type === "switch_chat" && typeof msg.id === "string") {
-        handlers.onSwitchChat(msg.id);
-        return;
-      }
-      if (
-        msg.type === "set_approval_mode" &&
-        typeof msg.chatId === "string" &&
-        typeof msg.mode === "string"
-      ) {
-        handlers.onSetApprovalMode(msg.chatId, msg.mode);
-        return;
-      }
-      if (msg.type === "approval") {
-        approvals.get(msg.id)?.settle(msg.approved ? "approved" : "denied");
-        approvals.delete(msg.id);
-        return;
-      }
-      if (msg.type === "answers") {
-        const outcome: AskOutcome = msg.dismissed
-          ? "dismissed"
-          : {
-              answers: (Array.isArray(msg.answers) ? msg.answers : []).map((a: unknown) =>
-                typeof a === "string" && a.trim() ? a.trim() : null,
-              ),
-            };
-        asks.get(msg.id)?.settle(outcome);
-        asks.delete(msg.id);
-        return;
-      }
-      if (msg.type === "get_config") {
-        void (async () => {
-          const config = await handlers.onGetConfig();
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "config", config }));
-        })();
-        return;
-      }
-      if (msg.type === "set_config") {
-        void (async () => {
-          const config = await handlers.onSetConfig(msg.patch ?? {});
-          if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: "config", config }));
-        })();
-        return;
-      }
-      if (msg.type === "list_models" && typeof msg.provider === "string") {
-        const provider = msg.provider as Provider;
-        void (async () => {
-          try {
-            const models = await handlers.onListModels(provider);
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: "models", provider, models }));
-            }
-          } catch (err) {
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({
-                type: "models", provider, error: String((err as Error)?.message ?? err),
-              }));
-            }
-          }
-        })();
-        return;
-      }
-
-      // Op response.
-      const p = msg.id ? pending.get(msg.id) : undefined;
-      if (!p) return;
-      clearTimeout(p.timer);
-      pending.delete(msg.id);
-      if (msg.ok) p.resolve(msg.data);
-      else p.reject(new Error(msg.error ?? "unknown extension error"));
-    });
-
-    ws.on("close", () => {
-      if (client === ws) client = null;
-      console.log("[bridge] extension disconnected");
-    });
-  });
-
-  console.log(`[bridge] listening on ws://127.0.0.1:${port}`);
-  return wss;
-}
-
-export function waitForExtension(): Promise<void> {
-  if (isConnected()) return Promise.resolve();
-  console.log("[bridge] waiting for the extension to connect…");
-  return new Promise((resolve) => connectionWaiters.push(resolve));
-}
-
-/** Resolves true once the extension is back, false if the grace period runs out. */
-function waitForReconnect(ms: number): Promise<boolean> {
-  if (isConnected()) return Promise.resolve(true);
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => resolve(false), ms);
-    connectionWaiters.push(() => {
-      clearTimeout(timer);
-      resolve(true);
-    });
-  });
+/** What an op stopped by `signal` reports: a cancel, unless the run hit its time limit. */
+export function abortedError(signal: AbortSignal): Error {
+  return new Error(signal.reason instanceof TimeUp ? signal.reason.message : "Cancelled by user.");
 }
 
 /**
@@ -283,39 +135,14 @@ function waitForReconnect(ms: number): Promise<boolean> {
  * run stuck until the op's own timeout (up to tens of seconds) elapses —
  * that wait is what made Cancel feel like it did nothing.
  */
-export async function call<T = any>(
+export function call<T = any>(
   op: string,
   chatId: string,
   params: Record<string, unknown> = {},
   timeoutMs = DEFAULT_TIMEOUT_MS,
   signal?: AbortSignal,
 ): Promise<T> {
-  if (signal?.aborted) throw new Error("Cancelled by user.");
-  if (!isConnected()) {
-    console.log("[bridge] extension away, waiting for it to come back…");
-    if (!(await waitForReconnect(RECONNECT_GRACE_MS))) {
-      throw new Error("extension is not connected");
-    }
-  }
-  const id = `r${++seq}`;
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      pending.delete(id);
-      reject(new Error(`op "${op}" timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      pending.delete(id);
-      reject(new Error("Cancelled by user."));
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    pending.set(id, {
-      resolve: (v: unknown) => { signal?.removeEventListener("abort", onAbort); resolve(v as T); },
-      reject: (e: Error) => { signal?.removeEventListener("abort", onAbort); reject(e); },
-      timer,
-    });
-    client!.send(JSON.stringify({ id, op, params, chatId }));
-  });
+  return transport().call<T>(op, chatId, params, timeoutMs, signal);
 }
 
 /**
@@ -325,119 +152,15 @@ export async function call<T = any>(
  * which chat is currently being viewed.
  */
 export function emit(event: string, chatId: string | null, text?: string): void {
-  if (!isConnected()) return;
-  client!.send(JSON.stringify({ type: "agent_event", event, chatId, text }));
+  transport().emit(event, chatId, text);
 }
 
-/** Answers a list_chats request (or refreshes it after a switch). */
-export function sendChats(chats: unknown): void {
-  if (!isConnected()) return;
-  client!.send(JSON.stringify({ type: "chats", chats }));
+/** Put a paused task's request in front of the person. */
+export function showRequest(request: PendingRequest): void {
+  transport().show(request);
 }
 
-/** A chat's full status, pushed after a reset/switch (hello gets one inline). */
-export function sendChatState(state: ChatState): void {
-  if (!isConnected()) return;
-  client!.send(JSON.stringify({ type: "chat_state", ...state }));
-}
-
-/**
- * Ask the human. Survives the popup being closed and the service worker being
- * recycled: the request is held open, re-sent on reconnect, and only reported
- * as "unanswered" if nobody responds within APPROVAL_TIMEOUT_MS.
- *
- * `signal`, when given, also resolves as "unanswered" immediately on cancel —
- * without it, cancelling a run stuck at an approval gate did nothing until
- * the 15-minute timeout expired.
- */
-export async function requestApproval(
-  text: string,
-  chatId: string,
-  timeoutMs = APPROVAL_TIMEOUT_MS,
-  signal?: AbortSignal,
-): Promise<ApprovalOutcome> {
-  if (signal?.aborted) return "unanswered";
-  if (!isConnected() && !(await waitForReconnect(RECONNECT_GRACE_MS))) {
-    return "unanswered";
-  }
-  const id = `a${++seq}`;
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      approvals.delete(id);
-      resolve("unanswered");
-    }, timeoutMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      approvals.delete(id);
-      resolve("unanswered");
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    approvals.set(id, {
-      chatId,
-      text,
-      settle: (outcome) => {
-        signal?.removeEventListener("abort", onAbort);
-        clearTimeout(timer);
-        resolve(outcome);
-      },
-    });
-    // Best effort: if the socket is gone the request stays outstanding and is
-    // re-sent by the connection handler above.
-    if (isConnected()) {
-      client!.send(JSON.stringify({
-        type: "agent_event", event: "approval_request", id, chatId, text,
-      }));
-    }
-  });
-}
-
-/** One question in an ask_user form. The panel always adds a free-text answer after `options`. */
-export type AskQuestion = { question: string; options: string[]; multiple: boolean };
-export type AskRequest = { intro: string; questions: AskQuestion[] };
-/** One answer per question, null where the user skipped it. */
-export type AskOutcome = { answers: Array<string | null> } | "dismissed" | "unanswered";
-
-/**
- * Put questions to the human as a form in the panel, and wait for the
- * answers. Held open, re-sent on reconnect, and reported as "unanswered"
- * after APPROVAL_TIMEOUT_MS or on cancel — the same lifecycle as
- * requestApproval, for the same reasons.
- */
-export async function requestAnswers(
-  ask: AskRequest,
-  chatId: string,
-  timeoutMs = APPROVAL_TIMEOUT_MS,
-  signal?: AbortSignal,
-): Promise<AskOutcome> {
-  if (signal?.aborted) return "unanswered";
-  if (!isConnected() && !(await waitForReconnect(RECONNECT_GRACE_MS))) {
-    return "unanswered";
-  }
-  const id = `q${++seq}`;
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      asks.delete(id);
-      resolve("unanswered");
-    }, timeoutMs);
-    const onAbort = () => {
-      clearTimeout(timer);
-      asks.delete(id);
-      resolve("unanswered");
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    asks.set(id, {
-      chatId,
-      ask,
-      settle: (outcome) => {
-        signal?.removeEventListener("abort", onAbort);
-        clearTimeout(timer);
-        resolve(outcome);
-      },
-    });
-    if (isConnected()) {
-      client!.send(JSON.stringify({
-        type: "agent_event", event: "ask_request", id, chatId, ask,
-      }));
-    }
-  });
+/** Stop showing a request — it was answered, or its task was cancelled. */
+export function withdrawRequest(requestId: string): void {
+  transport().withdraw(requestId);
 }

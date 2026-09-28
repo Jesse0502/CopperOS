@@ -1,30 +1,51 @@
-// Disk-backed chat transcripts.
+// Chat transcripts.
 //
 // A task is a turn in an ongoing conversation, not a fresh start: follow-ups
 // like "now open the second result" only work if the previous turns are still
 // there. The broker owns this because it owns the message history — the
 // extension's storage.session is for UI state and dies with the browser.
-//
-// Layout, under STORAGE_DIR (default <repo>/storage):
-//   sessions/<id>.json   one transcript per chat
-//   current.json         which one to resume on startup
+// Where transcripts are kept is the store's business (store/store.ts).
 
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
 import type OpenAI from "openai";
+import type { PendingRequest } from "./bridge.js";
+import { store, type ChatSummary } from "./store/store.js";
 
 type Msg = OpenAI.Chat.Completions.ChatCompletionMessageParam;
-
-const ROOT =
-  process.env.STORAGE_DIR ?? path.resolve(import.meta.dirname, "../../storage");
-const SESSIONS = path.join(ROOT, "sessions");
-const CURRENT = path.join(ROOT, "current.json");
 
 /** "all": every click and submit gated. "submits": only destructive actions. "none": never asked. */
 export type ApprovalMode = "all" | "submits" | "none";
 
 const DEFAULT_APPROVAL_MODE: ApprovalMode =
   (process.env.APPROVAL_MODE as ApprovalMode | undefined) ?? "submits";
+
+/**
+ * A task stopped to wait for the person — an approval or a question form.
+ * The transcript keeps the tool call that asked, unanswered; `loop` is where
+ * the agent loop stood, so the answer carries it on as if it never stopped.
+ */
+export type Paused = {
+  request: PendingRequest;
+  /** The tool call waiting on the answer. */
+  callId: string;
+  /** When it paused. */
+  at: string;
+  loop: {
+    round: number;
+    /** Steps taken in this round so far. */
+    step: number;
+    /** Steps taken in the whole turn so far. */
+    steps: number;
+    stalls: number;
+    /** progressMark at the start of this round, or false for an untracked turn. */
+    markBefore: string | false;
+    tracked: boolean;
+    watch: { strikes: number; trail: string[] } | null;
+    jobTask: boolean;
+    finalText: string;
+    /** Active time spent on the task before it paused, against its time limit. */
+    timeUsedMs: number;
+  };
+};
 
 export type Session = {
   id: string;
@@ -43,18 +64,11 @@ export type Session = {
   messages: Msg[];
   /** Per-chat settings — each agent is independent, so these are not global. */
   settings: { approvalMode: ApprovalMode };
+  /** Set while the chat's task is waiting on the person. */
+  paused?: Paused;
 };
 
-export const storageDir = ROOT;
-
-export type SessionSummary = {
-  id: string;
-  createdAt: string;
-  updatedAt: string;
-  /** The first prompt in the chat, for display — "(empty chat)" if never used. */
-  title: string;
-  taskCount: number;
-};
+export type SessionSummary = ChatSummary;
 
 function newId(): string {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
@@ -95,9 +109,22 @@ export function stripImages(
  * Make a transcript safe to send. A run that died mid-tool-call leaves an
  * assistant message whose tool_calls have no results, which the API rejects
  * outright — so drop orphaned tool results and cut back to the last point
- * where nothing was left pending.
+ * where nothing was left pending. `keepOpenTail` is for a paused task: its
+ * last tool calls are unanswered on purpose, and resuming answers them.
  */
-export function sanitize(messages: Msg[]): Msg[] {
+export function sanitize(messages: Msg[], keepOpenTail = false): Msg[] {
+  if (keepOpenTail) {
+    const i = messages.findLastIndex((m) => m.role === "assistant" && (m.tool_calls?.length ?? 0) > 0);
+    if (i !== -1) {
+      const calls = messages[i] as Extract<Msg, { role: "assistant" }>;
+      const ids = new Set(calls.tool_calls!.map((c) => c.id));
+      const results = messages
+        .slice(i + 1)
+        .filter((m) => m.role === "tool" && ids.has(m.tool_call_id));
+      return [...sanitize(messages.slice(0, i)), calls, ...results];
+    }
+  }
+
   const open = new Set<string>();
   const kept: Msg[] = [];
   for (const m of messages) {
@@ -123,93 +150,58 @@ export function sanitize(messages: Msg[]): Msg[] {
   return kept.slice(0, safe);
 }
 
-export async function save(session: Session): Promise<void> {
-  await mkdir(SESSIONS, { recursive: true });
+export async function save(userId: string, session: Session): Promise<void> {
   const payload: Session = {
     ...session,
     updatedAt: new Date().toISOString(),
     messages: stripImages(session.messages),
   };
-  const file = path.join(SESSIONS, `${session.id}.json`);
-  // Write-then-rename: a crash mid-write leaves the previous transcript intact
-  // rather than a truncated one that fails to parse on the next start.
-  const tmp = `${file}.tmp`;
-  await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
-  await rename(tmp, file);
-
-  const ctmp = `${CURRENT}.tmp`;
-  await writeFile(ctmp, JSON.stringify({ id: session.id }, null, 2), "utf8");
-  await rename(ctmp, CURRENT);
+  await store().saveChat(userId, payload);
+  await store().setCurrentChat(userId, session.id);
 }
 
-async function loadById(id: string, model: string): Promise<Session> {
-  const raw = JSON.parse(
-    await readFile(path.join(SESSIONS, `${id}.json`), "utf8"),
-  ) as Session;
+async function loadById(userId: string, id: string, model: string): Promise<Session> {
+  const raw = (await store().loadChat(userId, id)) as Session | null;
+  if (!raw) throw new Error(`no saved chat ${id}`);
   return {
     ...blank(model),
     ...raw,
     model,
-    messages: sanitize(raw.messages ?? []),
+    messages: sanitize(raw.messages ?? [], Boolean(raw.paused)),
     tasks: raw.tasks ?? [],
     answers: raw.answers ?? [],
     settings: { approvalMode: raw.settings?.approvalMode ?? DEFAULT_APPROVAL_MODE },
   };
 }
 
-/** The session named by current.json, or a fresh one if there is nothing usable. */
-export async function loadCurrent(model: string): Promise<Session> {
+/** The chat last opened, or a fresh one if there is nothing usable. */
+export async function loadCurrent(userId: string, model: string): Promise<Session> {
   try {
-    const { id } = JSON.parse(await readFile(CURRENT, "utf8")) as { id: string };
-    return await loadById(id, model);
+    const id = await store().getCurrentChat(userId);
+    return id ? await loadById(userId, id, model) : blank(model);
   } catch {
-    // No storage yet, or it is unreadable. Either way, start clean.
+    // Unreadable storage, or a chat that has gone. Either way, start clean.
     return blank(model);
   }
 }
 
 /** Load a specific past chat by id, to resume it as the active session. */
-export function loadSession(id: string, model: string): Promise<Session> {
-  return loadById(id, model);
+export function loadSession(userId: string, id: string, model: string): Promise<Session> {
+  return loadById(userId, id, model);
 }
 
 /**
- * Point current.json at an already-saved session without rewriting it — used
+ * Make an already-saved chat the one to resume, without rewriting it — used
  * when switching to a past chat, so its updatedAt (last real activity) is not
  * bumped just from being opened.
  */
-export async function setCurrent(id: string): Promise<void> {
-  await mkdir(ROOT, { recursive: true });
-  const ctmp = `${CURRENT}.tmp`;
-  await writeFile(ctmp, JSON.stringify({ id }, null, 2), "utf8");
-  await rename(ctmp, CURRENT);
+export function setCurrent(userId: string, id: string): Promise<void> {
+  return store().setCurrentChat(userId, id);
 }
 
 /** Every saved chat, newest activity first. */
-export async function listSessions(): Promise<SessionSummary[]> {
-  let files: string[];
-  try {
-    files = await readdir(SESSIONS);
-  } catch {
-    return [];
-  }
-  const summaries: SessionSummary[] = [];
-  for (const f of files) {
-    if (!f.endsWith(".json")) continue;
-    try {
-      const raw = JSON.parse(await readFile(path.join(SESSIONS, f), "utf8")) as Session;
-      const tasks = raw.tasks ?? [];
-      summaries.push({
-        id: raw.id,
-        createdAt: raw.createdAt,
-        updatedAt: raw.updatedAt,
-        title: tasks[0] ?? "(empty chat)",
-        taskCount: tasks.length,
-      });
-    } catch {
-      // Skip a corrupt or mid-write file rather than failing the whole list.
-    }
-  }
+export async function listSessions(userId: string): Promise<SessionSummary[]> {
+  const summaries = await store().listChats(userId);
   summaries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   return summaries;
 }

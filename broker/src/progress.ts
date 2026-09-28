@@ -3,16 +3,10 @@
 // fresh context. The model writes to it with update_progress (tools.ts); the
 // agent loop (agent.ts) reads it to brief each fresh round and to ask Jev
 // whether the task is finished. Only kept when Jev is configured, since
-// nothing reads it otherwise.
-//
-// Layout, under storageDir (see session.ts):
-//   progress/<chatId>.json   — the chat's current task; a new task replaces it
+// nothing reads it otherwise. One per chat, kept by the store
+// (store/store.ts); a new task replaces it.
 
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import path from "node:path";
-import { storageDir } from "./session.js";
-
-const ROOT = path.join(storageDir, "progress");
+import { store } from "./store/store.js";
 
 export type TaskState = {
   /** The message that started the task, verbatim — its conditions carry into every fresh round. */
@@ -40,10 +34,6 @@ export type TaskState = {
   updatedAt: string;
 };
 
-function fileFor(chatId: string): string {
-  return path.join(ROOT, `${chatId.replace(/[^\w-]/g, "_")}.json`);
-}
-
 export function newTask(instructions: string): TaskState {
   const now = new Date().toISOString();
   return {
@@ -61,24 +51,17 @@ export function newTask(instructions: string): TaskState {
   };
 }
 
-/** The chat's current task, or null if it has none (or its file is unreadable). */
-export async function loadTask(chatId: string): Promise<TaskState | null> {
+/** The chat's current task, or null if it has none (or it is unreadable). */
+export async function loadTask(userId: string, chatId: string): Promise<TaskState | null> {
   try {
-    return JSON.parse(await readFile(fileFor(chatId), "utf8")) as TaskState;
+    return await store().loadTask(userId, chatId);
   } catch {
     return null;
   }
 }
 
-export async function saveTask(chatId: string, task: TaskState): Promise<void> {
-  await mkdir(ROOT, { recursive: true });
-  const file = fileFor(chatId);
-  // Write-then-rename, same as session.ts: a crash mid-write never leaves a
-  // half-written file that loses the progress recorded so far.
-  const tmp = `${file}.tmp`;
-  const payload = { ...task, updatedAt: new Date().toISOString() };
-  await writeFile(tmp, JSON.stringify(payload, null, 2), "utf8");
-  await rename(tmp, file);
+export async function saveTask(userId: string, chatId: string, task: TaskState): Promise<void> {
+  await store().saveTask(userId, chatId, { ...task, updatedAt: new Date().toISOString() });
 }
 
 function sameItem(a: string, b: string): boolean {
@@ -95,15 +78,16 @@ function addNew(into: string[], items: string[]): void {
 
 /** Merge in what the model reports. Null when the chat has no task on record. */
 export async function recordProgress(
+  userId: string,
   chatId: string,
   update: { done: string[]; skipped: string[]; note: string },
 ): Promise<TaskState | null> {
-  const task = await loadTask(chatId);
+  const task = await loadTask(userId, chatId);
   if (!task) return null;
   addNew(task.done, update.done);
   addNew(task.skipped, update.skipped);
   if (update.note) task.note = update.note;
-  await saveTask(chatId, task);
+  await saveTask(userId, chatId, task);
   return task;
 }
 
