@@ -310,6 +310,15 @@ export function refLabel(chatId: string, ref: string): string | null {
   return line.label ? `${line.role} "${line.label}"` : line.role;
 }
 
+/** Whether `value` is word for word something in `texts` — ignoring case, spacing and punctuation. */
+function saidVerbatim(value: string, texts: string[]): boolean {
+  const norm = (s: string) => ` ${s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
+  const v = norm(value);
+  // Too short to mean anything on its own: "No", "4", "Yes".
+  if (v.trim().length < 4) return false;
+  return texts.some((t) => norm(t).includes(v));
+}
+
 /** Null when `value` may go into `ref` (or, with no ref, the focused element); otherwise why not. */
 function groundingGate(ref: string | undefined, value: string, ctx: ToolCtx): Promise<string | null> {
   const field = !ref
@@ -325,17 +334,30 @@ function groundingGate(ref: string | undefined, value: string, ctx: ToolCtx): Pr
  */
 async function checkEntry(field: string, value: string, where: string, ctx: ToolCtx): Promise<string | null> {
   if (!jevEnabled || !/[\p{L}\p{N}]/u.test(value)) return null;
+  const said = userSaid(ctx);
+  const memories = (await memoriesBefore(ctx.userId, ctx.chatStartedAt)).map((m) => `${m.title}: ${m.content}`);
   const verdict = await checkGrounded(
     { field, value },
-    {
-      user_messages: userSaid(ctx),
-      saved_memories: (await memoriesBefore(ctx.userId, ctx.chatStartedAt)).map((m) => `${m.title}: ${m.content}`),
-    },
+    { user_messages: said, saved_memories: memories },
     ctx.chatId,
     ctx.signal,
   );
   if (verdict?.ok) return null;
-  emit("blocked", ctx.chatId, `${where} ⇐ ${preview(value)} — not in your messages or memories`);
+  // Jev did not answer — it has spells of timing out. What the user wrote,
+  // word for word, needs no judge to be theirs, so a Jev outage never
+  // blocks it ("New York" from "UX jobs in New York"); anything else still
+  // waits for a real check.
+  if (!verdict && !ctx.signal?.aborted && saidVerbatim(value, [...said, ...memories])) {
+    console.log(`[grounding] chat=${ctx.chatId} check failed; allowed as the user's own words — ${JSON.stringify(value.slice(0, 80))}`);
+    return null;
+  }
+  emit(
+    "blocked",
+    ctx.chatId,
+    verdict
+      ? `${where} ⇐ ${preview(value)} — not in your messages or memories`
+      : `${where} ⇐ ${preview(value)} — could not be checked: Jev did not answer`,
+  );
   if (!verdict) {
     return (
       `Not entered: ${JSON.stringify(value)} could not be checked against the ` +

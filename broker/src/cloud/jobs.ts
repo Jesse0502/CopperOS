@@ -2,6 +2,7 @@
 // paused one with the person's answer.
 
 import type { ApprovalOutcome, AskOutcome } from "../bridge.js";
+import type { TaskExtras } from "../task-extras.js";
 
 export type AgentJob = {
   userId: string;
@@ -11,7 +12,7 @@ export type AgentJob = {
   /** The browser that asked — where ops go first. */
   connectionId: string | null;
 } & (
-  | { kind: "run"; text: string }
+  | { kind: "run"; text: string; extras?: TaskExtras }
   | { kind: "resume"; requestId: string; answer: ApprovalOutcome | AskOutcome }
 );
 

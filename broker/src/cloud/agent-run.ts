@@ -46,15 +46,13 @@ export async function runJob(job: AgentJob, lambdaMsLeft: number): Promise<void>
     const options = { limitMs: TASK_LIMIT_MS, endBy };
     const result =
       job.kind === "run"
-        ? await agent.run(job.text, options)
+        ? await agent.run(job.text, { ...options, ...job.extras })
         : await agent.resume(job.requestId, job.answer, options);
 
     usedMs = result.timeUsedMs ?? 0;
     if (result.paused) {
       paused = true;
       showRequest(result.paused);
-      // Waiting on the person does not count against the limit.
-      transport.notify({ type: "clock", chatId, limitMs: TASK_LIMIT_MS, usedMs, ticking: false });
       console.log(`[agent ${chatId}] waiting on the user: ${result.paused.kind}`);
     } else if (cancelled) {
       // The relay told the panel the moment Cancel was clicked.

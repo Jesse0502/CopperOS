@@ -26,6 +26,8 @@ export type TaskState = {
    * nothing went wrong.
    */
   supervisor?: string;
+  /** Rules the user set for the supervisor before sending the task, if any. */
+  rules?: string;
   status: "active" | "done" | "needs_user";
   /** Why the loop last stopped, or that it is still going — for whoever opens this file. */
   lastCheck: string;
@@ -125,6 +127,7 @@ export function brief(task: TaskState): string {
     (task.followUps.length
       ? `<later_instructions>\n${list(task.followUps)}\n</later_instructions>\n\n`
       : "") +
+    (task.rules ? `<supervisor_rules>\n${task.rules}\n</supervisor_rules>\n\n` : "") +
     `<progress>\nDone (${task.done.length}):\n${list(task.done)}\n\n` +
     `Skipped (${task.skipped.length}):\n${list(task.skipped)}\n\n` +
     `Note: ${task.note || "(none)"}\n</progress>\n\n` +

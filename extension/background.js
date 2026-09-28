@@ -40,6 +40,7 @@ input.observePointer(presence.pointer);
 function driving(chatId, tabId) {
   void presence.follow(chatId, tabId);
   void workspace.drive(chatId, tabId);
+  if (chatId === session.chatId) announceTab();
 }
 function runChanged(chatId, on) {
   if (!chatId) return;
@@ -64,6 +65,11 @@ const panelPorts = new Set();
 // Where the broker is, and who is signed in to it when it is the hosted one.
 let backend = "local";
 let signedIn = null; // { email } or null
+// Whether this person has said where CopperOS runs. Until then the panel asks.
+let chosen = true;
+// "Ask before" in Settings: the approval mode new chats start with, or null
+// to leave it to the broker.
+let approvalDefault = null;
 // Connection attempts in a row that the hosted socket refused before opening
 // — an expired or revoked token. The next one refreshes the token first.
 let refused = 0;
@@ -117,9 +123,9 @@ let session = {
   ask: null, // { id, ask: { intro, questions } } while an ask_user form is open on the viewed chat
   // chatId -> { id, ask }, for every chat with questions waiting, like pendingApprovals.
   pendingAsks: {},
-  // The viewed chat's task time limit, from the hosted broker:
-  // { limitMs, usedMs, ticking, at } — `at` is when usedMs was true.
-  clock: null,
+  // The last list of saved chats, shown at once when Past chats opens while
+  // a fresh one loads.
+  chats: null,
 };
 
 // Each backend keeps its own panel state; switching never mixes them.
@@ -128,6 +134,9 @@ const sessionKey = () => `session:${backend}`;
 const ready = (async () => {
   backend = await getBackend();
   signedIn = await auth.account().catch(() => null);
+  const stored = await chrome.storage.local.get(["backend", "approvalDefault"]).catch(() => ({}));
+  chosen = stored.backend === "local" || stored.backend === "cloud";
+  approvalDefault = ["all", "submits", "none"].includes(stored.approvalDefault) ? stored.approvalDefault : null;
   try {
     const { [sessionKey()]: saved, tabsByChat: savedTabs } =
       await chrome.storage.session.get([sessionKey(), "tabsByChat"]);
@@ -223,7 +232,6 @@ function recordEvent(msg) {
       session.running = false;
       session.approval = null;
       session.ask = null;
-      session.clock = null;
       runChanged(session.chatId, false);
     }
     setBadge(needsAttention());
@@ -234,7 +242,8 @@ function recordEvent(msg) {
     return; // bookkeeping only — never mixes another chat's events into this transcript
   }
 
-  session.events.push({ event: msg.event, text: msg.text ?? "" });
+  // `at` lets a reopened panel say how long a run has taken.
+  session.events.push({ event: msg.event, text: msg.text ?? "", at: Date.now() });
   if (session.events.length > MAX_EVENTS) {
     session.events.splice(0, session.events.length - MAX_EVENTS);
   }
@@ -813,16 +822,6 @@ function wire(sock) {
       return;
     }
 
-    // The hosted broker's time limit for a chat's task: running down, paused
-    // while it waits on the person, or reset.
-    if (msg.type === "clock") {
-      if (msg.chatId === session.chatId) {
-        session.clock = { limitMs: msg.limitMs, usedMs: msg.usedMs, ticking: Boolean(msg.ticking), at: Date.now() };
-        persist();
-        broadcastToPanels({ type: "clock", clock: session.clock });
-      }
-      return;
-    }
 
     // A chat's full status: sent in answer to hello, and after a reset or a
     // successful switch_chat. Replaces the transcript on screen only when the
@@ -835,7 +834,6 @@ function wire(sock) {
       session.running = Boolean(msg.running);
       session.task = msg.task ?? null;
       session.approvalMode = msg.approvalMode ?? "submits";
-      session.clock = msg.clock ? { ...msg.clock, at: Date.now() } : null;
       if (!session.running) {
         session.approval = null;
         session.ask = null;
@@ -849,23 +847,14 @@ function wire(sock) {
 
       if (changedChat) {
         session.events = msg.events ?? [];
+        // A chat nothing has been asked in yet starts with "Ask before".
+        if (approvalDefault && !session.running && session.events.length === 0 && session.approvalMode !== approvalDefault) {
+          session.approvalMode = approvalDefault;
+          send({ type: "set_approval_mode", chatId: session.chatId, mode: approvalDefault });
+        }
         persist();
-        broadcastToPanels({
-          type: "restore",
-          connected: true,
-          backend,
-          account: signedIn,
-          clock: session.clock,
-          chatId: session.chatId,
-          running: session.running,
-          task: session.task,
-          events: session.events,
-          approval: session.approval,
-          ask: session.ask,
-          watching: session.watching,
-          approvalMode: session.approvalMode,
-          pendingApprovalChatIds: waitingChatIds(),
-        });
+        broadcastToPanels({ ...restoreMessage(), connected: true });
+        announceTab();
         // The live view follows whichever chat is now being viewed.
         if (session.watching) {
           const ctx = chatCtx(session.chatId);
@@ -874,7 +863,6 @@ function wire(sock) {
       } else {
         persist();
         broadcastToPanels({ type: "run_state", running: session.running, task: session.task });
-        broadcastToPanels({ type: "clock", clock: session.clock });
       }
       return;
     }
@@ -893,7 +881,9 @@ function wire(sock) {
 
     // The saved-chats list, sent in answer to a "chats" request from the panel.
     if (msg.type === "chats") {
-      broadcastToPanels({ type: "chats", chats: msg.chats ?? [] });
+      session.chats = msg.chats ?? [];
+      persist();
+      broadcastToPanels({ type: "chats", chats: session.chats });
       return;
     }
 
@@ -1030,6 +1020,7 @@ chrome.runtime.onConnect.addListener((port) => {
       panelPorts.delete(port);
       return;
     }
+    announceTab({ force: true });
     // The live view was on when the panel last closed; pick it back up.
     if (session.watching && !screencast.isStreaming() && session.chatId) {
       try {
@@ -1052,6 +1043,27 @@ chrome.runtime.onConnect.addListener((port) => {
       await switchBackend(msg.backend);
       return;
     }
+    // The first-run choice, which may be where it already is.
+    if (msg.type === "choose_backend" && (msg.backend === "local" || msg.backend === "cloud")) {
+      await ready;
+      await setBackend(msg.backend);
+      chosen = true;
+      if (msg.backend !== backend) await switchBackend(msg.backend);
+      else broadcastToPanels(restoreMessage());
+      return;
+    }
+    if (msg.type === "set_approval_default" && ["all", "submits", "none"].includes(msg.mode)) {
+      approvalDefault = msg.mode;
+      await chrome.storage.local.set({ approvalDefault }).catch(() => {});
+      // The chat on screen counts as new until something is asked in it.
+      if (session.chatId && !session.running && session.events.length === 0 && session.approvalMode !== approvalDefault) {
+        session.approvalMode = approvalDefault;
+        persist();
+        send({ type: "set_approval_mode", chatId: session.chatId, mode: approvalDefault });
+        broadcastToPanels({ type: "approval_mode", mode: approvalDefault });
+      }
+      return;
+    }
     if (msg.type === "sign_in") {
       try {
         signedIn = await auth.signIn();
@@ -1060,8 +1072,17 @@ chrome.runtime.onConnect.addListener((port) => {
         announce(false);
         void connect();
       } catch (err) {
-        broadcastToPanels({ type: "auth_error", text: String(err?.message ?? err) });
+        const text = String(err?.message ?? err);
+        // Closing the sign-in window is not an error worth a red line.
+        broadcastToPanels({
+          type: "auth_error",
+          text: /did not approve|cancell?ed/i.test(text) ? "Sign-in was closed before it finished." : text,
+        });
       }
+      return;
+    }
+    if (msg.type === "suggest") {
+      port.postMessage({ type: "suggest_result", ...(await sendSuggestion(msg.text)) });
       return;
     }
     if (msg.type === "sign_out") {
@@ -1073,7 +1094,18 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
     if (msg.type === "delete_account" && backend === "cloud") send({ type: "delete_account" });
-    if (msg.type === "task") send({ type: "task", text: msg.text, chatId: session.chatId });
+    if (msg.type === "task") {
+      // The tab it starts on, so "this page" means something to the agent,
+      // and any rules the person set for its supervisor.
+      const tab = await viewedTab().catch(() => null);
+      send({
+        type: "task",
+        text: msg.text,
+        chatId: session.chatId,
+        tab: tab && { url: tab.url, title: tab.title },
+        ...(typeof msg.rules === "string" && msg.rules.trim() ? { rules: msg.rules.trim() } : {}),
+      });
+    }
     if (msg.type === "cancel") send({ type: "cancel", chatId: session.chatId });
     if (msg.type === "reset") send({ type: "reset" });
     if (msg.type === "chats") send({ type: "list_chats" });
@@ -1134,12 +1166,32 @@ chrome.runtime.onConnect.addListener((port) => {
 chrome.runtime.onInstalled.addListener(({ reason, previousVersion }) => {
   if (reason !== "update" || !previousVersion?.startsWith("0.1.")) return;
   void (async () => {
-    const { backend: chosen } = await chrome.storage.local.get("backend").catch(() => ({}));
-    if (chosen) return;
+    const { backend: stored } = await chrome.storage.local.get("backend").catch(() => ({}));
+    if (stored) return;
     await setBackend("local");
+    chosen = true;
     await switchBackend("local");
   })();
 });
+
+// ── suggestions ─────────────────────────────────────────────────────────────
+
+/** Emails a suggestion to the CopperOS team, signed with the sign-in when there is one. */
+async function sendSuggestion(text) {
+  if (typeof text !== "string" || !text.trim()) return { ok: false, error: "Write a suggestion first." };
+  try {
+    const token = backend === "cloud" ? await auth.accessToken().catch(() => null) : null;
+    const res = await fetch((await cloud()).feedbackUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
+      body: JSON.stringify({ text: text.trim(), version: chrome.runtime.getManifest().version, backend }),
+    });
+    const body = await res.json().catch(() => ({}));
+    return res.ok ? { ok: true } : { ok: false, error: body.error || `It didn't go through (${res.status}).` };
+  } catch {
+    return { ok: false, error: "It didn't go through — check your connection and try again." };
+  }
+}
 
 /** The panel as a freshly opened one would get it. */
 function restoreMessage() {
@@ -1148,7 +1200,7 @@ function restoreMessage() {
     connected: Boolean(ws && ws.readyState === WebSocket.OPEN),
     backend,
     account: signedIn,
-    clock: session.clock,
+    chats: session.chats,
     chatId: session.chatId,
     running: session.running,
     task: session.task,
@@ -1158,13 +1210,50 @@ function restoreMessage() {
     watching: session.watching,
     approvalMode: session.approvalMode,
     pendingApprovalChatIds: waitingChatIds(),
+    welcome: !chosen,
+    approvalDefault,
   };
 }
+
+// ── the tab the panel names ─────────────────────────────────────────────────
+//
+// The panel's header says which tab the viewed chat acts on: the one it is
+// driving, or, before it has one, the tab a task would start in.
+
+let lastTab = null;
+let tabTimer = null;
+
+async function viewedTab() {
+  await ready;
+  const id = session.chatId ? chatCtx(session.chatId).tabId : null;
+  let tab = id !== null ? await chrome.tabs.get(id).catch(() => null) : null;
+  if (!tab) [tab] = (await chrome.tabs.query({ active: true, currentWindow: true }).catch(() => null)) ?? [];
+  return tab ? { url: tab.url || tab.pendingUrl || "", title: tab.title ?? "", favIconUrl: tab.favIconUrl ?? "" } : null;
+}
+
+/** Tell the panels about the tab, when it changed (or always, for a panel that just opened). */
+function announceTab({ force = false } = {}) {
+  clearTimeout(tabTimer);
+  tabTimer = setTimeout(async () => {
+    if (panelPorts.size === 0) return;
+    const tab = await viewedTab();
+    const json = JSON.stringify(tab);
+    if (!force && json === lastTab) return;
+    lastTab = json;
+    broadcastToPanels({ type: "tab", tab });
+  }, 50);
+}
+
+chrome.tabs.onActivated.addListener(() => announceTab());
+chrome.windows.onFocusChanged.addListener(() => announceTab());
+chrome.tabs.onUpdated.addListener((_tabId, change) => {
+  if (change.url || change.title || change.favIconUrl) announceTab();
+});
 
 function blankSession() {
   return {
     chatId: null, running: false, task: null, approvalMode: "submits", events: [],
-    approval: null, watching: false, pendingApprovals: {}, ask: null, pendingAsks: {}, clock: null,
+    approval: null, watching: false, pendingApprovals: {}, ask: null, pendingAsks: {}, chats: null,
   };
 }
 
@@ -1188,12 +1277,14 @@ async function switchBackend(next) {
   void screencast.stop();
   backend = next;
   await setBackend(next);
+  chosen = true;
   refused = 0;
   signedIn = await auth.account().catch(() => null);
   const { [sessionKey()]: saved } = await chrome.storage.session.get(sessionKey()).catch(() => ({}));
   session = { ...blankSession(), ...(saved ?? {}), watching: false };
   setBadge(needsAttention());
   broadcastToPanels(restoreMessage());
+  announceTab();
   announce(false);
   void connect();
 }

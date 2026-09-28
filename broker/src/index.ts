@@ -16,6 +16,7 @@ import { initConfig, getConfig, setConfig, listModels, type Provider } from "./c
 import { LOCAL_USER, useStore } from "./store/store.js";
 import { FsStore } from "./store/fs.js";
 import { LocalServer } from "./transport/local.js";
+import type { TaskExtras } from "./task-extras.js";
 
 const PORT = Number(process.env.PORT ?? 7331);
 // Optional locally: a limit on each task's active time, like the hosted
@@ -68,7 +69,7 @@ async function chatStateFor(id: string): Promise<ChatState> {
   };
 }
 
-async function runTask(agent: Agent, text: string) {
+async function runTask(agent: Agent, text: string, extras: TaskExtras) {
   const id = agent.info().id;
   const run = runOf(id);
   run.busy = true;
@@ -76,7 +77,8 @@ async function runTask(agent: Agent, text: string) {
   run.cancelRequested = false;
   console.log(`\n[task ${id}] ${text}`);
   emit("start", id, text);
-  await drive(agent, () => agent.run(text, { limitMs: TASK_LIMIT_MS }));
+  if (extras.rules) emit("rules", id, extras.rules);
+  await drive(agent, () => agent.run(text, { limitMs: TASK_LIMIT_MS, ...extras }));
 }
 
 /**
@@ -167,7 +169,7 @@ function runningIds(): Set<string> {
 }
 
 server.start(PORT, {
-  onTask: (text, chatId) => {
+  onTask: (text, chatId, extras) => {
     void (async () => {
       // No chatId at all is a defensive fallback (should not happen once the
       // extension has completed its hello handshake) — start somewhere fresh
@@ -178,7 +180,7 @@ server.start(PORT, {
         emit("error", id, "This chat is already running a task — cancel it, or start/switch to another chat.");
         return;
       }
-      void runTask(agent, text);
+      void runTask(agent, text, extras);
     })();
   },
   onCancel: (chatId) => {
@@ -284,7 +286,7 @@ if (flagIndex !== -1) {
   void (async () => {
     await server.waitForExtension();
     const agent = register(await Agent.resumeLast(USER));
-    await runTask(agent, task);
+    await runTask(agent, task, {});
     // A task that paused for you carries on once you answer in the panel.
     while (runOf(agent.info().id).busy) await sleep(500);
     process.exit(0);

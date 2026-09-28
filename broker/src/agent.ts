@@ -64,6 +64,7 @@ import {
   isSupervisorNote,
   TRAIL_LENGTH,
 } from "./supervisor.js";
+import { splitTaskMessage, taskMessage, type TaskExtras } from "./task-extras.js";
 import {
   blank,
   listSessions,
@@ -372,7 +373,13 @@ class Clock {
  * its pauses; `endBy` is when this run itself must have stopped (epoch ms) —
  * a Lambda's own deadline. Null or absent means none.
  */
-export type RunOptions = { limitMs?: number | null; endBy?: number | null };
+/** A task's supervisor rules as one more thing the user said, for Jev. */
+function rulesLine(task: TaskState): string[] {
+  return task.rules ? [`Rules the user set for this task: ${task.rules}`] : [];
+}
+
+/** A run's time limit, and for a new task, what comes with it (task-extras.ts). */
+export type RunOptions = { limitMs?: number | null; endBy?: number | null } & TaskExtras;
 
 // How much of the chat classifyIntent sees: enough to read a short
 // follow-up in context, not the whole transcript.
@@ -417,7 +424,7 @@ function earlierTurns(messages: Msg[]): EarlierTurn[] {
         if (last) last.outcome = "stopped at its time limit before it finished";
         continue;
       }
-      turns.push({ user: clip(m.content) });
+      turns.push({ user: clip(splitTaskMessage(m.content).text) });
     } else if (
       m.role === "assistant" &&
       typeof m.content === "string" &&
@@ -504,7 +511,7 @@ type Handover = {
 function onRecord(task: TaskState) {
   return {
     instructions: clip(task.instructions),
-    later_instructions: task.followUps.map(clip),
+    later_instructions: [...task.followUps, ...rulesLine(task)].map(clip),
     done_count: task.done.length,
     status:
       task.status === "done"
@@ -728,6 +735,9 @@ export class Agent {
   private images: boolean | null = null;
   // Whether the running turn's work is about jobs — see classifyIntent.
   private jobTask = true;
+  // The rules the user set for the supervisor on the task in hand, if any —
+  // what the user said, as far as Jev's judgments go.
+  private rules: string | null = null;
   // Earlier turns describe pages that have since moved on; the model gets
   // told once, on the first task after a chat is loaded from disk.
   private resumeNoticePending: boolean;
@@ -796,7 +806,9 @@ export class Agent {
           isSupervisorNote(m.content)
         )
           continue;
-        out.push({ event: "start", text: m.content });
+        const { text, rules } = splitTaskMessage(m.content);
+        out.push({ event: "start", text });
+        if (rules) out.push({ event: "rules", text: rules });
       } else if (
         m.role === "assistant" &&
         typeof m.content === "string" &&
@@ -823,7 +835,7 @@ export class Agent {
     const recorded = jevEnabled ? await loadTask(this.userId, this.session.id) : null;
 
     // A task is a turn, not a new conversation.
-    this.session.messages.push({ role: "user", content: task });
+    this.session.messages.push({ role: "user", content: taskMessage(task, options) });
     this.session.tasks.push(task);
 
     const usage: Usage = { input: 0, output: 0, cached: 0 };
@@ -847,7 +859,8 @@ export class Agent {
         abort.signal,
       );
       this.jobTask = intent.jobs;
-      const tracked = await this.track(task, intent, recorded);
+      const tracked = await this.track(task, intent, recorded, options.rules ?? null);
+      this.rules = tracked?.rules ?? options.rules ?? null;
 
       loop = {
         round: 1,
@@ -929,6 +942,7 @@ export class Agent {
     this.jobTask = paused.loop.jobTask;
     // The task file may be gone (deleted by hand); carry on untracked then.
     const tracked = paused.loop.tracked ? await loadTask(this.userId, this.session.id) : null;
+    this.rules = tracked?.rules ?? null;
     const loop: Loop = {
       ...paused.loop,
       tracked,
@@ -1147,9 +1161,9 @@ export class Agent {
     const minutes = Math.round((this.clock?.used() ?? 0) / 60_000);
     return {
       text:
-        `Time's up — stopped after ${minutes ? `${minutes} min` : "less than a minute"}` +
-        (task ? ` with ${task.done.length} done and ${task.skipped.length} skipped` : "") +
-        `. Say "continue" to pick it up.`,
+        `Stopped after ${minutes ? `${minutes} minutes` : "less than a minute"} of work, the most one run can take` +
+        (task ? ` — ${task.done.length} done, ${task.skipped.length} skipped so far` : "") +
+        `. Say "continue" and it picks up where it left off.`,
       steps: loop?.steps ?? 0,
       usage,
       model: active.label,
@@ -1223,7 +1237,9 @@ export class Agent {
       chatId: this.session.id,
       approvalMode: this.session.settings.approvalMode,
       signal,
-      userMessages: this.session.tasks,
+      userMessages: this.rules
+        ? [...this.session.tasks, `Rules I set for this task: ${this.rules}`]
+        : this.session.tasks,
       answers: this.session.answers,
       chatStartedAt: this.session.createdAt,
       seesImages: this.images !== false && !noImages.has(active.label),
@@ -1247,17 +1263,23 @@ export class Agent {
     text: string,
     intent: Intent,
     recorded: TaskState | null,
+    rules: string | null,
   ): Promise<TaskState | null> {
-    if (!jevEnabled || intent.greeting) return null;
+    if (!jevEnabled) return null;
+    // Rules for the supervisor mean the user wants this watched, whatever
+    // the message looks like.
+    if (intent.greeting && !rules) return null;
     let task: TaskState;
     if (recorded && intent.scope === "resume") {
       task = {
         ...recorded,
         followUps: [...recorded.followUps, text],
         status: "active",
+        // New rules replace the old; none sent keeps what was set.
+        ...(rules ? { rules } : {}),
       };
-    } else if (!recorded || intent.scope === "new_task") {
-      task = newTask(text);
+    } else if (!recorded || intent.scope === "new_task" || rules) {
+      task = { ...newTask(text), ...(rules ? { rules } : {}) };
     } else {
       // "other" (a question about how it went, say), or Jev could not tell:
       // either way the progress on record must survive for a later "continue".
@@ -1284,7 +1306,7 @@ export class Agent {
     const check = await judgeCompletion(
       {
         instructions: task.instructions,
-        later_instructions: task.followUps,
+        later_instructions: [...task.followUps, ...rulesLine(task)],
         done_count: task.done.length,
         done: task.done,
         skipped: task.skipped,
@@ -1377,7 +1399,7 @@ export class Agent {
 
     const verdict = await superviseTask(
       {
-        user_instructions: [task.instructions, ...task.followUps],
+        user_instructions: [task.instructions, ...task.followUps, ...rulesLine(task)],
         progress_recorded: { done: task.done, skipped: task.skipped, note: task.note },
         agent_report: report.slice(0, CHECK_IN_REPORT_CAP),
         recent_actions: watch.trail,

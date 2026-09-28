@@ -50,9 +50,10 @@ Then load the extension: `chrome://extensions` → enable **Developer mode** →
 **Load unpacked** → select `extension/`. Keep only one copy of CopperOS enabled —
 the broker serves one client at a time (see [Troubleshooting](#troubleshooting)).
 
-Click the CopperOS toolbar icon to open the side panel. The dot turns green when
-it finds the broker; until then the panel shows how to start it. Choose a
-provider, key and model under ⋮ → **Settings**, then type a task.
+Click the CopperOS toolbar icon to open the side panel. The first time, it asks
+where CopperOS runs: pick **This computer**. The dot turns green when it finds
+the broker; until then the panel shows how to start it. Choose a provider, key
+and model under **Settings**, then type a task.
 
 ### Using Ollama
 
@@ -179,6 +180,14 @@ naming what's wrong. If it's still off course at the next check-in, the task
 continues in a fresh round, with the correction in its brief. At four
 off-course check-ins in a row, the task stops and waits for the user.
 
+You can give the supervisor rules of your own before a task starts: click
+**Supervisor** next to the approval pill and write what it should hold the
+task to ("only jobs posted this week, never LinkedIn, stop after 10"). The
+agent reads them with the task, every check-in restates them, and Jev judges
+the agent against them as firmly as against the task. They belong to that
+task: a follow-up like "continue" keeps them, and the next new task starts
+without.
+
 Separately, a check-in hands over to a fresh round whenever the context has
 grown past `FRESH_CONTEXT_TOKENS`, including earlier turns of the chat. The
 model's check-in answer becomes the handover note, so the next round knows
@@ -197,8 +206,10 @@ OpenRouter, the transcript cap follows the chosen model's context window.
 | `STORAGE_DIR` | `<repo>/storage` | Where chat transcripts are written. |
 | `HISTORY_BUDGET_CHARS` | 60% of `OLLAMA_NUM_CTX` | Transcript size cap before old turns are dropped. |
 
-Approval prompts appear in the popup. Declining returns "user declined" to the
-model as a tool result, so it adapts instead of dying.
+Approval prompts appear in the side panel. The pill next to Send sets when a
+chat asks first (every action, submits only, or never); **Ask before** in
+Settings sets it for new chats. Declining returns "user declined" to the model
+as a tool result, so it adapts instead of dying.
 
 ## The chat is sticky
 
@@ -360,7 +371,7 @@ only interrupts you.
 - Focus is only restored if Chrome already had it. If you were in another app,
   re-focusing a Chrome window would itself drag Chrome over your work.
 
-Use **Live view** in the popup to watch a run without touching focus.
+Use the eye on a running task's card to watch it live without touching focus.
 
 **What this cannot fix.** When a page calls `window.open` from a real click,
 Chrome creates and raises the window before any extension code runs, and there
@@ -388,14 +399,14 @@ workers. Neither may end a run, so nothing that matters lives only in memory.
 - **Ops tolerate a dropped socket.** `call` waits `RECONNECT_GRACE_MS` for the
   extension to return rather than failing immediately, so a worker restart
   costs a pause instead of the run.
-- **The popup restores itself.** Run log, in-flight state, open approval, and
+- **The side panel restores itself.** Run log, in-flight state, open approval, and
   the live-view toggle are kept in `chrome.storage.session` and replayed when
   it reopens. That storage is in-memory and cleared when the browser closes, so
   page text in the log never reaches disk.
 - **The controlled tab is remembered.** `currentTabId` is persisted too. A
   revived worker keeps driving the original tab instead of falling back to
   whichever tab you happen to have switched to.
-- **The live view stops when nobody is watching** and resumes with the popup.
+- **The live view stops when nobody is watching** and resumes with the side panel.
 
 A `chrome.alarms` heartbeat wakes the worker and reconnects if the socket died
 while the browser was in the background, since `setTimeout` does not survive
@@ -411,7 +422,7 @@ worker termination.
 | `extension/sheets.js` | Google Sheets: CSV read, Name box navigation, block writes with read-back. |
 | `extension/som.js` | Badge compositing onto captured frames. |
 | `extension/nav.js` | Navigation, `networkAlmostIdle` waiting, AX-based text extraction. |
-| `extension/screencast.js` | Live view frames for the popup only. |
+| `extension/screencast.js` | Live view frames for the side panel only. |
 | `extension/background.js` | WebSocket bridge, op router, and the after-action settle-and-report step. Splits big results into pieces for the hosted broker. |
 | `extension/backend.js` | Which broker the extension talks to — this computer's or the hosted one — and the hosted one's addresses. |
 | `extension/auth.js` | Signing in to the hosted broker: Cognito's page, OAuth code flow with PKCE, token refresh. |
@@ -420,6 +431,7 @@ worker termination.
 | `extension/overlay.js` | The in-page frame, status pill, and agent cursor. |
 | `broker/src/tools.ts` | The tool definitions, and how action results are shown to the model. |
 | `broker/src/agent.ts` | The loop, system prompt, history pruning. |
+| `broker/src/task-extras.ts` | What rides along with a task's words: the tab it starts on, and the user's rules for the supervisor. |
 | `broker/src/bridge.ts` | The agent core's link to the extension: ops, progress lines, approvals and questions, over whichever `Transport` is set. |
 | `broker/src/transport/local.ts` | The local broker's `Transport`: a WebSocket server on 127.0.0.1 that the extension connects to. |
 | `broker/src/transport/cloud.ts` | The hosted agent's `Transport`: ops straight to the browser through API Gateway, results back over the task's own worker connection, big results reassembled from chunks. |
@@ -428,7 +440,7 @@ worker termination.
 | `broker/src/store/store.ts` | The `Store` interface: where chats, memories, task progress and settings are kept, per user. |
 | `broker/src/store/fs.ts` | The local broker's store: files under `storage/`, one user. |
 | `broker/src/store/cloud.ts` | The hosted store: DynamoDB, S3 transcripts, and users' API keys encrypted with KMS. |
-| `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect (users and task workers), the relay (the hosted `index.ts`), and the agent. `testing/` holds a scripted model deployed to dev stacks only. |
+| `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect (users and task workers), the relay (the hosted `index.ts`), the agent, and `feedback.ts`, which emails "Send a suggestion" from Settings to the team. `testing/` holds a scripted model deployed to dev stacks only. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
 | `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB, S3, KMS, alarms. |
 

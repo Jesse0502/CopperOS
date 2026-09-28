@@ -17,6 +17,7 @@ import { Agent, listChats } from "../agent.js";
 import { requestChatId, requestMessage, type AskOutcome } from "../bridge.js";
 import { getConfig, initConfig, listModels, setConfig, type LLMConfig, type Provider } from "../config.js";
 import { setCurrent, type ApprovalMode } from "../session.js";
+import { taskExtras } from "../task-extras.js";
 import { busy, CloudStore, deleteUserData, type ChatItem } from "../store/cloud.js";
 import { useStore } from "../store/store.js";
 import {
@@ -35,8 +36,6 @@ const store = new CloudStore();
 useStore(store);
 const lambda = new LambdaClient({});
 const cognito = new CognitoIdentityProviderClient({});
-// A task's active time on the free plan; the panel counts it down.
-const TASK_LIMIT_MS = Number(process.env.TASK_LIMIT_MS ?? 15 * 60_000);
 
 /** What the authorizer said about the connection, on every event for it. */
 type Event = APIGatewayProxyWebsocketEventV2 & {
@@ -148,9 +147,10 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
         await say("error", chatId, "This chat is already running a task — cancel it, or start/switch to another chat.");
         return;
       }
+      const extras = taskExtras(msg);
       await say("start", chatId, msg.text);
-      await postToExtensions(userId, { type: "clock", chatId, limitMs: TASK_LIMIT_MS, usedMs: 0, ticking: true });
-      await startAgent({ kind: "run", text: msg.text, userId, chatId, connectionId: from });
+      if (extras.rules) await say("rules", chatId, extras.rules);
+      await startAgent({ kind: "run", text: msg.text, extras, userId, chatId, connectionId: from });
       return;
     }
 
@@ -170,7 +170,6 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
           : askOutcome(msg);
       const usedMs = item.run?.usedMs ?? 0;
       if (!(await store.claimRun(userId, chatId, item.run?.task ?? null, msg.id, usedMs))) return;
-      await postToExtensions(userId, { type: "clock", chatId, limitMs: TASK_LIMIT_MS, usedMs, ticking: true });
       await startAgent({ kind: "resume", requestId: msg.id, answer, userId, chatId, connectionId: from });
       return;
     }
@@ -265,16 +264,7 @@ function state(agent: Agent, item: ChatItem | undefined) {
     running,
     task: running ? (item?.run?.task ?? info.lastTask) : null,
     approvalMode: info.approvalMode,
-    clock: running ? clockOf(item!) : null,
   };
-}
-
-/** Where a busy chat's task stands against its time limit. */
-function clockOf(item: ChatItem) {
-  const run = item.run;
-  const waiting = Boolean(item.pending);
-  const usedMs = (run?.usedMs ?? 0) + (run && !waiting ? Date.now() - run.startedAt : 0);
-  return { limitMs: TASK_LIMIT_MS, usedMs, ticking: !waiting };
 }
 
 function askOutcome(msg: any): AskOutcome {

@@ -195,11 +195,6 @@ export class CloudTransport implements Transport {
     this.broadcast(requestMessage(request));
   }
 
-  /** Anything else for the panel — the task's clock. */
-  notify(message: unknown): void {
-    this.broadcast(message);
-  }
-
   // A paused task's request is kept on its chat (and shown again by the
   // relay), not by the transport.
   withdraw(): void {}

@@ -41,9 +41,13 @@ export function checkInPrompt(task: TaskState, step: number): string {
     (task.followUps.length
       ? `<later_instructions>\n${task.followUps.map((s) => `- ${s}`).join("\n")}\n</later_instructions>\n\n`
       : "") +
+    (task.rules
+      ? `The rules the user set for the supervisor, which hold as firmly as the instructions:\n` +
+        `<supervisor_rules>\n${task.rules}\n</supervisor_rules>\n\n`
+      : "") +
     `In three to five sentences: What are you doing right now, and how — ` +
     `which page, controls and steps? How does that follow the instructions ` +
-    `above? What have you finished since your last check-in (or since the ` +
+    `${task.rules ? "and rules " : ""}above? What have you finished since your last check-in (or since the ` +
     `task began, if this is the first) — only what the page confirmed? What ` +
     `will you do next?]`
   );

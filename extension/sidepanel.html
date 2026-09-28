@@ -7,43 +7,52 @@
       :root {
         color-scheme: light dark;
         --brand: #d97757;
-        --brand-strong: color-mix(in srgb, var(--brand) 78%, black);
+        --brand-strong: #c4643f;
         --brand-soft: rgba(217, 119, 87, 0.14);
         --brand-fg: #ffffff;
         accent-color: var(--brand);
 
-        --bg: #fbfbfd;
-        --surface: #f4f4f8;
-        --surface-2: #eaeaf1;
-        --border: rgba(18, 19, 28, 0.09);
-        --text: #191a22;
-        --text-muted: #64656f;
-        --text-faint: #94959f;
+        --bg: #fbfaf8;
+        --surface: #f3f1ed;
+        --surface-2: #e9e6e0;
+        --border: rgba(40, 32, 24, 0.1);
+        --text: #1d1c1a;
+        --text-muted: #69645d;
+        --text-faint: #8a847b;
 
         --ok: #1a9c5c;
         --ok-soft: rgba(26, 156, 92, 0.12);
         --err: #d0334c;
         --err-soft: rgba(208, 51, 76, 0.1);
-        --warn: #b4650b;
-        --warn-soft: rgba(224, 162, 59, 0.14);
+        --warn: #a8650b;
+        --warn-soft: rgba(224, 162, 59, 0.16);
+        --warn-line: rgba(224, 162, 59, 0.55);
+        --gate-bg: #fbf3e3;
 
-        --code-bg: rgba(18, 19, 28, 0.06);
+        --code-bg: rgba(40, 32, 24, 0.06);
         --code-bg-on-brand: rgba(255, 255, 255, 0.22);
+        --lift: 0 1px 2px rgba(0, 0, 0, 0.08);
       }
       @media (prefers-color-scheme: dark) {
         :root {
           --bg: #151515;
           --surface: #20201f;
           --surface-2: #292825;
-          --border: rgba(230, 222, 215, 0.08);
+          --border: rgba(230, 222, 215, 0.09);
           --text: #ece9e6;
           --text-muted: #a5a19b;
-          --text-faint: #79766f;
-          --brand-soft: rgba(217, 119, 87, 0.18);
+          --text-faint: #8a867f;
+          --brand-soft: rgba(217, 119, 87, 0.16);
+          --ok: #3fbf7f;
           --ok-soft: rgba(26, 156, 92, 0.18);
+          --err: #ef5d74;
           --err-soft: rgba(208, 51, 76, 0.18);
-          --warn-soft: rgba(224, 162, 59, 0.18);
+          --warn: #e0a23b;
+          --warn-soft: rgba(224, 162, 59, 0.14);
+          --warn-line: rgba(224, 162, 59, 0.45);
+          --gate-bg: #221d15;
           --code-bg: rgba(230, 222, 215, 0.07);
+          --lift: 0 1px 2px rgba(0, 0, 0, 0.3);
         }
       }
       * {
@@ -54,6 +63,7 @@
         height: 100%;
       }
       body {
+        position: relative;
         margin: 0;
         min-width: 280px;
         display: flex;
@@ -69,49 +79,8 @@
           "Segoe UI",
           sans-serif;
       }
-
-      /* ── header ─────────────────────────────────────────────────────────── */
-      header {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex: none;
-        padding: 10px 12px;
-        border-bottom: 1px solid var(--border);
-      }
-      .status-indicator {
-        display: flex;
-        align-items: center;
-        gap: 7px;
-        font-size: 12.5px;
-        font-weight: 600;
-        color: var(--text-muted);
-        white-space: nowrap;
-        transition: color 0.2s ease;
-      }
-      #status-indicator:has(#dot.on) #status {
-        color: var(--text);
-      }
-      #status-indicator:has(#dot.busy) #status {
-        color: var(--brand);
-      }
-      #dot {
-        width: 7px;
-        height: 7px;
-        border-radius: 50%;
-        background: var(--err);
-        flex: none;
-        transition:
-          background-color 0.2s ease,
-          box-shadow 0.2s ease;
-      }
-      #dot.on {
-        background: var(--ok);
-        box-shadow: 0 0 6px rgba(26, 156, 92, 0.6);
-      }
-      #dot.busy {
-        background: var(--brand);
-        animation: pulse 1.4s ease-in-out infinite;
+      [hidden] {
+        display: none !important;
       }
       @keyframes pulse {
         0%,
@@ -121,271 +90,6 @@
         50% {
           opacity: 0.35;
         }
-      }
-
-      .icon-btn {
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        width: 26px;
-        height: 26px;
-        padding: 0;
-        border-radius: 7px;
-        flex: none;
-        border: 1px solid transparent;
-        background: transparent;
-        color: var(--text-muted);
-        cursor: pointer;
-        transition:
-          background-color 0.15s ease,
-          color 0.15s ease,
-          transform 0.1s ease;
-      }
-      .icon-btn:hover {
-        background: var(--surface-2);
-        color: var(--text);
-      }
-      .icon-btn:active {
-        transform: scale(0.9);
-      }
-      .icon-btn.active {
-        background: var(--brand-soft);
-        color: var(--brand);
-      }
-      .icon-btn svg {
-        width: 15px;
-        height: 15px;
-        transition: transform 0.15s ease;
-      }
-
-      /* ── header menu ───────────────────────────────────────────────────── */
-      .header-actions {
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        margin-left: auto;
-      }
-      .menu-wrap {
-        position: relative;
-      }
-      .menu-dropdown {
-        position: absolute;
-        top: calc(100% + 6px);
-        right: 0;
-        min-width: 172px;
-        padding: 6px;
-        border-radius: 12px;
-        border: 1px solid var(--border);
-        background: var(--surface);
-        box-shadow:
-          0 10px 30px rgba(0, 0, 0, 0.18),
-          0 2px 8px rgba(0, 0, 0, 0.08);
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        opacity: 0;
-        transform: translateY(-4px) scale(0.96);
-        transform-origin: top right;
-        pointer-events: none;
-        transition:
-          opacity 0.15s ease,
-          transform 0.15s cubic-bezier(0.2, 0.8, 0.3, 1);
-        z-index: 20;
-      }
-      .menu-dropdown.on {
-        opacity: 1;
-        transform: none;
-        pointer-events: auto;
-      }
-      .menu-item {
-        display: flex;
-        align-items: center;
-        gap: 9px;
-        width: 100%;
-        text-align: left;
-        font: inherit;
-        font-size: 13px;
-        font-weight: 600;
-        padding: 8px 9px;
-        border-radius: 8px;
-        border: none;
-        background: transparent;
-        color: var(--text);
-        cursor: pointer;
-        transition: background-color 0.15s ease;
-      }
-      .menu-item:hover {
-        background: var(--surface-2);
-      }
-      .menu-item:active {
-        transform: scale(0.98);
-      }
-      .menu-item.active {
-        background: var(--brand-soft);
-        color: var(--brand);
-      }
-      .menu-item svg {
-        width: 15px;
-        height: 15px;
-        flex: none;
-      }
-
-      /* ── main / pages ──────────────────────────────────────────────────── */
-      #main {
-        flex: 1 1 auto;
-        min-height: 0;
-        position: relative;
-        overflow: hidden;
-      }
-      #chat-view {
-        height: 100%;
-        display: flex;
-        flex-direction: column;
-        overflow: hidden;
-      }
-      .page {
-        position: absolute;
-        inset: 0;
-        display: flex;
-        flex-direction: column;
-        background: var(--bg);
-        transform: translateX(100%);
-        transition: transform 0.28s cubic-bezier(0.22, 0.9, 0.25, 1);
-        overflow: hidden;
-        z-index: 10;
-      }
-      .page.on {
-        transform: translateX(0);
-      }
-      .page-head {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        flex: none;
-        padding: 10px 12px;
-        border-bottom: 1px solid var(--border);
-      }
-      .page-title {
-        font-size: 13.5px;
-        font-weight: 700;
-        color: var(--text);
-      }
-      #history-list {
-        flex: 1;
-        min-height: 0;
-        overflow-y: auto;
-        padding: 6px 6px 8px;
-      }
-      #history-empty,
-      #history-loading {
-        padding: 14px 12px 16px;
-        text-align: center;
-        font-size: 13px;
-        color: var(--text-faint);
-      }
-      .chat-item {
-        display: flex;
-        flex-direction: column;
-        gap: 2px;
-        width: 100%;
-        text-align: left;
-        font: inherit;
-        padding: 7px 8px;
-        border-radius: 8px;
-        border: none;
-        background: transparent;
-        color: inherit;
-        cursor: pointer;
-        transition: background-color 0.15s ease;
-        animation: riseIn 0.18s ease-out both;
-      }
-      .chat-item:hover {
-        background: var(--surface-2);
-      }
-      .chat-item.active {
-        background: var(--brand-soft);
-        cursor: default;
-      }
-      .chat-title {
-        font-size: 13.5px;
-        font-weight: 600;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .chat-meta {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 11.5px;
-        color: var(--text-faint);
-      }
-      .chat-meta .badge {
-        padding: 1px 6px;
-        border-radius: 100px;
-        background: var(--brand);
-        color: var(--brand-fg);
-        font-weight: 700;
-        font-size: 10.5px;
-        letter-spacing: 0.2px;
-      }
-
-      /* ── live view ──────────────────────────────────────────────────────── */
-      #live-wrap {
-        display: none;
-        flex: none;
-        padding: 10px 12px 0;
-      }
-      #live-wrap.on {
-        display: block;
-      }
-      #live-frame {
-        position: relative;
-        border-radius: 8px;
-        overflow: hidden;
-        border: 1px solid var(--border);
-        background: #000;
-      }
-      #live {
-        display: block;
-        width: 100%;
-      }
-      #live-badge {
-        position: absolute;
-        top: 6px;
-        left: 6px;
-        display: flex;
-        align-items: center;
-        gap: 4px;
-        padding: 2px 6px;
-        border-radius: 100px;
-        background: rgba(0, 0, 0, 0.55);
-        color: #fff;
-        font-size: 11px;
-        font-weight: 600;
-        letter-spacing: 0.3px;
-      }
-      #live-badge::before {
-        content: "";
-        width: 5px;
-        height: 5px;
-        border-radius: 50%;
-        background: #ff4d5e;
-        animation: pulse 1.4s ease-in-out infinite;
-      }
-
-      /* ── transcript ─────────────────────────────────────────────────────── */
-      #log {
-        flex: 1 1 auto;
-        min-height: 0;
-        padding: 10px 12px;
-        overflow-y: auto;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-      #log > * {
-        animation: riseIn 0.22s ease-out both;
       }
       @keyframes riseIn {
         from {
@@ -397,279 +101,434 @@
           transform: none;
         }
       }
-      @media (prefers-reduced-motion: reduce) {
-        #log > * {
-          animation: none;
+
+      /* ── icons ──────────────────────────────────────────────────────────── */
+      /* The design's icons (assets/icons/*.png) are drawn as masks, so they
+         take the colour of the text around them in every state and theme. */
+      .i {
+        display: inline-block;
+        width: 15px;
+        height: 15px;
+        flex: none;
+        background-color: currentColor;
+        -webkit-mask-position: center;
+        mask-position: center;
+        -webkit-mask-size: contain;
+        mask-size: contain;
+        -webkit-mask-repeat: no-repeat;
+        mask-repeat: no-repeat;
+      }
+      .i-approval {
+        -webkit-mask-image: url(assets/icons/approval.png);
+        mask-image: url(assets/icons/approval.png);
+      }
+      .i-click {
+        -webkit-mask-image: url(assets/icons/click-step.png);
+        mask-image: url(assets/icons/click-step.png);
+      }
+      .i-look {
+        -webkit-mask-image: url(assets/icons/look-step.png);
+        mask-image: url(assets/icons/look-step.png);
+      }
+      .i-new {
+        -webkit-mask-image: url(assets/icons/new-chat.png);
+        mask-image: url(assets/icons/new-chat.png);
+      }
+      .i-hist {
+        -webkit-mask-image: url(assets/icons/past-chats.png);
+        mask-image: url(assets/icons/past-chats.png);
+      }
+      .i-send {
+        -webkit-mask-image: url(assets/icons/send.png);
+        mask-image: url(assets/icons/send.png);
+      }
+      .i-gear {
+        -webkit-mask-image: url(assets/icons/settings.png);
+        mask-image: url(assets/icons/settings.png);
+      }
+      .i-nav {
+        -webkit-mask-image: url(assets/icons/step-navigation.png);
+        mask-image: url(assets/icons/step-navigation.png);
+      }
+      .i-stop {
+        -webkit-mask-image: url(assets/icons/stop-anytime.png);
+        mask-image: url(assets/icons/stop-anytime.png);
+      }
+      .i-try {
+        -webkit-mask-image: url(assets/icons/suggestion.png);
+        mask-image: url(assets/icons/suggestion.png);
+      }
+      .i-type {
+        -webkit-mask-image: url(assets/icons/type-step.png);
+        mask-image: url(assets/icons/type-step.png);
+      }
+      /* Something is on its way: signing in, loading, sending. */
+      .spinner {
+        display: inline-block;
+        width: 12px;
+        height: 12px;
+        flex: none;
+        border-radius: 50%;
+        border: 1.75px solid currentColor;
+        border-right-color: transparent;
+        animation: spin 0.7s linear infinite;
+      }
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
         }
       }
-      #empty {
-        text-align: center;
-        padding: 22px 8px 8px;
+      .busy {
+        pointer-events: none;
+      }
+      .busy .i,
+      .busy .g {
+        display: none;
+      }
+      .btn.busy:disabled {
+        opacity: 1;
+      }
+      /* Smaller glyphs with no icon file of their own, from the sprite below. */
+      .g {
+        width: 15px;
+        height: 15px;
+        flex: none;
+      }
+
+      /* ── buttons ────────────────────────────────────────────────────────── */
+      .btn {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 6px;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 7px 12px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: transparent;
+        color: var(--text);
+        text-decoration: none;
+        cursor: pointer;
+        transition:
+          background-color 0.15s ease,
+          border-color 0.15s ease,
+          transform 0.1s ease;
+      }
+      .btn .i,
+      .btn .g {
+        width: 13px;
+        height: 13px;
+      }
+      .btn:hover:not(:disabled) {
+        background: var(--surface-2);
+      }
+      .btn:active:not(:disabled) {
+        transform: scale(0.97);
+      }
+      .btn:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      .btn.pr {
+        background: var(--brand);
+        border-color: var(--brand);
+        color: var(--brand-fg);
+      }
+      .btn.pr:hover:not(:disabled) {
+        background: var(--brand-strong);
+        border-color: var(--brand-strong);
+      }
+      .btn.sm {
+        font-size: 12px;
+        padding: 4px 9px;
+      }
+      .btn.wide {
+        width: 100%;
+        padding: 9px 12px;
+      }
+      .ib {
+        position: relative;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        flex: none;
+        width: 28px;
+        height: 28px;
+        padding: 0;
+        border: none;
+        border-radius: 7px;
+        background: none;
+        color: var(--text-muted);
+        cursor: pointer;
+        transition:
+          background-color 0.15s ease,
+          color 0.15s ease,
+          transform 0.1s ease;
+      }
+      .ib:hover {
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .ib:active {
+        transform: scale(0.92);
+      }
+      .ib.on {
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      .ib.sm {
+        width: 24px;
+        height: 24px;
+      }
+      .ib.sm .i,
+      .ib.sm .g {
+        width: 13px;
+        height: 13px;
+      }
+      /* Another chat is waiting on you. */
+      .ib.alert::after {
+        content: "";
+        position: absolute;
+        top: 4px;
+        right: 4px;
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--warn);
+        box-shadow: 0 0 0 1.5px var(--bg);
+      }
+      .link {
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+        font: inherit;
+        font-size: 13px;
+        font-weight: 600;
+        padding: 0;
+        border: none;
+        background: none;
+        color: var(--brand);
+        text-decoration: none;
+        cursor: pointer;
+      }
+      .link:hover {
+        color: var(--brand-strong);
+        text-decoration: underline;
+        text-underline-offset: 2px;
+      }
+      .link.quiet {
+        font-weight: 500;
+        color: var(--text-muted);
+      }
+      .link.quiet:hover {
+        color: var(--text);
+      }
+      .link.danger {
+        font-size: 12px;
+        font-weight: 500;
+        color: var(--err);
+      }
+      .link:disabled {
+        opacity: 0.5;
+        cursor: default;
+        text-decoration: none;
+      }
+
+      /* ── header ─────────────────────────────────────────────────────────── */
+      .hd {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        flex: none;
+        padding: 10px 12px;
+        border-bottom: 1px solid var(--border);
+      }
+      .hd-title {
+        font-size: 13.5px;
+        font-weight: 700;
+      }
+      .hd .back {
+        margin-left: -6px;
+      }
+      #where {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        min-width: 0;
+        font-size: 12.5px;
+        font-weight: 600;
+      }
+      .dot {
+        width: 7px;
+        height: 7px;
+        border-radius: 50%;
+        flex: none;
+        background: var(--err);
+        transition: background-color 0.2s ease;
+      }
+      .dot.ok {
+        background: var(--ok);
+      }
+      .dot.busy {
+        background: var(--brand);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      .dot.wait {
+        background: var(--warn);
+      }
+      #fav {
+        width: 14px;
+        height: 14px;
+        border-radius: 3px;
+        flex: none;
+      }
+      #fav-none {
+        width: 14px;
+        height: 14px;
         color: var(--text-faint);
       }
-      #empty svg {
-        width: 26px;
-        height: 26px;
-        margin-bottom: 8px;
-        opacity: 0.6;
+      #site {
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
       }
-      #empty p {
-        margin: 0 0 12px;
-        font-size: 13px;
+      .acts {
+        display: flex;
+        gap: 2px;
+        margin-left: auto;
+      }
+
+      /* ── chat ───────────────────────────────────────────────────────────── */
+      #chat {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+      }
+      #log {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        padding: 12px;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        transition: opacity 0.2s ease;
+      }
+      #log > * {
+        animation: riseIn 0.22s ease-out both;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        #log > *,
+        .gate {
+          animation: none !important;
+        }
+      }
+      /* A question or an approval is waiting: everything else fades back. */
+      body.gated #log {
+        opacity: 0.5;
+      }
+      body.gated #composer {
+        display: none;
+      }
+
+      #empty {
+        margin: auto 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+      #empty .ask-line {
+        font-size: 15px;
+        font-weight: 700;
+        text-align: center;
       }
       #chips {
         display: flex;
         flex-direction: column;
         gap: 6px;
-        max-width: 100%;
       }
       .chip {
+        display: flex;
+        align-items: center;
+        gap: 8px;
         text-align: left;
         font: inherit;
         font-size: 13px;
-        padding: 7px 10px;
+        padding: 8px 10px;
         border-radius: 8px;
         border: 1px solid var(--border);
         background: var(--surface);
-        color: var(--text-muted);
+        color: var(--text);
         cursor: pointer;
         transition:
           border-color 0.15s ease,
-          color 0.15s ease,
           transform 0.1s ease;
+      }
+      .chip .i {
+        width: 13px;
+        height: 13px;
+        color: var(--text-faint);
+        transition: color 0.15s ease;
       }
       .chip:hover {
         border-color: var(--brand);
-        color: var(--text);
+      }
+      .chip:hover .i {
+        color: var(--brand);
       }
       .chip:active {
         transform: scale(0.98);
       }
 
-      /* ── task time limit ───────────────────────────────────────────────── */
-      #clock {
-        font-size: 11.5px;
-        font-weight: 600;
-        font-variant-numeric: tabular-nums;
-        color: var(--text-muted);
-        padding: 1px 7px;
-        border-radius: 999px;
-        background: var(--surface-2);
-      }
-      #clock.low {
-        color: var(--warn);
-        background: var(--warn-soft);
-      }
-
-      /* ── where CopperOS runs ──────────────────────────────────────────── */
-      .segmented {
-        display: flex;
-        padding: 3px;
-        gap: 3px;
-        border-radius: 9px;
-        background: var(--surface-2);
-      }
-      .segmented button {
-        flex: 1;
-        font: inherit;
-        font-size: 12.5px;
-        font-weight: 600;
-        padding: 6px 8px;
-        border: none;
-        border-radius: 7px;
-        background: transparent;
-        color: var(--text-muted);
-        cursor: pointer;
-      }
-      .segmented button[aria-checked="true"] {
-        background: var(--bg);
-        color: var(--text);
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.12);
-      }
-      #account-row {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-        font-size: 12.5px;
-        color: var(--text-muted);
-      }
-      #account-row .who {
-        flex: 1;
-        min-width: 0;
-        overflow: hidden;
-        text-overflow: ellipsis;
-        white-space: nowrap;
-      }
-      .link-danger {
-        align-self: flex-start;
-        font: inherit;
-        font-size: 12px;
-        padding: 0;
-        border: none;
-        background: none;
-        color: var(--err);
-        cursor: pointer;
-        text-decoration: underline;
-        text-underline-offset: 2px;
-      }
-      .link-danger:disabled {
-        opacity: 0.5;
-        cursor: default;
-      }
-      #model-offline {
-        font-size: 12.5px;
-        color: var(--text-muted);
-      }
-      .settings-divider {
-        border: none;
-        border-top: 1px solid var(--border);
-        margin: 2px 0;
-      }
-
-      /* ── no broker ──────────────────────────────────────────────────────── */
-      /* What a first run (or a store reviewer) sees before a broker is
-         running. Shown by sidepanel.js a moment after the connection drops. */
-      #offline {
-        display: none;
-        margin: 14px 12px 0;
-        padding: 16px 14px 14px;
-        border: 1px solid var(--border);
-        border-radius: 12px;
-        background: var(--surface);
-      }
-      body.offline #offline {
-        display: block;
-        animation: riseIn 0.22s ease-out both;
-      }
-      body.offline #empty,
-      body.offline #composer {
-        display: none;
-      }
-      #offline h2 {
-        margin: 0 0 6px;
-        font-size: 14.5px;
-        font-weight: 650;
-      }
-      #offline p {
-        margin: 0 0 10px;
-        font-size: 13px;
-        color: var(--text-muted);
-      }
-      #offline code {
-        display: block;
-        margin: 0 0 12px;
-        padding: 7px 10px;
-        border-radius: 7px;
-        background: var(--code-bg);
-        font: 12.5px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
-        color: var(--text);
-      }
-      #offline .offline-actions {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 6px;
-      }
-      #offline a.btn,
-      #offline button.btn {
-        display: inline-flex;
-        align-items: center;
-        font-size: 13px;
-        font-weight: 600;
-        padding: 6px 11px;
-        border-radius: 8px;
-        border: 1px solid var(--border);
-        color: var(--text);
-        text-decoration: none;
-        transition: background-color 0.15s ease;
-      }
-      #offline a.btn:hover,
-      #offline button.btn:hover {
-        background: var(--surface-2);
-      }
-      #offline .btn.primary {
-        background: var(--brand);
-        border-color: var(--brand);
-        color: var(--brand-fg);
-      }
-      #offline .btn.primary:hover {
-        background: var(--brand-strong);
-      }
-      #offline [hidden] {
-        display: none !important;
-      }
-      #offline small {
-        display: block;
-        margin-top: 10px;
-        font-size: 11.5px;
-        color: var(--text-faint);
-      }
-
-      .row {
-        display: flex;
-        gap: 7px;
-        align-items: flex-start;
-      }
-      .row.mine {
-        justify-content: flex-end;
-      }
-      .bubble {
+      .mine {
+        align-self: flex-end;
         max-width: 84%;
-        padding: 7px 10px;
-        border-radius: 11px;
+        padding: 8px 11px;
+        border-radius: 11px 11px 3px 11px;
+        background: var(--brand);
+        color: var(--brand-fg);
         font-size: 13.5px;
         white-space: pre-wrap;
-        word-break: break-word;
+        overflow-wrap: anywhere;
       }
-      .row.mine .bubble {
-        background: var(--brand);
-        color: var(--brand-fg);
-        border-bottom-right-radius: 3px;
-      }
-      .row.theirs .bubble {
+      .theirs {
+        align-self: flex-start;
+        max-width: 92%;
+        padding: 9px 11px;
+        border-radius: 11px 11px 11px 3px;
         background: var(--surface-2);
-        border-bottom-left-radius: 3px;
+        font-size: 13.5px;
+        overflow-wrap: anywhere;
       }
-      .row.think .bubble {
-        background: transparent;
-        color: var(--text-faint);
-        font-style: italic;
-        padding: 0;
-      }
-
-      /* Structured "say"/"think" content, rendered from a lightweight markdown subset. */
-      .bubble p {
+      /* The model's replies, from a small, escaped markdown subset. */
+      .theirs p {
         margin: 0 0 6px;
       }
-      .bubble p:last-child {
-        margin-bottom: 0;
-      }
-      .bubble ul,
-      .bubble ol {
+      .theirs ul,
+      .theirs ol {
         margin: 0 0 6px;
         padding-left: 18px;
       }
-      .bubble ul:last-child,
-      .bubble ol:last-child {
+      .theirs li {
+        margin: 3px 0;
+      }
+      .theirs > :last-child {
         margin-bottom: 0;
       }
-      .bubble li {
-        margin: 2px 0;
-      }
-      .bubble .md-h {
+      .theirs .md-h {
         font-weight: 700;
         margin: 2px 0 4px;
       }
-      .bubble .md-h1 {
+      .theirs .md-h1 {
         font-size: 14.5px;
       }
-      .bubble .md-h2 {
+      .theirs .md-h2 {
         font-size: 14px;
       }
-      .bubble .md-h3,
-      .bubble .md-h4 {
-        font-size: 13.5px;
-      }
-      .bubble code {
+      .theirs code {
         background: var(--code-bg);
         padding: 1px 4px;
         border-radius: 4px;
@@ -679,7 +538,7 @@
           Menlo,
           monospace;
       }
-      .bubble pre {
+      .theirs pre {
         background: var(--code-bg);
         padding: 7px 9px;
         border-radius: 7px;
@@ -687,254 +546,338 @@
         margin: 0 0 6px;
         white-space: pre;
       }
-      .bubble pre:last-child {
-        margin-bottom: 0;
-      }
-      .bubble pre code {
+      .theirs pre code {
         background: none;
         padding: 0;
       }
-      .row.mine .bubble code,
-      .row.mine .bubble pre {
-        background: var(--code-bg-on-brand);
-      }
-      .bubble a {
+      .theirs a {
         color: inherit;
         text-decoration: underline;
         text-underline-offset: 2px;
       }
-      .avatar {
-        width: 20px;
-        height: 20px;
-        border-radius: 6px;
+
+      /* ── a task's run ───────────────────────────────────────────────────── */
+      .run {
+        flex: none;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+      }
+      .run-h {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 9px 10px;
+      }
+      .run-h .t {
+        font-size: 13px;
+        font-weight: 700;
+      }
+      .run-h .meta {
+        font-size: 11.5px;
+        color: var(--text-muted);
+        font-variant-numeric: tabular-nums;
+      }
+      .run-h .meta.low {
+        color: var(--warn);
+      }
+      .run-h .watch {
+        margin-left: auto;
+      }
+      .run-b {
+        border-top: 1px solid var(--border);
+      }
+      .run.paused .run-b,
+      .run.paused .watch {
+        display: none;
+      }
+      .run.paused .stop {
+        margin-left: auto;
+      }
+      .live {
+        position: relative;
+        margin: 10px 10px 2px;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid var(--border);
+        background: #000;
+      }
+      .live img {
+        display: block;
+        width: 100%;
+        min-height: 60px;
+      }
+      .live .badge {
+        position: absolute;
+        top: 6px;
+        left: 6px;
+        display: flex;
+        align-items: center;
+        gap: 4px;
+        padding: 2px 7px;
+        border-radius: 99px;
+        background: rgba(0, 0, 0, 0.6);
+        color: #fff;
+        font-size: 10.5px;
+        font-weight: 700;
+        letter-spacing: 0.3px;
+      }
+      .live .badge::before {
+        content: "";
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #ff4d5e;
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      .think {
+        margin: 8px 10px 0;
+        font-size: 12px;
+        font-style: italic;
+        color: var(--text-faint);
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+      }
+      .more {
+        margin: 8px 10px 0;
+        padding: 0;
+        border: none;
+        background: none;
+        font: inherit;
+        font-size: 11.5px;
+        color: var(--text-faint);
+        cursor: pointer;
+      }
+      .more:hover {
+        color: var(--text);
+      }
+      .steps {
+        display: flex;
+        flex-direction: column;
+        padding: 4px 10px 8px;
+      }
+      .s {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        padding: 5px 0;
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      .s .ic {
+        width: 18px;
+        height: 18px;
+        border-radius: 5px;
         flex: none;
         margin-top: 1px;
         display: flex;
         align-items: center;
         justify-content: center;
         background: var(--surface-2);
-        color: var(--text-muted);
+        color: var(--ok);
       }
-      .avatar svg {
-        width: 12px;
-        height: 12px;
-      }
-
-      .step {
-        display: flex;
-        align-items: flex-start;
-        gap: 7px;
-        padding: 4px 2px;
-        color: var(--text-muted);
-        font-size: 13px;
-      }
-      .step .ic {
-        width: 18px;
-        height: 18px;
-        border-radius: 5px;
-        flex: none;
-        margin-top: 0.5px;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        background: var(--surface-2);
-        color: var(--text-muted);
-      }
-      .step .ic svg {
+      .s .ic .i,
+      .s .ic .g {
         width: 11px;
         height: 11px;
       }
-      .step .label {
-        font-weight: 600;
-        color: var(--text);
-        flex: none;
-      }
-      .step .text {
-        flex: 1;
+      .s .x {
+        min-width: 0;
         overflow-wrap: anywhere;
       }
-      .step.err {
-        color: var(--err);
+      .s .l {
+        font-weight: 700;
+        color: var(--text);
+        margin-right: 4px;
       }
-      .step.err .ic {
-        background: var(--err-soft);
-        color: var(--err);
-      }
-      .step.warn .ic {
+      .s.warn .ic {
         background: var(--warn-soft);
         color: var(--warn);
       }
-
-      .status-chip {
-        align-self: center;
-        max-width: 92%;
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        padding: 3px 10px;
-        border-radius: 100px;
-        font-size: 12px;
-        font-weight: 600;
-        background: var(--surface-2);
-        color: var(--text-muted);
-        text-align: left;
-        overflow-wrap: anywhere;
+      .s.err {
+        color: var(--err);
       }
-      .status-chip svg {
-        width: 11px;
-        height: 11px;
-      }
-      .status-chip.ok {
-        background: var(--ok-soft);
-        color: var(--ok);
-      }
-      .status-chip.err {
+      .s.err .ic {
         background: var(--err-soft);
         color: var(--err);
       }
+      /* The step happening now is the one copper row. */
+      .run.active .s:last-child:not(.err):not(.warn) {
+        color: var(--text);
+      }
+      .run.active .s:last-child:not(.err):not(.warn) .ic {
+        background: var(--brand-soft);
+        color: var(--brand);
+      }
 
-      /* ── approval ───────────────────────────────────────────────────────── */
-      #approval {
+      /* Once it ends, a run folds into one quiet line under the answer. */
+      .run.ended {
+        border: none;
+        background: none;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      .run.ended .run-h {
         display: none;
+      }
+      .run.ended .run-b {
+        display: none;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+      }
+      .run.ended.open .run-b {
+        display: block;
+      }
+      .sum,
+      .note {
+        align-self: flex-start;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        padding: 0;
+        border: none;
+        background: none;
+        font: inherit;
+        font-size: 12px;
+        color: var(--text-faint);
+        text-align: left;
+        overflow-wrap: anywhere;
+      }
+      .sum:not(:disabled) {
+        cursor: pointer;
+      }
+      .sum:not(:disabled):hover {
+        color: var(--text-muted);
+      }
+      .sum .g,
+      .note .g {
+        width: 12px;
+        height: 12px;
+      }
+      .sum.ok .g:first-child {
+        color: var(--ok);
+      }
+      .sum.err,
+      .note.err {
+        color: var(--err);
+      }
+      .sum .chev {
+        transition: transform 0.15s ease;
+      }
+      .run.open .sum .chev {
+        transform: rotate(180deg);
+      }
+
+      /* ── approval and questions ─────────────────────────────────────────── */
+      .gate {
         flex: none;
         margin: 0 12px 10px;
-        padding: 10px;
-        border-radius: 10px;
-        border: 1px solid rgba(224, 162, 59, 0.4);
-        background: var(--warn-soft);
-        animation: approvalIn 0.25s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+        padding: 12px;
+        border-radius: 12px;
+        animation: gateIn 0.25s cubic-bezier(0.2, 0.8, 0.3, 1) both;
       }
-      @keyframes approvalIn {
+      @keyframes gateIn {
         from {
           opacity: 0;
-          transform: translateY(-6px) scale(0.98);
+          transform: translateY(6px) scale(0.98);
         }
         to {
           opacity: 1;
           transform: none;
         }
       }
-      #approval-head {
+      .gate-h {
         display: flex;
         align-items: center;
         gap: 6px;
         font-size: 12.5px;
         font-weight: 700;
-        color: var(--warn);
-        margin-bottom: 4px;
       }
-      #approval-head svg {
-        width: 13px;
-        height: 13px;
-        animation: shieldPulse 1.8s ease-in-out infinite;
-      }
-      @keyframes shieldPulse {
-        0%,
-        100% {
-          transform: scale(1);
-        }
-        50% {
-          transform: scale(1.12);
-        }
-      }
-      #approval-text {
-        font-size: 13.5px;
-        margin-bottom: 8px;
-      }
-
-      /* ── questions (ask_user) ───────────────────────────────────────────── */
-      #ask {
-        display: none;
-        flex: none;
-        flex-direction: column;
-        gap: 8px;
-        max-height: 64vh;
-        margin: 0 12px 10px;
-        padding: 12px;
-        border-radius: 12px;
-        border: 1px solid color-mix(in srgb, var(--brand) 38%, transparent);
-        background: var(--surface);
-        box-shadow: 0 8px 28px -16px rgba(0, 0, 0, 0.35);
-        animation: approvalIn 0.25s cubic-bezier(0.2, 0.8, 0.3, 1) both;
-      }
-      #ask.open {
-        display: flex;
-      }
-      #ask-head {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-        font-size: 12.5px;
-        font-weight: 700;
-        color: var(--brand);
-      }
-      #ask-head > svg {
+      .gate-h .i,
+      .gate-h .g {
         width: 14px;
         height: 14px;
-        flex: none;
+      }
+      .gate-actions {
+        display: flex;
+        gap: 6px;
+      }
+      #approval {
+        border: 1px solid var(--warn-line);
+        background: var(--gate-bg);
+      }
+      #approval .gate-h {
+        color: var(--warn);
+      }
+      #approval .gate-actions .btn {
+        flex: 1;
+      }
+      #approval-what {
+        margin: 8px 0 12px;
+        font-size: 13.5px;
+        overflow-wrap: anywhere;
+      }
+      #approval-sub {
+        margin-top: 2px;
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      #ask {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        max-height: 64vh;
+        border: 1px solid color-mix(in srgb, var(--brand) 45%, transparent);
+        background: var(--surface);
+      }
+      #ask .gate-h {
+        align-items: flex-start;
+        color: var(--brand);
+      }
+      #ask .gate-h .g {
+        margin-top: 1px;
+      }
+      #ask-question {
+        flex: 1;
+        overflow-wrap: anywhere;
       }
       #ask-count {
-        margin-left: auto;
+        flex: none;
         font-weight: 600;
         color: var(--text-faint);
         font-variant-numeric: tabular-nums;
       }
-      #ask-close svg {
-        width: 12px;
-        height: 12px;
-      }
       #ask-intro {
+        margin-top: -4px;
         font-size: 12.5px;
         color: var(--text-muted);
       }
       #ask-intro:empty {
         display: none;
       }
-      #ask-progress {
-        height: 3px;
-        border-radius: 3px;
-        background: var(--surface-2);
-        overflow: hidden;
-      }
-      #ask-progress-bar {
-        height: 100%;
-        width: 0;
-        border-radius: 3px;
-        background: var(--brand);
-        transition: width 0.25s ease;
-      }
       #ask-body {
         display: flex;
         flex-direction: column;
-        gap: 6px;
+        gap: 5px;
         min-height: 0;
         overflow-y: auto;
-        padding: 2px;
-      }
-      #ask-question {
-        font-size: 14px;
-        font-weight: 600;
-        line-height: 1.35;
-        overflow-wrap: anywhere;
-      }
-      #ask-hint {
-        font-size: 11.5px;
-        color: var(--text-faint);
-      }
-      #ask-hint:empty {
-        display: none;
+        padding: 1px;
       }
       #ask-options {
         display: flex;
         flex-direction: column;
         gap: 5px;
       }
-      .ask-opt {
+      .opt {
         display: flex;
-        align-items: center;
-        gap: 8px;
+        align-items: flex-start;
+        gap: 9px;
         width: 100%;
-        padding: 7px 10px;
+        padding: 6px 10px;
         border-radius: 8px;
         border: 1px solid var(--border);
         background: var(--bg);
@@ -947,35 +890,36 @@
           border-color 0.15s ease,
           background-color 0.15s ease;
       }
-      .ask-opt:hover {
+      .opt:hover {
         border-color: color-mix(in srgb, var(--brand) 45%, transparent);
       }
-      .ask-opt[aria-checked="true"] {
-        border-color: var(--brand);
-        background: var(--brand-soft);
-      }
-      .ask-mark {
-        flex: none;
+      .opt .rd {
         width: 14px;
         height: 14px;
+        margin-top: 3px;
         border-radius: 50%;
         border: 1.5px solid var(--text-faint);
+        flex: none;
         display: flex;
         align-items: center;
         justify-content: center;
       }
-      .ask-opt[role="checkbox"] .ask-mark {
+      .opt[role="checkbox"] .rd {
         border-radius: 4px;
       }
-      .ask-opt[aria-checked="true"] .ask-mark {
+      .opt[aria-checked="true"] {
+        border-color: var(--brand);
+        background: var(--brand-soft);
+      }
+      .opt[aria-checked="true"] .rd {
         border-color: var(--brand);
         background: var(--brand);
         box-shadow: inset 0 0 0 2px var(--bg);
       }
-      .ask-opt[role="checkbox"][aria-checked="true"] .ask-mark {
+      .opt[role="checkbox"][aria-checked="true"] .rd {
         box-shadow: none;
       }
-      .ask-opt[role="checkbox"][aria-checked="true"] .ask-mark::after {
+      .opt[role="checkbox"][aria-checked="true"] .rd::after {
         content: "";
         width: 6px;
         height: 3px;
@@ -984,12 +928,20 @@
         border-bottom: 1.5px solid var(--brand-fg);
         transform: rotate(-45deg);
       }
-      .ask-opt .ask-txt {
+      .opt .lbl {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        min-width: 0;
         overflow-wrap: anywhere;
+      }
+      .opt .lbl .g {
+        width: 14px;
+        height: 14px;
       }
       #ask-other {
         width: 100%;
-        padding: 7px 10px;
+        padding: 6px 10px;
         border-radius: 8px;
         border: 1px dashed color-mix(in srgb, var(--text-faint) 70%, transparent);
         background: var(--bg);
@@ -998,31 +950,19 @@
         font-size: 13px;
         outline: none;
       }
-      #ask-other:focus {
-        border-style: solid;
-        border-color: var(--brand);
-        box-shadow: 0 0 0 3px var(--brand-soft);
-      }
+      #ask-other:focus,
       #ask-other.filled {
         border-style: solid;
         border-color: var(--brand);
+      }
+      #ask-other:focus {
+        box-shadow: 0 0 0 3px var(--brand-soft);
+      }
+      #ask-other.filled {
         background: var(--brand-soft);
       }
-      #ask-nav {
-        display: flex;
-        align-items: center;
-        gap: 6px;
-      }
-      #ask-nav .spacer {
+      #ask .gate-actions .spacer {
         flex: 1;
-      }
-      #ask-next {
-        background: var(--brand);
-        border-color: var(--brand);
-        color: var(--brand-fg);
-      }
-      #ask-next:hover:not(:disabled) {
-        background: var(--brand-strong);
       }
 
       /* ── composer ───────────────────────────────────────────────────────── */
@@ -1031,93 +971,203 @@
         padding: 10px 12px 12px;
         border-top: 1px solid var(--border);
       }
-      #input-wrap {
-        display: flex;
-        align-items: flex-end;
-        gap: 6px;
-        padding: 6px 6px 6px 10px;
+      .inp {
+        padding: 9px 10px 7px;
         border-radius: 10px;
         border: 1px solid var(--border);
         background: var(--surface);
-        max-width: 640px;
+        transition:
+          border-color 0.15s ease,
+          box-shadow 0.15s ease;
       }
-      #input-wrap:focus-within {
+      .inp:focus-within {
         border-color: var(--brand);
         box-shadow: 0 0 0 3px var(--brand-soft);
       }
       #task {
-        flex: 1;
+        display: block;
+        width: 100%;
+        min-height: 22px;
+        max-height: 160px;
+        padding: 0;
         border: none;
         background: transparent;
         color: inherit;
         font: inherit;
+        font-size: 13.5px;
         resize: none;
-        max-height: 160px;
-        min-height: 20px;
-        padding: 3px 0;
         outline: none;
       }
       #task::placeholder {
         color: var(--text-faint);
       }
-
-      button.btn {
-        display: inline-flex;
-        align-items: center;
-        gap: 5px;
-        font: inherit;
-        font-size: 13px;
-        font-weight: 600;
-        cursor: pointer;
-        border-radius: 8px;
-        padding: 6px 11px;
-        border: 1px solid var(--border);
-        background: transparent;
-        color: var(--text);
-        transition:
-          background-color 0.15s ease,
-          transform 0.1s ease;
-      }
-      button.btn svg {
-        width: 13px;
-        height: 13px;
-        flex: none;
-      }
-      button.btn:hover:not(:disabled) {
-        background: var(--surface-2);
-      }
-      button.btn:active:not(:disabled) {
-        transform: scale(0.96);
-      }
-      button.btn:disabled {
-        opacity: 0.4;
+      #task:disabled {
         cursor: default;
       }
+      .inp .row {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-top: 6px;
+      }
+      /* Rules for the supervisor, set before the task is sent. */
+      #rules-box {
+        margin-top: 8px;
+        padding-top: 8px;
+        border-top: 1px dashed var(--border);
+      }
+      .rules-head {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        margin-bottom: 4px;
+        font-size: 11.5px;
+        font-weight: 600;
+        color: var(--brand);
+      }
+      .rules-head .i {
+        width: 12px;
+        height: 12px;
+      }
+      .rules-head .link {
+        margin-left: auto;
+        font-size: 11.5px;
+      }
+      #rules {
+        display: block;
+        width: 100%;
+        min-height: 36px;
+        max-height: 120px;
+        padding: 0;
+        border: none;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        font-size: 12.5px;
+        resize: none;
+        outline: none;
+      }
+      #rules::placeholder {
+        color: var(--text-faint);
+      }
+      .pill-btn {
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        flex: none;
+        padding: 3px 8px 3px 6px;
+        border: none;
+        border-radius: 999px;
+        background: var(--surface-2);
+        color: var(--text-muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition:
+          color 0.15s ease,
+          background-color 0.15s ease;
+      }
+      .pill-btn:hover {
+        color: var(--text);
+      }
+      .pill-btn .i {
+        width: 12px;
+        height: 12px;
+      }
+      .pill-btn.set {
+        background: var(--brand-soft);
+        color: var(--brand);
+      }
+      .pill-btn:disabled {
+        opacity: 0.5;
+        cursor: default;
+      }
+      /* The rules a task was sent with, under its message. */
+      .rules-line {
+        align-self: flex-end;
+        max-width: 84%;
+        margin-top: -6px;
+        display: flex;
+        align-items: flex-start;
+        gap: 5px;
+        font-size: 11.5px;
+        color: var(--text-faint);
+      }
+      .rules-line .i {
+        width: 11px;
+        height: 11px;
+        margin-top: 2px;
+        color: var(--brand);
+      }
+      .rules-line span {
+        display: -webkit-box;
+        -webkit-line-clamp: 2;
+        -webkit-box-orient: vertical;
+        overflow: hidden;
+        overflow-wrap: anywhere;
+      }
 
+      /* The approval mode: a pill that is really a <select>. */
+      .perm {
+        position: relative;
+        display: flex;
+        align-items: center;
+        gap: 5px;
+        min-width: 0;
+        padding: 3px 8px 3px 6px;
+        border-radius: 999px;
+        background: var(--surface-2);
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: color 0.15s ease;
+      }
+      .perm:hover {
+        color: var(--text);
+      }
+      .perm:focus-within {
+        box-shadow: 0 0 0 2px var(--brand-soft);
+      }
+      .perm .i,
+      .perm .g {
+        width: 12px;
+        height: 12px;
+      }
+      .perm span {
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+      }
+      .perm select {
+        position: absolute;
+        inset: 0;
+        width: 100%;
+        opacity: 0;
+        font: inherit;
+        cursor: pointer;
+      }
       #send {
+        position: relative;
         display: flex;
         align-items: center;
         justify-content: center;
         flex: none;
-        width: 28px;
-        height: 28px;
-        border-radius: 8px;
+        width: 30px;
+        height: 30px;
+        margin-left: auto;
         border: none;
-        cursor: pointer;
+        border-radius: 8px;
         background: var(--brand);
         color: var(--brand-fg);
+        cursor: pointer;
         transition:
-          background 0.15s ease,
+          background-color 0.15s ease,
           transform 0.1s ease;
       }
-      #send .icon-swap {
-        position: relative;
-        width: 13px;
-        height: 13px;
-      }
-      #send svg {
+      #send .i {
         position: absolute;
-        inset: 0;
         width: 13px;
         height: 13px;
         transition:
@@ -1126,21 +1176,15 @@
       }
       #send .ic-stop {
         opacity: 0;
-        transform: scale(0.4) rotate(-45deg);
+        transform: scale(0.4);
       }
       #send.running .ic-send {
         opacity: 0;
-        transform: scale(0.4) rotate(45deg);
+        transform: scale(0.4);
       }
       #send.running .ic-stop {
         opacity: 1;
-        transform: scale(1) rotate(0);
-        animation: pulse 1.6s ease-in-out infinite;
-      }
-      #send:disabled {
-        background: var(--surface-2);
-        color: var(--text-faint);
-        cursor: default;
+        transform: none;
       }
       #send:hover:not(:disabled) {
         background: var(--brand-strong);
@@ -1148,160 +1192,317 @@
       #send:active:not(:disabled) {
         transform: scale(0.94);
       }
-      #hint {
-        margin-top: 6px;
-        font-size: 11.5px;
+      #send:disabled {
+        background: var(--surface-2);
         color: var(--text-faint);
-        text-align: center;
+        cursor: default;
       }
 
-      .icon-btn {
-        position: relative;
-      }
-      .icon-btn.alert::after {
-        content: "";
+      /* ── pages: past chats, settings ────────────────────────────────────── */
+      .page {
         position: absolute;
-        top: 2px;
-        right: 2px;
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: var(--err);
-        box-shadow: 0 0 0 1.5px var(--bg);
-        animation: alertPop 0.25s ease-out both;
+        inset: 0;
+        z-index: 20;
+        display: flex;
+        flex-direction: column;
+        background: var(--bg);
+        transform: translateX(100%);
+        visibility: hidden;
+        transition:
+          transform 0.28s cubic-bezier(0.22, 0.9, 0.25, 1),
+          visibility 0s linear 0.28s;
       }
-      @keyframes alertPop {
-        from {
-          transform: scale(0);
-        }
-        to {
-          transform: scale(1);
-        }
+      .page.on {
+        transform: none;
+        visibility: visible;
+        transition: transform 0.28s cubic-bezier(0.22, 0.9, 0.25, 1);
       }
-
-      /* Small per-icon hover gestures — reinforce what each button does. */
-      #settings:hover svg {
-        transform: rotate(40deg);
-      }
-      #history:hover svg {
-        transform: rotate(-15deg);
-      }
-      #new-chat:hover svg {
-        transform: scale(1.12);
-      }
-      #watch:hover svg {
-        transform: scale(1.1);
-      }
-      #cfg-ollama-refresh:hover svg,
-      #cfg-openai-refresh:hover svg,
-      #cfg-openrouter-refresh:hover svg {
-        animation: spin 0.5s ease-in-out;
-      }
-      @keyframes spin {
-        to {
-          transform: rotate(180deg);
-        }
+      .page-foot {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        padding: 10px 12px 12px;
+        border-top: 1px solid var(--border);
       }
 
-      #subheader {
+      .hd .spinner {
+        margin-left: auto;
+        color: var(--text-faint);
+      }
+      .field > label .spinner {
+        width: 10px;
+        height: 10px;
+        margin-left: 4px;
+        vertical-align: -1px;
+        color: var(--text-faint);
+      }
+      #history-loading .spinner {
+        display: block;
+        margin: 0 auto 8px;
+      }
+      #history-list {
+        flex: 1;
+        min-height: 0;
+        overflow-y: auto;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        padding: 6px;
+      }
+      #history-empty,
+      #history-loading {
+        padding: 14px 12px;
+        text-align: center;
+        font-size: 13px;
+        color: var(--text-faint);
+      }
+      .hitem {
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+        width: 100%;
+        padding: 8px 9px;
+        border: none;
+        border-radius: 8px;
+        background: none;
+        color: inherit;
+        font: inherit;
+        text-align: left;
+        cursor: pointer;
+        transition: background-color 0.15s ease;
+      }
+      .hitem:hover {
+        background: var(--surface);
+      }
+      .hitem.on {
+        background: var(--surface-2);
+        cursor: default;
+      }
+      .hitem .t {
         display: flex;
         align-items: center;
         gap: 6px;
-        flex: none;
-        padding: 6px 12px;
-        border-bottom: 1px solid var(--border);
-        background: var(--surface);
+        min-width: 0;
+        font-size: 13.5px;
+        font-weight: 600;
       }
-      #approval-label {
+      .hitem .t span {
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      .hitem .mt {
         font-size: 11.5px;
         color: var(--text-faint);
-        margin-right: auto;
-      }
-      #approval-mode {
-        font: inherit;
-        font-size: 12px;
-        padding: 3px 6px;
-        border-radius: 6px;
-        border: 1px solid var(--border);
-        background: var(--bg);
-        color: var(--text);
-        cursor: pointer;
       }
 
-      .chat-title-row {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-      }
-      .chat-alert {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: var(--err);
-        flex: none;
-      }
-
-      /* ── settings page ─────────────────────────────────────────────────── */
       #settings-body {
         flex: 1;
         min-height: 0;
         overflow-y: auto;
-        padding: 12px 12px 14px;
         display: flex;
         flex-direction: column;
-        gap: 12px;
+        gap: 14px;
+        padding: 12px;
+      }
+      .seg {
+        display: flex;
+        gap: 3px;
+        padding: 3px;
+        border-radius: 9px;
+        background: var(--surface-2);
+      }
+      .seg button {
+        flex: 1;
+        padding: 6px;
+        border: none;
+        border-radius: 7px;
+        background: transparent;
+        color: var(--text-muted);
+        font: inherit;
+        font-size: 12.5px;
+        font-weight: 600;
+        cursor: pointer;
+      }
+      .seg button[aria-checked="true"] {
+        background: var(--bg);
+        color: var(--text);
+        box-shadow: var(--lift);
+      }
+      #account-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: -6px;
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      #account-who {
+        flex: 1;
+        min-width: 0;
+        overflow: hidden;
+        white-space: nowrap;
+        text-overflow: ellipsis;
+      }
+      #model-settings {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      #model-offline {
+        font-size: 12.5px;
+        color: var(--text-muted);
+      }
+      .provider-block {
+        display: none;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .provider-block.on {
+        display: flex;
       }
       .field {
         display: flex;
         flex-direction: column;
-        gap: 4px;
+        gap: 5px;
       }
-      .field label {
+      .field > label {
         font-size: 12px;
         font-weight: 600;
         color: var(--text-muted);
       }
-      .field select,
-      .field input[type="text"],
-      .field input[type="password"] {
-        font: inherit;
-        font-size: 13px;
-        padding: 6px 8px;
+      .ctl {
+        position: relative;
+        display: flex;
+        align-items: center;
         border-radius: 7px;
         border: 1px solid var(--border);
         background: var(--bg);
-        color: var(--text);
-        width: 100%;
+        transition:
+          border-color 0.15s ease,
+          box-shadow 0.15s ease;
       }
-      .field select:focus,
-      .field input:focus {
-        outline: none;
+      .ctl:focus-within {
         border-color: var(--brand);
         box-shadow: 0 0 0 3px var(--brand-soft);
       }
-      .field-row {
-        display: flex;
-        gap: 6px;
-        align-items: center;
-      }
-      .field-row select {
+      .ctl select,
+      .ctl input {
         flex: 1;
+        min-width: 0;
+        padding: 7px 9px;
+        border: none;
+        background: transparent;
+        color: var(--text);
+        font: inherit;
+        font-size: 13px;
+        outline: none;
       }
-      .field-row .icon-btn {
-        border: 1px solid var(--border);
+      .ctl select {
+        appearance: none;
+        padding-right: 28px;
+        cursor: pointer;
       }
-      .key-row {
-        display: flex;
-        gap: 6px;
-        align-items: center;
+      .ctl .chev {
+        position: absolute;
+        right: 9px;
+        width: 12px;
+        height: 12px;
+        color: var(--text-faint);
+        pointer-events: none;
       }
-      .key-row input {
-        flex: 1;
+      .ctl input.mono {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12.5px;
+      }
+      .ctl .ib {
+        margin-right: 2px;
+      }
+      .help {
+        font-size: 11.5px;
+        color: var(--text-faint);
+      }
+      #suggest-open {
+        align-self: flex-start;
+      }
+      #delete-account {
+        align-self: flex-start;
+        margin-top: 4px;
+      }
+
+      /* ── a dialog over the panel ────────────────────────────────────────── */
+      .modal {
+        position: absolute;
+        inset: 0;
+        z-index: 30;
+        display: flex;
+        align-items: center;
+        padding: 16px;
+        background: rgba(0, 0, 0, 0.45);
+        animation: fadeIn 0.15s ease-out both;
+      }
+      @keyframes fadeIn {
+        from {
+          opacity: 0;
+        }
+      }
+      .modal-card {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 16px;
+        border-radius: 12px;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        box-shadow: 0 16px 40px -12px rgba(0, 0, 0, 0.5);
+        animation: gateIn 0.2s cubic-bezier(0.2, 0.8, 0.3, 1) both;
+      }
+      .modal-card h2 {
+        margin: 0;
+        font-size: 15px;
+        font-weight: 700;
+      }
+      .modal-card label {
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+      #suggest-text {
+        width: 100%;
+        min-height: 110px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        border: 1px solid var(--border);
+        background: var(--surface);
+        color: inherit;
+        font: inherit;
+        font-size: 13.5px;
+        resize: vertical;
+        outline: none;
+      }
+      #suggest-text:focus {
+        border-color: var(--brand);
+        box-shadow: 0 0 0 3px var(--brand-soft);
+      }
+      #suggest-note:empty {
+        display: none;
+      }
+      #suggest-note.err {
+        color: var(--err);
+      }
+      #suggest-note.ok {
+        color: var(--ok);
+      }
+      .modal-card .gate-actions .spacer {
+        flex: 1;
       }
       #settings-status {
         font-size: 12px;
-        min-height: 14px;
+        color: var(--text-muted);
+      }
+      #settings-status:empty {
+        display: none;
       }
       #settings-status.err {
         color: var(--err);
@@ -1309,583 +1510,393 @@
       #settings-status.ok {
         color: var(--ok);
       }
-      .provider-block {
+
+      /* ── whole-panel screens: first run, not connected ──────────────────── */
+      .screen {
+        position: absolute;
+        inset: 0;
+        z-index: 15;
         display: none;
         flex-direction: column;
-        gap: 12px;
+        justify-content: center;
+        gap: 14px;
+        padding: 24px;
+        background: var(--bg);
+        overflow-y: auto;
       }
-      .provider-block.on {
+      body.welcome #welcome,
+      body.offline:not(.welcome) #offline {
         display: flex;
+        animation: riseIn 0.22s ease-out both;
       }
-      #settings-save {
-        align-self: flex-start;
+      #welcome {
+        gap: 20px;
+      }
+      .hello {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 8px;
+        text-align: center;
+      }
+      .hello img {
+        width: 40px;
+        height: 40px;
+      }
+      .screen h1 {
+        margin: 0;
+        font-size: 17px;
+        font-weight: 700;
+      }
+      .screen h2 {
+        margin: 0 0 4px;
+        font-size: 15px;
+        font-weight: 700;
+      }
+      .screen p {
+        margin: 0;
+        font-size: 13px;
+        color: var(--text-muted);
+      }
+      .choices {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+      }
+      #offline > div {
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .code {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        padding: 5px 5px 5px 10px;
+        border-radius: 7px;
+        background: var(--code-bg);
+        font:
+          12px/1.5 ui-monospace,
+          SFMono-Regular,
+          Menlo,
+          monospace;
+      }
+      .code span {
+        flex: 1;
+        overflow-wrap: anywhere;
+      }
+      .waiting {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        font-size: 12px;
+        color: var(--text-faint);
+      }
+      .waiting .dot {
+        width: 6px;
+        height: 6px;
+        background: var(--brand);
+        animation: pulse 1.4s ease-in-out infinite;
+      }
+      .links {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 6px 16px;
+      }
+      .note-small {
+        font-size: 11.5px;
+        color: var(--err);
+      }
+      .note-small:empty {
+        display: none;
       }
     </style>
   </head>
   <body>
-    <header>
-      <div id="status-indicator" class="status-indicator">
-        <span id="dot"></span>
-        <span id="status">connecting…</span>
-        <span id="clock" hidden></span>
+    <svg width="0" height="0" style="position: absolute" aria-hidden="true">
+      <defs>
+        <symbol id="g-back" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 8H3M3 8l4.2-4.2M3 8l4.2 4.2" /></symbol>
+        <symbol id="g-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M3.5 8.5l3 3 6-7" /></symbol>
+        <symbol id="g-cross" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M4 4l8 8M12 4l-8 8" /></symbol>
+        <symbol id="g-chev" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 6.5L8 10l3.5-3.5" /></symbol>
+        <symbol id="g-copy" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><rect x="5" y="5" width="8.5" height="8.5" rx="1.5" /><path d="M11 5V3.5A1.5 1.5 0 009.5 2h-6A1.5 1.5 0 002 3.5v6A1.5 1.5 0 003.5 11H5" /></symbol>
+        <symbol id="g-cloud" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><path d="M4.5 12.5a3 3 0 01-.3-6 4 4 0 017.6-.8 3.4 3.4 0 01-.3 6.8z" /></symbol>
+        <symbol id="g-laptop" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><rect x="3" y="3" width="10" height="7.5" rx="1.2" /><path d="M1.5 13h13" /></symbol>
+        <symbol id="g-q" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="6.3" /><path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.5.2-.8.7-.8 1.2v.4M8 11.4v.1" /></symbol>
+        <symbol id="g-alert" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2.3l6.3 11H1.7L8 2.3z" /><path d="M8 6.7v3M8 11.8h.01" /></symbol>
+        <symbol id="g-scroll" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2v12M5 11l3 3 3-3M5 5l3-3 3 3" /></symbol>
+        <symbol id="g-clock" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="6" /><path d="M8 5v3l2 1.5" /></symbol>
+        <symbol id="g-eye" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3"><path d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z" /><circle cx="8" cy="8" r="2" /></symbol>
+        <symbol id="g-bolt" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.3" stroke-linejoin="round"><path d="M9 1.5L3.5 9H8l-1 5.5L12.5 7H8z" /></symbol>
+        <symbol id="g-slash" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"><circle cx="8" cy="8" r="6" /><path d="M4 4l8 8" /></symbol>
+        <symbol id="g-dot" viewBox="0 0 16 16"><circle cx="8" cy="8" r="2.2" fill="currentColor" /></symbol>
+        <symbol id="g-mail" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linejoin="round"><rect x="1.8" y="3.5" width="12.4" height="9" rx="1.5" /><path d="M2.5 4.5L8 8.8l5.5-4.3" /></symbol>
+      </defs>
+    </svg>
+
+    <header class="hd">
+      <div id="where">
+        <span id="dot" class="dot" role="img" aria-label="Connecting"></span>
+        <img id="fav" alt="" hidden />
+        <i id="fav-none" class="i i-nav" aria-hidden="true"></i>
+        <span id="site">…</span>
       </div>
-
-      <div class="header-actions">
-        <button id="watch" class="icon-btn" title="Live view">
-          <svg
-            viewBox="0 0 16 16"
-            fill="none"
-            stroke="currentColor"
-            stroke-width="1.4"
-            stroke-linecap="round"
-            stroke-linejoin="round"
-          >
-            <rect x="1.5" y="4.5" width="13" height="9" rx="1.5" />
-            <path d="M5 4.5l1.2-2h3.6l1.2 2" />
-            <circle cx="8" cy="9" r="2.3" />
-          </svg>
-        </button>
-
-        <div class="menu-wrap">
-          <button
-            id="menu-btn"
-            class="icon-btn"
-            title="Menu"
-            aria-haspopup="true"
-            aria-expanded="false"
-          >
-            <svg viewBox="0 0 16 16" fill="currentColor">
-              <circle cx="8" cy="3.4" r="1.35" />
-              <circle cx="8" cy="8" r="1.35" />
-              <circle cx="8" cy="12.6" r="1.35" />
-            </svg>
-          </button>
-          <div id="menu-dropdown" class="menu-dropdown" role="menu">
-            <button
-              id="history"
-              class="menu-item"
-              type="button"
-              role="menuitem"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.4"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <circle cx="8" cy="8.5" r="6" />
-                <path d="M8 5.2V8.5l2.2 1.4" />
-                <path d="M4.8 1.8L3 3.6M11.2 1.8L13 3.6" />
-              </svg>
-              <span>Past chats</span>
-            </button>
-            <button
-              id="new-chat"
-              class="menu-item"
-              type="button"
-              role="menuitem"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.4"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M13 3v4h-4" />
-                <path d="M3 13v-4h4" />
-                <path d="M4 6a5 5 0 018-2.5M12 10a5 5 0 01-8 2.5" />
-              </svg>
-              <span>New chat</span>
-            </button>
-            <button
-              id="settings"
-              class="menu-item"
-              type="button"
-              role="menuitem"
-            >
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.4"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <circle cx="8" cy="8" r="2.2" />
-                <path
-                  d="M8 1.8v1.6M8 12.6v1.6M14.2 8h-1.6M3.4 8H1.8M12.4 3.6l-1.1 1.1M4.7 11.3l-1.1 1.1M12.4 12.4l-1.1-1.1M4.7 4.7L3.6 3.6"
-                />
-              </svg>
-              <span>Settings</span>
-            </button>
-          </div>
-        </div>
+      <div class="acts">
+        <button id="new-chat" class="ib" type="button" title="New chat" aria-label="New chat"><i class="i i-new"></i></button>
+        <button id="history" class="ib" type="button" title="Past chats" aria-label="Past chats"><i class="i i-hist"></i></button>
+        <button id="settings" class="ib" type="button" title="Settings" aria-label="Settings"><i class="i i-gear"></i></button>
       </div>
     </header>
 
-    <div id="main">
-      <div id="chat-view">
-        <div id="subheader">
-          <label id="approval-label" for="approval-mode">Approval</label>
-          <select id="approval-mode" title="When this chat asks before acting">
-            <option value="all">All actions</option>
-            <option value="submits">Only submits</option>
-            <option value="none">Never</option>
-          </select>
+    <main id="chat">
+      <div id="log">
+        <div id="empty">
+          <div class="ask-line">What should it do on this page?</div>
+          <div id="chips">
+            <button class="chip" type="button"><i class="i i-try"></i><span>Find UX designer jobs in New York</span></button>
+            <button class="chip" type="button"><i class="i i-try"></i><span>Summarize this page in three bullet points</span></button>
+            <button class="chip" type="button"><i class="i i-try"></i><span>Find their contact email or support form</span></button>
+          </div>
+        </div>
+      </div>
+
+      <div id="approval" class="gate" role="alertdialog" aria-labelledby="approval-title" hidden>
+        <div class="gate-h" id="approval-title"><i class="i i-approval"></i>Approve?</div>
+        <div id="approval-what">
+          <b id="approval-verb"></b> <span id="approval-obj"></span>
+          <div id="approval-sub" hidden></div>
+        </div>
+        <div class="gate-actions">
+          <button id="approve" class="btn pr" type="button"><svg class="g"><use href="#g-check" /></svg>Approve</button>
+          <button id="deny" class="btn" type="button"><svg class="g"><use href="#g-cross" /></svg>Deny</button>
+        </div>
+      </div>
+
+      <div id="ask" class="gate" role="dialog" aria-labelledby="ask-question" hidden>
+        <div class="gate-h">
+          <svg class="g"><use href="#g-q" /></svg>
+          <span id="ask-question"></span>
+          <span id="ask-count"></span>
+        </div>
+        <div id="ask-intro"></div>
+        <div id="ask-body">
+          <div id="ask-options"></div>
+          <input id="ask-other" type="text" autocomplete="off" placeholder="Something else…" aria-label="Your own answer" />
+        </div>
+        <div class="gate-actions">
+          <button id="ask-back" class="btn" type="button">Back</button>
+          <button id="ask-skip" class="btn" type="button">Skip</button>
+          <span class="spacer"></span>
+          <button id="ask-next" class="btn pr" type="button">Next</button>
+        </div>
+      </div>
+
+      <div id="composer">
+        <div class="inp">
+          <textarea id="task" rows="1" placeholder="e.g. Find the cheapest paid tier"></textarea>
+          <div id="rules-box" hidden>
+            <div class="rules-head">
+              <i class="i i-look"></i>What should the supervisor hold it to?
+              <button id="rules-clear" class="link quiet" type="button">Clear</button>
+            </div>
+            <textarea id="rules" rows="2" placeholder="e.g. Only jobs posted this week. Never use LinkedIn. Stop after 10." aria-label="Rules for the supervisor"></textarea>
+          </div>
+          <div class="row">
+            <label class="perm" title="When this chat asks before acting">
+              <i class="i i-approval"></i>
+              <span id="perm-text">Ask before submits</span>
+              <svg class="g"><use href="#g-chev" /></svg>
+              <select id="approval-mode" aria-label="When this chat asks before acting">
+                <option value="all">Ask before every action</option>
+                <option value="submits">Ask before submits</option>
+                <option value="none">Never ask</option>
+              </select>
+            </label>
+            <button id="rules-btn" class="pill-btn" type="button" title="Rules the supervisor holds this task to" aria-expanded="false" aria-controls="rules-box">
+              <i class="i i-look"></i><span id="rules-btn-text">Supervisor</span>
+            </button>
+            <button id="send" type="button" title="Send" aria-label="Send">
+              <i class="i i-send ic-send"></i>
+              <i class="i i-stop ic-stop"></i>
+            </button>
+          </div>
+        </div>
+      </div>
+    </main>
+
+    <section id="history-page" class="page" aria-label="Past chats">
+      <div class="hd">
+        <button id="history-close" class="ib back" type="button" title="Back" aria-label="Back"><svg class="g"><use href="#g-back" /></svg></button>
+        <span class="hd-title">Past chats</span>
+        <span id="history-refresh" class="spinner" role="status" aria-label="Loading" hidden></span>
+      </div>
+      <div id="history-list"></div>
+    </section>
+
+    <section id="settings-page" class="page" aria-label="Settings">
+      <div class="hd">
+        <button id="settings-close" class="ib back" type="button" title="Back" aria-label="Back"><svg class="g"><use href="#g-back" /></svg></button>
+        <span class="hd-title">Settings</span>
+      </div>
+      <div id="settings-body">
+        <div class="seg" role="radiogroup" aria-label="Where CopperOS runs">
+          <button type="button" role="radio" data-backend="cloud" aria-checked="false">Cloud</button>
+          <button type="button" role="radio" data-backend="local" aria-checked="false">This computer</button>
+        </div>
+        <div id="account-row" hidden>
+          <span id="account-who"></span>
+          <button id="account-btn" class="link" type="button"></button>
         </div>
 
-        <div id="history-page" class="page">
-          <div class="page-head">
-            <button id="history-close" class="icon-btn" title="Back">
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.4"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M13 8H3M3 8l4.2-4.2M3 8l4.2 4.2" />
-              </svg>
-            </button>
-            <span class="page-title">Past chats</span>
-          </div>
-          <div id="history-list"></div>
-        </div>
-
-        <div id="settings-page" class="page">
-          <div class="page-head">
-            <button id="settings-close" class="icon-btn" title="Back">
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.4"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M13 8H3M3 8l4.2-4.2M3 8l4.2 4.2" />
-              </svg>
-            </button>
-            <span class="page-title">Settings</span>
-          </div>
-          <div id="settings-body">
-            <div class="field">
-              <label id="backend-label">Where CopperOS runs</label>
-              <div class="segmented" role="radiogroup" aria-labelledby="backend-label">
-                <button type="button" role="radio" data-backend="cloud" aria-checked="false">Cloud</button>
-                <button type="button" role="radio" data-backend="local" aria-checked="false">This computer</button>
-              </div>
-            </div>
-            <div id="account-row" hidden>
-              <span class="who" id="account-who"></span>
-              <button id="account-btn" class="btn" type="button"></button>
-            </div>
-            <button id="delete-account" class="link-danger" type="button" hidden>Delete my account</button>
-            <hr class="settings-divider" />
-            <div id="model-offline" hidden></div>
-            <div id="model-settings" style="display: flex; flex-direction: column; gap: 12px">
-            <div class="field">
-              <label for="cfg-provider">Model provider</label>
+        <div id="model-offline" hidden></div>
+        <div id="model-settings">
+          <div class="field">
+            <label for="cfg-provider">Provider</label>
+            <div class="ctl">
               <select id="cfg-provider">
-                <option value="ollama">Ollama (local)</option>
+                <option value="ollama">Ollama (this computer)</option>
                 <option value="openai">OpenAI</option>
                 <option value="openrouter">OpenRouter</option>
               </select>
+              <svg class="g chev"><use href="#g-chev" /></svg>
             </div>
+          </div>
 
-            <div id="block-ollama" class="provider-block">
-              <div class="field">
-                <label for="cfg-ollama-host">Ollama host</label>
-                <input
-                  id="cfg-ollama-host"
-                  type="text"
-                  placeholder="http://127.0.0.1:11434"
-                />
-              </div>
-              <div class="field">
-                <label for="cfg-ollama-model">Model</label>
-                <div class="field-row">
-                  <select id="cfg-ollama-model"></select>
-                  <button
-                    id="cfg-ollama-refresh"
-                    class="icon-btn"
-                    type="button"
-                    title="Refresh model list"
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.4"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    >
-                      <path
-                        d="M13.5 8a5.5 5.5 0 10-1.6 3.9M13.5 8V4.5M13.5 8H10"
-                      />
-                    </svg>
-                  </button>
-                </div>
+          <div id="block-ollama" class="provider-block">
+            <div class="field">
+              <label for="cfg-ollama-host">Ollama host</label>
+              <div class="ctl"><input id="cfg-ollama-host" type="text" placeholder="http://127.0.0.1:11434" spellcheck="false" /></div>
+            </div>
+            <div class="field">
+              <label for="cfg-ollama-model">Model <span class="spinner" id="cfg-ollama-loading" hidden></span></label>
+              <div class="ctl"><select id="cfg-ollama-model"></select><svg class="g chev"><use href="#g-chev" /></svg></div>
+            </div>
+          </div>
+
+          <div id="block-openai" class="provider-block">
+            <div class="field">
+              <label for="cfg-openai-key">API key</label>
+              <div class="ctl">
+                <input id="cfg-openai-key" class="mono" type="password" placeholder="sk-…" autocomplete="off" spellcheck="false" />
+                <button id="cfg-openai-key-toggle" class="ib sm" type="button" title="Show key" aria-label="Show key"><svg class="g"><use href="#g-eye" /></svg></button>
               </div>
             </div>
+            <div class="field">
+              <label for="cfg-openai-model">Model <span class="spinner" id="cfg-openai-loading" hidden></span></label>
+              <div class="ctl"><select id="cfg-openai-model"></select><svg class="g chev"><use href="#g-chev" /></svg></div>
+            </div>
+          </div>
 
-            <div id="block-openai" class="provider-block">
-              <div class="field">
-                <label for="cfg-openai-key">OpenAI API key</label>
-                <div class="key-row">
-                  <input
-                    id="cfg-openai-key"
-                    type="password"
-                    placeholder="sk-…"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <button
-                    id="cfg-openai-key-toggle"
-                    class="icon-btn"
-                    type="button"
-                    title="Show key"
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.3"
-                    >
-                      <path
-                        d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"
-                      />
-                      <circle cx="8" cy="8" r="2" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              <div class="field">
-                <label for="cfg-openai-model">Model</label>
-                <div class="field-row">
-                  <select id="cfg-openai-model"></select>
-                  <button
-                    id="cfg-openai-refresh"
-                    class="icon-btn"
-                    type="button"
-                    title="Refresh model list"
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.4"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    >
-                      <path
-                        d="M13.5 8a5.5 5.5 0 10-1.6 3.9M13.5 8V4.5M13.5 8H10"
-                      />
-                    </svg>
-                  </button>
-                </div>
+          <div id="block-openrouter" class="provider-block">
+            <div class="field">
+              <label for="cfg-openrouter-key">API key</label>
+              <div class="ctl">
+                <input id="cfg-openrouter-key" class="mono" type="password" placeholder="sk-or-…" autocomplete="off" spellcheck="false" />
+                <button id="cfg-openrouter-key-toggle" class="ib sm" type="button" title="Show key" aria-label="Show key"><svg class="g"><use href="#g-eye" /></svg></button>
               </div>
             </div>
-
-            <div id="block-openrouter" class="provider-block">
-              <div class="field">
-                <label for="cfg-openrouter-key">OpenRouter API key</label>
-                <div class="key-row">
-                  <input
-                    id="cfg-openrouter-key"
-                    type="password"
-                    placeholder="sk-or-…"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <button
-                    id="cfg-openrouter-key-toggle"
-                    class="icon-btn"
-                    type="button"
-                    title="Show key"
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.3"
-                    >
-                      <path
-                        d="M1.5 8S4 3.5 8 3.5 14.5 8 14.5 8 12 12.5 8 12.5 1.5 8 1.5 8z"
-                      />
-                      <circle cx="8" cy="8" r="2" />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-              <div class="field">
-                <label for="cfg-openrouter-model">Model</label>
-                <div class="field-row">
-                  <select id="cfg-openrouter-model"></select>
-                  <button
-                    id="cfg-openrouter-refresh"
-                    class="icon-btn"
-                    type="button"
-                    title="Refresh model list"
-                  >
-                    <svg
-                      viewBox="0 0 16 16"
-                      fill="none"
-                      stroke="currentColor"
-                      stroke-width="1.4"
-                      stroke-linecap="round"
-                      stroke-linejoin="round"
-                    >
-                      <path
-                        d="M13.5 8a5.5 5.5 0 10-1.6 3.9M13.5 8V4.5M13.5 8H10"
-                      />
-                    </svg>
-                  </button>
-                </div>
-              </div>
-            </div>
-
-            <div id="settings-status"></div>
-            <button
-              id="settings-save"
-              class="btn"
-              type="button"
-              style="
-                background: var(--brand);
-                border-color: var(--brand);
-                color: var(--brand-fg);
-              "
-            >
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M3.5 8.5l3 3 6-7" />
-              </svg>
-              Save
-            </button>
+            <div class="field">
+              <label for="cfg-openrouter-model">Model <span class="spinner" id="cfg-openrouter-loading" hidden></span></label>
+              <div class="ctl"><select id="cfg-openrouter-model"></select><svg class="g chev"><use href="#g-chev" /></svg></div>
             </div>
           </div>
         </div>
 
-        <div id="live-wrap">
-          <div id="live-frame">
-            <span id="live-badge">LIVE</span>
-            <img id="live" alt="live browser view" />
+        <div class="field">
+          <label for="cfg-ask-before">Ask before</label>
+          <div class="ctl">
+            <select id="cfg-ask-before">
+              <option value="all">Every action</option>
+              <option value="submits">Submits</option>
+              <option value="none">Nothing</option>
+            </select>
+            <svg class="g chev"><use href="#g-chev" /></svg>
           </div>
+          <div class="help">For new chats. Change it for one chat next to Send.</div>
         </div>
 
-        <div id="offline" role="status">
-          <!-- The hosted CopperOS, signed out -->
-          <div id="offline-signin" hidden>
-            <h2>Sign in to CopperOS</h2>
-            <p>
-              Sign in with Google or your email to start. CopperOS does the
-              thinking in the cloud; this extension does the clicking and
-              typing in your own tabs.
-            </p>
-            <div class="offline-actions">
-              <button id="offline-signin-btn" class="btn primary" type="button">Sign in</button>
-              <button id="offline-use-local" class="btn" type="button">Run it on my computer instead</button>
-            </div>
-            <small id="offline-signin-note"></small>
-          </div>
-          <!-- The hosted CopperOS, signed in but unreachable -->
-          <div id="offline-cloud" hidden>
-            <h2>Connecting to CopperOS…</h2>
-            <p>The connection dropped. It will come back on its own, usually within a few seconds.</p>
-            <small id="offline-cloud-note"></small>
-          </div>
-          <!-- The broker on this computer, not running -->
-          <div id="offline-local">
-          <h2>Start the CopperOS broker</h2>
-          <p>
-            CopperOS runs on your own computer. This extension does the
-            clicking and typing; a small program called the broker does the
-            thinking. Start it and this panel connects on its own.
-          </p>
-          <code>cd CopperOS/broker &amp;&amp; npm start</code>
-          <div class="offline-actions">
-            <a
-              class="btn primary"
-              href="https://copper.jassydev.com/setup"
-              target="_blank"
-              rel="noopener"
-              >Setup guide</a
-            >
-            <a
-              class="btn"
-              href="https://github.com/Jesse0502/CopperOS"
-              target="_blank"
-              rel="noopener"
-              >Source on GitHub</a
-            >
-          </div>
-          <small>Looking for it at 127.0.0.1:7331</small>
-          </div>
-        </div>
+        <button id="suggest-open" class="btn" type="button"><svg class="g"><use href="#g-mail" /></svg>Send a suggestion</button>
+        <button id="delete-account" class="link danger" type="button" hidden>Delete my account</button>
+      </div>
+      <div class="page-foot">
+        <div id="settings-status" role="status"></div>
+        <button id="settings-save" class="btn pr wide" type="button">Save</button>
+      </div>
+    </section>
 
-        <div id="log">
-          <div id="empty">
-            <svg
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.3"
-            >
-              <rect x="1.5" y="2.5" width="13" height="9" rx="1.5" />
-              <path d="M5 14l1.5-2.5h3L11 14" />
-            </svg>
-            <p>Tell it what to do on this page.</p>
-            <div id="chips">
-              <button class="chip" type="button">
-                Find job postings for "UX designer" in New York City
-              </button>
-              <button class="chip" type="button">
-                Summarize this article in three bullet points
-              </button>
-              <button class="chip" type="button">
-                Find their contact email or support form
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div id="approval">
-          <div id="approval-head">
-            <svg
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <path
-                d="M8 1.5l6 2.5v4c0 4-2.6 6.3-6 7.5-3.4-1.2-6-3.5-6-7.5v-4l6-2.5z"
-              />
-            </svg>
-            Approval needed
-          </div>
-          <div id="approval-text"></div>
-          <div class="row" style="gap: 6px">
-            <button
-              id="approve"
-              class="btn"
-              style="
-                background: var(--ok);
-                border-color: var(--ok);
-                color: #fff;
-              "
-            >
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-                stroke-linejoin="round"
-              >
-                <path d="M3.5 8.5l3 3 6-7" />
-              </svg>
-              Approve
-            </button>
-            <button id="deny" class="btn">
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-              >
-                <path d="M4 4l8 8M12 4l-8 8" />
-              </svg>
-              Deny
-            </button>
-          </div>
-        </div>
-
-        <div id="ask" role="dialog" aria-labelledby="ask-question">
-          <div id="ask-head">
-            <svg
-              viewBox="0 0 16 16"
-              fill="none"
-              stroke="currentColor"
-              stroke-width="1.4"
-              stroke-linecap="round"
-              stroke-linejoin="round"
-            >
-              <circle cx="8" cy="8" r="6.3" />
-              <path d="M6.3 6.2a1.8 1.8 0 1 1 2.5 1.7c-.5.2-.8.7-.8 1.2v.4" />
-              <path d="M8 11.4v.1" />
-            </svg>
-            <span>Questions for you</span>
-            <span id="ask-count"></span>
-            <button id="ask-close" class="icon-btn" type="button" title="Close without answering">
-              <svg
-                viewBox="0 0 16 16"
-                fill="none"
-                stroke="currentColor"
-                stroke-width="1.6"
-                stroke-linecap="round"
-              >
-                <path d="M4 4l8 8M12 4l-8 8" />
-              </svg>
-            </button>
-          </div>
-          <div id="ask-intro"></div>
-          <div id="ask-progress"><div id="ask-progress-bar"></div></div>
-          <div id="ask-body">
-            <div id="ask-question"></div>
-            <div id="ask-hint"></div>
-            <div id="ask-options"></div>
-            <input
-              id="ask-other"
-              type="text"
-              autocomplete="off"
-              placeholder="Something else…"
-              aria-label="Your own answer"
-            />
-          </div>
-          <div id="ask-nav">
-            <button id="ask-back" class="btn" type="button">Back</button>
-            <span class="spacer"></span>
-            <button id="ask-skip" class="btn" type="button">Skip</button>
-            <button id="ask-next" class="btn" type="button">Next</button>
-          </div>
-        </div>
-
-        <div id="composer">
-          <div id="input-wrap">
-            <textarea
-              id="task"
-              rows="1"
-              placeholder="e.g. Find the pricing page and tell me the cheapest paid tier"
-            ></textarea>
-            <button id="send" title="Send">
-              <span class="icon-swap">
-                <svg class="ic-send" viewBox="0 0 16 16" fill="currentColor">
-                  <path d="M1 8l13-6-5 13-2-5-6-2z" />
-                </svg>
-                <svg class="ic-stop" viewBox="0 0 16 16" fill="currentColor">
-                  <rect x="4" y="4" width="8" height="8" rx="1.5" />
-                </svg>
-              </span>
-            </button>
-          </div>
-          <div id="hint">Enter to send · Shift+Enter for a new line</div>
+    <!-- Settings → Send a suggestion: one question, emailed to the team. -->
+    <div id="suggest" class="modal" role="dialog" aria-modal="true" aria-labelledby="suggest-title" hidden>
+      <div class="modal-card">
+        <h2 id="suggest-title">Send a suggestion</h2>
+        <label for="suggest-text">What is your suggestion?</label>
+        <textarea id="suggest-text" maxlength="4000" placeholder="A feature you'd like, or something that went wrong"></textarea>
+        <div id="suggest-note" class="help" role="status"></div>
+        <div class="gate-actions">
+          <button id="suggest-cancel" class="btn" type="button">Cancel</button>
+          <span class="spacer"></span>
+          <button id="suggest-send" class="btn pr" type="button">Send</button>
         </div>
       </div>
     </div>
+
+    <!-- Before anything else, a new install says where it should run. -->
+    <section id="welcome" class="screen" aria-label="Welcome">
+      <div class="hello">
+        <img src="assets/icons/icon-48.png" alt="" />
+        <h1>Welcome to CopperOS</h1>
+        <p>It works in your tabs while you watch.</p>
+      </div>
+      <div class="choices" role="radiogroup" aria-label="Where CopperOS runs">
+        <button class="opt" type="button" role="radio" data-choice="cloud" aria-checked="false">
+          <span class="rd"></span><span class="lbl"><svg class="g"><use href="#g-cloud" /></svg>Cloud</span>
+        </button>
+        <button class="opt" type="button" role="radio" data-choice="local" aria-checked="false">
+          <span class="rd"></span><span class="lbl"><svg class="g"><use href="#g-laptop" /></svg>This computer</span>
+        </button>
+      </div>
+      <button id="welcome-continue" class="btn pr wide" type="button">Continue</button>
+    </section>
+
+    <!-- Not connected. Shown by sidepanel.js a moment after the connection drops. -->
+    <section id="offline" class="screen" role="status">
+      <!-- The hosted CopperOS, signed out -->
+      <div id="offline-signin" hidden>
+        <div>
+          <h2>Sign in to CopperOS</h2>
+          <p>Use Google or your email. The thinking happens in the cloud; this panel clicks and types in your tabs.</p>
+        </div>
+        <button id="offline-signin-btn" class="btn pr wide" type="button">Sign in</button>
+        <div id="offline-signin-note" class="note-small"></div>
+        <div class="links">
+          <button id="offline-use-local" class="link quiet" type="button">Run it on this computer instead</button>
+        </div>
+      </div>
+      <!-- The hosted CopperOS, signed in but unreachable -->
+      <div id="offline-cloud" hidden>
+        <div>
+          <h2>Connecting to CopperOS</h2>
+          <p>The connection dropped. It comes back on its own, usually within a few seconds.</p>
+        </div>
+        <div class="waiting"><span class="dot"></span>Reconnecting…</div>
+      </div>
+      <!-- The broker on this computer, not running -->
+      <div id="offline-local">
+        <div>
+          <h2>Start the broker</h2>
+          <p>Run this in a terminal. The panel connects on its own.</p>
+        </div>
+        <div class="code">
+          <span id="broker-cmd">cd CopperOS/broker &amp;&amp; npm start</span>
+          <button id="copy-cmd" class="ib sm" type="button" title="Copy" aria-label="Copy command"><svg class="g"><use href="#g-copy" /></svg></button>
+        </div>
+        <div class="waiting"><span class="dot"></span>Waiting for broker…</div>
+        <div class="links">
+          <a class="link" href="https://copper.jassydev.com/setup" target="_blank" rel="noopener">Setup guide</a>
+          <button id="offline-use-cloud" class="link quiet" type="button">Use the cloud instead</button>
+        </div>
+      </div>
+    </section>
 
     <script src="sidepanel.js" type="module"></script>
   </body>

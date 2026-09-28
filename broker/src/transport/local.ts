@@ -13,6 +13,7 @@ import {
   type Transport,
 } from "../bridge.js";
 import type { Provider } from "../config.js";
+import { taskExtras } from "../task-extras.js";
 
 type Pending = {
   resolve: (v: unknown) => void;
@@ -116,7 +117,7 @@ export class LocalServer implements Transport {
       return;
     }
     if (msg.type === "task" && typeof msg.text === "string") {
-      handlers.onTask(msg.text, typeof msg.chatId === "string" ? msg.chatId : undefined);
+      handlers.onTask(msg.text, typeof msg.chatId === "string" ? msg.chatId : undefined, taskExtras(msg));
       return;
     }
     if (msg.type === "cancel" && typeof msg.chatId === "string") {

@@ -18,6 +18,7 @@
     "@aws-sdk/client-kms": "^3.1141.0",
     "@aws-sdk/client-lambda": "^3.1141.0",
     "@aws-sdk/client-s3": "^3.1141.0",
+    "@aws-sdk/client-sesv2": "^3.1142.0",
     "@aws-sdk/client-ssm": "^3.1141.0",
     "@aws-sdk/lib-dynamodb": "^3.1141.0",
     "@typesafe-ai/sdk": "^0.6.0",

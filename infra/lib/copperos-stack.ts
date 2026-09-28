@@ -57,6 +57,8 @@ export type CopperStackProps = StackProps & {
   emailDomain: string;
   /** Where alarms go. */
   alertEmail: string;
+  /** Where "Send a suggestion" from the extension goes. */
+  feedbackEmail: string;
   /** Deploy the scripted test model (broker/src/cloud/testing/) — never in prod. */
   testModel: boolean;
 };
@@ -292,6 +294,36 @@ export class CopperStack extends Stack {
     }
     agentFn.grantInvoke(relayFn);
 
+    // "Send a suggestion": a public URL, since people running CopperOS on
+    // their own computer have no sign-in. It rate-limits itself.
+    const feedbackFn = fn("Feedback", "feedback.ts", {
+      memorySize: 256,
+      timeout: Duration.seconds(10),
+      environment: {
+        USER_POOL_ID: users.userPoolId,
+        CLIENT_ID: client.userPoolClientId,
+        CONNECTIONS_TABLE: connections.tableName,
+        FROM_ADDRESS: `no-reply@${props.emailDomain}`,
+        FEEDBACK_TO: props.feedbackEmail,
+      },
+    });
+    connections.grantReadWriteData(feedbackFn);
+    feedbackFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ["cognito-idp:ListUsers"], resources: [users.userPoolArn] }),
+    );
+    feedbackFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail"],
+        // The sending identity's default configuration set is checked too.
+        resources: [
+          `arn:aws:ses:${this.region}:${this.account}:identity/*`,
+          `arn:aws:ses:${this.region}:${this.account}:configuration-set/*`,
+        ],
+        conditions: { StringEquals: { "ses:FromAddress": `no-reply@${props.emailDomain}` } },
+      }),
+    );
+    const feedbackUrl = feedbackFn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
+
     // ── the socket ───────────────────────────────────────────────────────
     // Browsers cannot set headers on a WebSocket, so the Cognito access
     // token comes in the query string.
@@ -339,7 +371,7 @@ export class CopperStack extends Stack {
     ses("Reputation.ComplaintRate", 0.0008, "EmailComplaints");
     // Any function failing outright — not a task's own error, which the
     // agent reports to the user, but a crash or a timeout.
-    for (const [id, f] of [["Authorize", authorizerFn], ["Relay", relayFn], ["Agent", agentFn]] as const) {
+    for (const [id, f] of [["Authorize", authorizerFn], ["Relay", relayFn], ["Agent", agentFn], ["Feedback", feedbackFn]] as const) {
       new cloudwatch.Alarm(this, `${id}Errors`, {
         alarmName: name(`${id.toLowerCase()}-errors`),
         metric: f.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
@@ -355,6 +387,7 @@ export class CopperStack extends Stack {
     new CfnOutput(this, "UserPoolId", { value: users.userPoolId });
     new CfnOutput(this, "ClientId", { value: client.userPoolClientId });
     new CfnOutput(this, "SignInUrl", { value: signIn.baseUrl() });
+    new CfnOutput(this, "FeedbackUrl", { value: feedbackUrl.url });
 
     // ── dev only: the scripted test model ───────────────────────────────
     if (props.testModel && !prod) {

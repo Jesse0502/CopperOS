@@ -11,6 +11,7 @@
 // from the panel, approvals) is typed instead.
 
 import type { LLMConfig, Provider } from "./config.js";
+import type { TaskExtras } from "./task-extras.js";
 
 /**
  * Full status of one chat, sent whenever the extension needs to (re)draw it.
@@ -28,7 +29,8 @@ export type ChatState = {
 
 /** What the panel can ask of the broker, besides answering ops. */
 export type BridgeHandlers = {
-  onTask: (text: string, chatId: string | undefined) => void;
+  /** A new task, with the tab it starts on and any rules for the supervisor. */
+  onTask: (text: string, chatId: string | undefined, extras: TaskExtras) => void;
   onCancel: (chatId: string) => void;
   /** Start a brand-new chat, independent of whatever else is running. */
   onReset: () => void;

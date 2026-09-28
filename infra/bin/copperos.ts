@@ -29,5 +29,6 @@ new CopperStack(app, `CopperOS-${stage}`, {
     .filter(Boolean),
   emailDomain: context("emailDomain"),
   alertEmail: context("alertEmail"),
+  feedbackEmail: context("feedbackEmail"),
   testModel: context("testModel") === "true",
 });
