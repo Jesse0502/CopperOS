@@ -603,6 +603,8 @@ export class Agent {
   private session: Session;
   // Whether the model a run started with takes images — see acceptsImages.
   private images: boolean | null = null;
+  // Whether the running turn's work is about jobs — see classifyIntent.
+  private jobTask = true;
   // Earlier turns describe pages that have since moved on; the model gets
   // told once, on the first task after a chat is loaded from disk.
   private resumeNoticePending: boolean;
@@ -718,7 +720,8 @@ export class Agent {
       // Only the first completion of the turn gets the discount: if the
       // classification was wrong and the model still emits tool_calls, every
       // completion after that reverts to full reasoning effort as normal.
-      // It also says whether this message resumes the task on record.
+      // It also says whether this message resumes the task on record, and
+      // whether the work is about jobs, which is all job checks run on.
       const intent = await classifyIntent(
         task,
         earlier,
@@ -726,6 +729,7 @@ export class Agent {
         this.session.id,
         abort.signal,
       );
+      this.jobTask = intent.jobs;
       let tracked = await this.track(task, intent, recorded);
 
       // Round 1 sees the whole chat, so a follow-up reads in context. Each
@@ -1182,6 +1186,7 @@ export class Agent {
             answers: this.session.answers,
             chatStartedAt: this.session.createdAt,
             seesImages: this.images !== false && !noImages.has(active.label),
+            jobTask: this.jobTask,
           };
           const out: ToolResult = await tool.run(input, ctx);
           this.session.messages.push({

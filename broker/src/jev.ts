@@ -11,7 +11,7 @@
 // find_answers; judgeMemoryWorth decides whether a fact is saved at all;
 // classifyIntent lets agent.ts skip the main model's reasoning on a
 // greeting/aside and tells it whether a message resumes the chat's tracked
-// task; judgeCompletion decides whether agent.ts starts another round of a
+// task and whether the work is about jobs; judgeCompletion decides whether agent.ts starts another round of a
 // task; superviseTask, at agent.ts's check-ins, decides whether the model
 // is still doing what it was asked or needs setting straight;
 // checkGrounded stops tools.ts entering anything about the user that
@@ -399,6 +399,12 @@ export type Intent = {
    * "leave the task on record alone."
    */
   scope: "resume" | "new_task" | "other" | null;
+  /**
+   * Whether the work asked for is finding or applying to jobs — only then
+   * does tools.ts run job checks. True whenever Jev could not answer, so a
+   * failed check never switches them off.
+   */
+  jobs: boolean;
 };
 
 // Below this, a "greeting" verdict is treated as a task anyway. A bare
@@ -406,16 +412,24 @@ export type Intent = {
 // confidence), and guessing wrong in that direction is the costly one.
 const GREETING_MIN_CONFIDENCE = 0.8;
 const SCOPE_MIN_CONFIDENCE = 0.7;
+// Job checks stay on at or above this chance that the work is about jobs.
+// Probed on 19 messages: job tasks — the user's Indeed prompt, Seek and
+// LinkedIn phrasings, a grad program, "continue" or "yes do the next one"
+// after one — scored 0.97–0.99; the user's Sheets task and its follow-ups,
+// a weekend trip, a new task straight after a job one, and "apply" meaning
+// a theme, a coupon, a Gmail label or a credit card scored 0.01–0.29.
+const JOBS_MIN_P = 0.5;
 
 /**
  * Real, blocking: ask Jev whether `text` is a browser task to carry out or
  * just a greeting/thanks/aside with nothing to do, and — when the chat has a
  * task on record — whether `text` resumes that task, starts a different one,
- * or neither. `earlier` is the last few turns of the chat: without it, a
- * follow-up like "continue" after a cancelled task is ambiguous. A
- * low-confidence answer, any error, a timeout, a cancel, or no configured
- * client all fall back to { greeting: false, scope: null } — "treat this as
- * a task, and leave the task on record alone," the safe default.
+ * or neither — and whether the work is about jobs at all. `earlier` is the
+ * last few turns of the chat: without it, a follow-up like "continue" after
+ * a cancelled task is ambiguous. A low-confidence answer, any error, a
+ * timeout, a cancel, or no configured client all fall back to
+ * { greeting: false, scope: null, jobs: true } — "treat this as a task,
+ * leave the task on record alone, and keep job checks on," the safe default.
  */
 export async function classifyIntent(
   text: string,
@@ -424,7 +438,7 @@ export async function classifyIntent(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<Intent> {
-  const fallback: Intent = { greeting: false, scope: null };
+  const fallback: Intent = { greeting: false, scope: null, jobs: true };
   if (!client) return fallback;
   const started = Date.now();
   try {
@@ -446,6 +460,9 @@ export async function classifyIntent(
           "Neither: a question or comment about how things went, a greeting, or thanks — no request for more work.",
       },
     );
+    const jobs = noul(
+      "Is the work the latest message asks for — on its own, or by picking up an earlier turn or the task on record — about finding jobs or applying for them?",
+    );
     const { answers } = await client.systemOne(
       {
         state: {
@@ -453,21 +470,22 @@ export async function classifyIntent(
           ...(onRecord && { task_on_record: onRecord }),
           latest_message: text,
         },
-        questions: onRecord ? { intent, scope } : { intent },
+        questions: onRecord ? { intent, scope, jobs } : { intent, jobs },
       },
       { signal },
     );
     // The questions object is conditional, so the SDK can only type answers
-    // as a union of every answer shape; both are choice questions.
+    // as a union of every answer shape.
     const i = answers.intent;
     const s = "scope" in answers ? answers.scope : null;
-    if (i.type !== "choice" || (s && s.type !== "choice")) {
+    const j = answers.jobs;
+    if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul") {
       throw new Error("unexpected answer shape");
     }
     console.log(
       `[jev] chat=${chatId} intent=${i.choice} confidence=${i.confidence.toFixed(2)} ` +
         (s ? `scope=${s.choice} confidence=${s.confidence.toFixed(2)} ` : "") +
-        `earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
+        `jobs=${j.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
     );
     return {
       greeting:
@@ -476,6 +494,7 @@ export async function classifyIntent(
         s && s.confidence >= SCOPE_MIN_CONFIDENCE
           ? (s.choice as NonNullable<Intent["scope"]>)
           : null,
+      jobs: j.noul >= JOBS_MIN_P,
     };
   } catch (err) {
     console.warn(

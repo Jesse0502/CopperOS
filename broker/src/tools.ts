@@ -75,6 +75,8 @@ export type ToolCtx = {
   chatStartedAt: string;
   /** Whether the model can take images. When it cannot, no screenshot is taken for it. */
   seesImages: boolean;
+  /** Whether the task is about finding or applying to jobs. Job checks only run when it is. */
+  jobTask: boolean;
 };
 
 /** Everything the user has said in this chat: what they typed, then what they answered. */
@@ -153,7 +155,9 @@ async function gate(kind: "click" | "submit", what: string, ctx: ToolCtx): Promi
 // instructions and memories — left to itself, the model kept applying to
 // roles well outside the user's experience. The model asks with
 // check_job_fit; a click that starts an application asks anyway when the
-// job it is on has not been checked.
+// job it is on has not been checked. Neither runs unless the task is about
+// jobs: "Apply" buttons are everywhere else too — settings, date pickers,
+// Sheets dialogs.
 
 // The latest verdict per chat, and the page it was made on.
 const lastJobFit = new Map<string, { url: string | null; at: number; fit: JobFit }>();
@@ -220,7 +224,7 @@ function jobAbove(chatId: string, ref: string): string | null {
 
 /** Null when the application may start; otherwise why not, as the tool result. */
 async function jobFitGate(ref: string, label: string, why: string, ctx: ToolCtx): Promise<string | null> {
-  if (!jevEnabled) return null;
+  if (!jevEnabled || !ctx.jobTask) return null;
   const last = lastJobFit.get(ctx.chatId);
   const fresh =
     last && Date.now() - last.at < JOB_FIT_FRESH_MS && last.url === snapshotUrl(ctx.chatId);
@@ -1419,8 +1423,9 @@ const checkJobFit: BrowserTool = {
       "Decide whether a job is worth applying to. Jev makes the call against " +
       "the user's instructions and saved memories, reading the job's details " +
       "off the current page — so open them first. Call it before applying to " +
-      "any job. APPLY means apply. SKIP means move on to the next listing " +
-      "without second-guessing it; the skip and its reason are recorded for you.",
+      "any job, and only on a task about jobs. APPLY means apply. SKIP means " +
+      "move on to the next listing without second-guessing it; the skip and " +
+      "its reason are recorded for you.",
     input_schema: {
       type: "object",
       properties: {
@@ -1432,6 +1437,9 @@ const checkJobFit: BrowserTool = {
   async run({ job }, ctx) {
     if (!jevEnabled) {
       return "Job checks need Jev, which is not configured — judge the fit yourself against the user's instructions.";
+    }
+    if (!ctx.jobTask) {
+      return "This task is not about applying to jobs, so there is nothing to check — carry on with it.";
     }
     const which = String(job ?? "").trim() || "the job whose details are open";
     const result = await assessJob(which, ctx);
