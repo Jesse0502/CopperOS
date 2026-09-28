@@ -24,7 +24,7 @@ import * as screencast from "./screencast.js";
 import * as presence from "./presence.js";
 import * as workspace from "./workspace.js";
 import * as auth from "./auth.js";
-import { CLOUD, LOCAL_URL, getBackend, setBackend } from "./backend.js";
+import { LOCAL_URL, cloud, getBackend, setBackend } from "./backend.js";
 
 // The UI lives in the side panel, not a popup: it stays open across tab
 // switches within a window instead of closing the moment focus leaves.
@@ -733,7 +733,7 @@ async function socketUrl() {
     signedIn = await auth.account().catch(() => null);
     return null;
   }
-  return `${CLOUD.socketUrl}?token=${encodeURIComponent(token)}`;
+  return `${(await cloud()).socketUrl}?token=${encodeURIComponent(token)}`;
 }
 
 async function connect() {

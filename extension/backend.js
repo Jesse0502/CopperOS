@@ -5,12 +5,32 @@
 
 export const LOCAL_URL = "ws://127.0.0.1:7331";
 
-// The hosted backend (infra/). Points at the dev stage until launch.
-export const CLOUD = {
-  socketUrl: "wss://qw2wh9kw7i.execute-api.us-east-1.amazonaws.com/dev",
-  signInUrl: "https://copperos-dev.auth.us-east-1.amazoncognito.com",
-  clientId: "7qii82cvit9gp4l68qhhc9fsvv",
+// The hosted backend's stages (infra/). A store install talks to prod; an
+// unpacked development copy talks to dev, so working on the extension never
+// touches real users. Prod only lets the store copy sign in anyway.
+const STAGES = {
+  prod: {
+    socketUrl: "wss://99vtftxn7k.execute-api.us-east-1.amazonaws.com/prod",
+    signInUrl: "https://copperos.auth.us-east-1.amazoncognito.com",
+    clientId: "6n28mm5q95he6s27gjka4ajb4l",
+  },
+  dev: {
+    socketUrl: "wss://qw2wh9kw7i.execute-api.us-east-1.amazonaws.com/dev",
+    signInUrl: "https://copperos-dev.auth.us-east-1.amazoncognito.com",
+    clientId: "7qii82cvit9gp4l68qhhc9fsvv",
+  },
 };
+
+let installType = null;
+async function isDevelopmentCopy() {
+  installType ??= (await chrome.management.getSelf().catch(() => null))?.installType ?? "normal";
+  return installType === "development";
+}
+
+/** The hosted backend this copy of the extension uses. */
+export async function cloud() {
+  return (await isDevelopmentCopy()) ? STAGES.dev : STAGES.prod;
+}
 
 export async function getBackend() {
   try {
@@ -21,8 +41,7 @@ export async function getBackend() {
   }
   // A developer's unpacked copy starts on the broker beside it; a store
   // install starts on the hosted one.
-  const self = await chrome.management.getSelf().catch(() => null);
-  return self?.installType === "development" ? "local" : "cloud";
+  return (await isDevelopmentCopy()) ? "local" : "cloud";
 }
 
 export async function setBackend(backend) {

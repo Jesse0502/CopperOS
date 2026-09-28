@@ -5,7 +5,7 @@
 // the WebSocket, and the refresh token gets a new one when it runs out
 // (Cognito keeps refresh tokens valid for 30 days).
 
-import { CLOUD } from "./backend.js";
+import { cloud } from "./backend.js";
 
 const KEY = "auth";
 // Refresh this long before an access token expires, not after.
@@ -36,6 +36,7 @@ function claims(jwt) {
 }
 
 async function tokenRequest(form) {
+  const CLOUD = await cloud();
   const res = await fetch(`${CLOUD.signInUrl}/oauth2/token`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
@@ -69,6 +70,7 @@ export async function account() {
 
 /** Open the sign-in page; resolves once signed in, with who. */
 export async function signIn() {
+  const CLOUD = await cloud();
   const redirectUri = chrome.identity.getRedirectURL();
   const verifier = randomString(48);
   const state = randomString(16);
@@ -128,6 +130,7 @@ export async function accessToken({ force = false } = {}) {
 
 /** Forget the tokens, revoke the refresh token, and end the sign-in page's own session. */
 export async function signOut() {
+  const CLOUD = await cloud();
   const { [KEY]: auth } = await chrome.storage.local.get(KEY);
   await chrome.storage.local.remove(KEY);
   if (auth?.refresh) {

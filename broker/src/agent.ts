@@ -128,11 +128,17 @@ function activeLabel(cfg: LLMConfig): string {
 }
 
 /** Provider + model + a ready OpenAI-compatible client, resolved from the current settings. */
+// Running as the hosted CopperOS (its Lambdas set STAGE), where users have
+// no .env and no Ollama of their own.
+const HOSTED = Boolean(process.env.STAGE);
+
 function resolveActive(cfg: LLMConfig) {
   if (cfg.provider === "openai") {
     if (!cfg.openai.apiKey) {
       throw new Error(
-        "No OpenAI API key set. Add one in Settings, or switch the provider back to Ollama.",
+        HOSTED
+          ? "No OpenAI API key set. Add yours in Settings, or choose OpenRouter."
+          : "No OpenAI API key set. Add one in Settings, or switch the provider back to Ollama.",
       );
     }
     return {
@@ -148,7 +154,9 @@ function resolveActive(cfg: LLMConfig) {
   if (cfg.provider === "openrouter") {
     if (!cfg.openrouter.apiKey) {
       throw new Error(
-        "No OpenRouter API key set. Add one in Settings or as OPENROUTER_API_KEY in broker/.env.",
+        HOSTED
+          ? "No OpenRouter API key set. Add yours in Settings."
+          : "No OpenRouter API key set. Add one in Settings or as OPENROUTER_API_KEY in broker/.env.",
       );
     }
     return {
