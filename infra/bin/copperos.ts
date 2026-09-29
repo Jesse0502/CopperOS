@@ -28,6 +28,9 @@ new CopperStack(app, `CopperOS-${stage}`, {
     .map((id) => id.trim())
     .filter(Boolean),
   emailDomain: context("emailDomain"),
+  // Stages whose sign-in page offers an emailed code; add prod once SES
+  // production access is approved.
+  emailSignIn: context("emailSignIn").split(",").map((s) => s.trim()).includes(stage),
   alertEmail: context("alertEmail"),
   feedbackEmail: context("feedbackEmail"),
   testModel: context("testModel") === "true",

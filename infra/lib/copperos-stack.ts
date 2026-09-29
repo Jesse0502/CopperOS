@@ -55,6 +55,11 @@ export type CopperStackProps = StackProps & {
   devExtensionIds: string[];
   /** SES-verified domain the sign-in emails come from. */
   emailDomain: string;
+  /**
+   * Offer the emailed one-time code on the sign-in page, beside Google.
+   * Needs SES out of the sandbox, or codes reach only verified addresses.
+   */
+  emailSignIn: boolean;
   /** Where alarms go. */
   alertEmail: string;
   /** Where "Send a suggestion" from the extension goes. */
@@ -130,8 +135,9 @@ export class CopperStack extends Stack {
         callbackUrls: extensionUrls,
         logoutUrls: extensionUrls,
       },
+      // Without email sign-in the page shows only "Continue with Google".
       supportedIdentityProviders: [
-        cognito.UserPoolClientIdentityProvider.COGNITO,
+        ...(props.emailSignIn || !google ? [cognito.UserPoolClientIdentityProvider.COGNITO] : []),
         ...(google ? [cognito.UserPoolClientIdentityProvider.GOOGLE] : []),
       ],
       accessTokenValidity: Duration.hours(1),

@@ -5,6 +5,7 @@
     "google": true,
     "extensionId": "cpiaailfifjppgijgnjdepcpokkmeoje",
     "emailDomain": "copper.jassydev.com",
+    "emailSignIn": "dev",
     "alertEmail": "hello@jassydev.com",
     "feedbackEmail": "hello@jassydev.com",
     "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false,
