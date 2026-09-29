@@ -925,6 +925,7 @@ function renderAccount() {
     b.setAttribute("aria-checked", String(b.dataset.backend === backend));
   }
   $("account-row").hidden = backend !== "cloud";
+  $("local-row").hidden = backend !== "local";
   $("account-who").textContent = account ? account.email ?? "Signed in" : "Not signed in";
   $("account-btn").textContent = account ? "Sign out" : "Sign in";
   $("delete-account").hidden = !(backend === "cloud" && account);

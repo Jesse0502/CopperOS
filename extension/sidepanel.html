@@ -1338,6 +1338,13 @@
         font-size: 12.5px;
         color: var(--text-muted);
       }
+      #local-row {
+        margin-top: -6px;
+        font-size: 12.5px;
+      }
+      #local-row .link {
+        font-size: 12.5px;
+      }
       #account-who {
         flex: 1;
         min-width: 0;
@@ -1765,6 +1772,9 @@
         <div id="account-row" hidden>
           <span id="account-who"></span>
           <button id="account-btn" class="link" type="button"></button>
+        </div>
+        <div id="local-row" hidden>
+          <a class="link" href="https://copper.jassydev.com/setup#this-computer" target="_blank" rel="noopener">How to run the broker on this computer ↗</a>
         </div>
 
         <div id="model-offline" hidden></div>
