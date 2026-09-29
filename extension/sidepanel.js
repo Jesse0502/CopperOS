@@ -889,6 +889,8 @@ function closeHistory() {
 // ── settings ─────────────────────────────────────────────────────────────
 
 const PROVIDERS = ["ollama", "openai", "openrouter"];
+// Someone setting up OpenRouter for the first time starts on this model.
+const OPENROUTER_FIRST_MODEL = "z-ai/glm-4.5-air";
 let askBeforeShown = null; // what "Ask before" said when Settings opened
 
 function providerBlocks(provider) {
@@ -958,7 +960,8 @@ function applyConfig(cfg) {
   const openrouter = cfg.openrouter ?? { model: "", apiKey: "" };
   $("cfg-openrouter-key").value = openrouter.apiKey || "";
   $("cfg-openrouter-key").placeholder = openrouter.hasKey ? "Saved — leave blank to keep it" : "sk-or-…";
-  fillModelSelect($("cfg-openrouter-model"), [], openrouter.model);
+  const openrouterSetUp = Boolean(openrouter.hasKey || openrouter.apiKey);
+  fillModelSelect($("cfg-openrouter-model"), [], openrouterSetUp ? openrouter.model : OPENROUTER_FIRST_MODEL);
   requestModels(cfg.provider);
 }
 
