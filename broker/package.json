@@ -9,7 +9,9 @@
     "start": "tsx src/index.ts",
     "dev": "tsx watch src/index.ts",
     "task": "tsx src/index.ts --task",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "copper": "tsx src/client/cli.ts",
+    "mcp": "tsx src/client/mcp.ts"
   },
   "dependencies": {
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1141.0",
@@ -21,11 +23,13 @@
     "@aws-sdk/client-sesv2": "^3.1142.0",
     "@aws-sdk/client-ssm": "^3.1141.0",
     "@aws-sdk/lib-dynamodb": "^3.1141.0",
+    "@modelcontextprotocol/sdk": "^1.31.0",
     "@typesafe-ai/sdk": "^0.6.0",
     "aws-jwt-verify": "^5.2.1",
     "dotenv": "^16.4.5",
     "openai": "^7.15.0",
-    "ws": "^8.18.0"
+    "ws": "^8.18.0",
+    "zod": "^4.6.5"
   },
   "devDependencies": {
     "@types/aws-lambda": "^8.10.163",
@@ -33,5 +37,8 @@
     "@types/ws": "^8.5.13",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
+  },
+  "bin": {
+    "copper": "src/client/cli.ts"
   }
 }

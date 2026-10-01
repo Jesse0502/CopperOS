@@ -257,7 +257,7 @@ server.start(PORT, {
     await setCurrent(USER, id);
     return chatStateFor(id);
   },
-});
+}).on("error", (err) => exitIfPortTaken(err, PORT));
 
 console.log(`[broker] model: ${activeModelLabel(USER)}`);
 console.log("[broker] load the unpacked extension, then type a task in its popup.");
@@ -350,7 +350,9 @@ function startTaskApi(token: string, port: number) {
     } catch (err) {
       return reply(res, 500, { error: String((err as Error)?.message ?? err) });
     }
-  }).listen(port, "127.0.0.1", () => console.log(`[broker] task API on http://127.0.0.1:${port}`));
+  })
+    .on("error", (err) => exitIfPortTaken(err, port))
+    .listen(port, "127.0.0.1", () => console.log(`[broker] task API on http://127.0.0.1:${port}`));
 }
 
 // One-shot CLI:  npm run task -- "find the pricing page"
@@ -375,3 +377,23 @@ process.on("SIGINT", () => {
   if (server.isConnected()) emit("error", null, "Broker shutting down.");
   process.exit(0);
 });
+// `kill` and launchd's stop both send SIGTERM. Exiting cleanly tells a
+// supervisor (e.g. a KeepAlive launch agent) this was a stop, not a crash.
+process.on("SIGTERM", () => process.exit(0));
+
+/**
+ * Another broker already holds the port, often a background one started by a
+ * launch agent. Say so and exit 0, so a supervisor doesn't keep relaunching a
+ * duplicate that can never bind.
+ */
+function exitIfPortTaken(err: Error, port: number): never {
+  if ((err as NodeJS.ErrnoException).code !== "EADDRINUSE") throw err;
+  console.error(
+    `[broker] port ${port} is already in use, probably by another broker.\n` +
+    `[broker]   see what holds it:  lsof -nP -iTCP:${port} -sTCP:LISTEN\n` +
+    `[broker]   a background one from a launch agent comes back when killed; list them with\n` +
+    `[broker]   grep -l browsercontrol ~/Library/LaunchAgents/*.plist  and stop it with\n` +
+    `[broker]   launchctl bootout gui/$(id -u)/<label>  (for AImarketing: mkt browser-uninstall)`,
+  );
+  process.exit(0);
+}

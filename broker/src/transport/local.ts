@@ -89,7 +89,7 @@ export class LocalServer implements Transport {
       });
     });
 
-    console.log(`[bridge] listening on ws://127.0.0.1:${port}`);
+    wss.on("listening", () => console.log(`[bridge] listening on ws://127.0.0.1:${port}`));
     return wss;
   }
 

@@ -235,6 +235,30 @@ curl -X POST -H "Authorization: Bearer $TASK_API_TOKEN" http://127.0.0.1:7332/ap
 - `timeoutMs` (30s to 30min, default 10min) is the task's active-time limit; reaching it answers `{"status":"timeout",...}`.
 - Other answers: `{"status":"error","error":"..."}`, `409` while another task runs (one tab at a time), `503` while the extension isn't connected.
 
+### CLI and MCP
+
+Two thin clients of the task API, in `broker/`. The broker must be running with
+`TASK_API_TOKEN` set; both read the token and port from `broker/.env`.
+
+```bash
+cd broker
+npm run copper -- status
+npm run copper -- "open example.com and tell me the heading"
+npm run copper -- -a none -r "read only" "how many unread emails do I have?"
+echo "find the pricing page" | npm run copper        # task from stdin
+```
+
+Exit codes: `0` done, `1` error, `2` blocked or timed out. `--json` prints the full result.
+
+For other agents, register the MCP server (tools `browser_task` and `browser_status`):
+
+```bash
+claude mcp add copperos -- npx --prefix /path/to/browsercontrol/broker tsx /path/to/browsercontrol/broker/src/client/mcp.ts
+```
+
+A task can run for minutes. If the client gives up first, raise its tool timeout
+(Claude Code: `MCP_TOOL_TIMEOUT=600000`).
+
 ## Uploading images
 
 `upload_file` attaches an image to a page's upload control. The model passes
