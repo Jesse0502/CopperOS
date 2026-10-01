@@ -19,6 +19,7 @@ import { diffSnapshots, lastSnapshot, snapshot } from "./snapshot.js";
 import * as input from "./input.js";
 import * as nav from "./nav.js";
 import * as sheets from "./sheets.js";
+import { uploadFiles } from "./upload.js";
 import * as som from "./som.js";
 import * as screencast from "./screencast.js";
 import * as presence from "./presence.js";
@@ -663,6 +664,13 @@ const OPS = {
     return afterAction(chatId, id, () => input.pasteText(id, ref, text, { submit }), {
       settle: Boolean(submit),
     });
+  },
+
+  // The bytes come from the broker, which only sends files from folders the
+  // user allowed (UPLOAD_DIRS). See upload.js for why no path is used.
+  async upload_file({ chatId, ref, files, tabId }) {
+    const id = await targetTab(chatId, tabId);
+    return afterAction(chatId, id, () => uploadFiles(id, ref, files));
   },
 
   async select_option({ chatId, ref, value, tabId }) {

@@ -1,4 +1,6 @@
 import "dotenv/config";
+import { createServer, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { setTimeout as sleep } from "node:timers/promises";
 import {
   emit,
@@ -69,7 +71,14 @@ async function chatStateFor(id: string): Promise<ChatState> {
   };
 }
 
-async function runTask(agent: Agent, text: string, extras: TaskExtras) {
+/** How a run ended, for callers that wait on it (the task API). */
+type Outcome =
+  | { status: "done"; text: string; steps: number }
+  | { status: "paused"; request: string }
+  | { status: "timeout" | "cancelled"; text: string; steps: number }
+  | { status: "error"; error: string };
+
+async function runTask(agent: Agent, text: string, extras: TaskExtras, limitMs: number | null = TASK_LIMIT_MS): Promise<Outcome> {
   const id = agent.info().id;
   const run = runOf(id);
   run.busy = true;
@@ -78,7 +87,7 @@ async function runTask(agent: Agent, text: string, extras: TaskExtras) {
   console.log(`\n[task ${id}] ${text}`);
   emit("start", id, text);
   if (extras.rules) emit("rules", id, extras.rules);
-  await drive(agent, () => agent.run(text, { limitMs: TASK_LIMIT_MS, ...extras }));
+  return drive(agent, () => agent.run(text, { limitMs, ...extras }));
 }
 
 /**
@@ -86,7 +95,7 @@ async function runTask(agent: Agent, text: string, extras: TaskExtras) {
  * ended. Pausing is not an end: the chat stays busy (to the panel it is still
  * running, waiting on you) and its request is shown until it is answered.
  */
-async function drive(agent: Agent, work: () => Promise<RunResult>) {
+async function drive(agent: Agent, work: () => Promise<RunResult>): Promise<Outcome> {
   const id = agent.info().id;
   const run = runOf(id);
   let paused = false;
@@ -97,39 +106,41 @@ async function drive(agent: Agent, work: () => Promise<RunResult>) {
       if (run.cancelRequested) {
         await agent.cancelPause();
         console.log(`[cancelled ${id}] stopped by user`);
-        return;
+        return { status: "cancelled", text: "", steps: result.steps };
       }
       paused = true;
       const what = result.paused.kind === "approval" ? `approval — ${result.paused.text}` : "questions";
       console.log(`[waiting ${id}] ${what}`);
       showRequest(result.paused);
-      return;
+      return { status: "paused", request: what };
     }
     if (result.timeUp) {
       console.log(`[time-up ${id}] ${result.steps} steps · ${formatUsage(result)}`);
       // Shown the way a cancel is — the run ends, nothing is left waiting —
       // with its own words.
       emit("cancelled", id, result.text);
-      return;
+      return { status: "timeout", text: result.text, steps: result.steps };
     }
     // Cancel already told the UI the moment it was clicked — the run
     // unwinding afterward (cleanly, or via an aborted tool call throwing)
     // is not a second, different outcome worth re-announcing.
     if (run.cancelRequested) {
       console.log(`[cancelled ${id}] ${result.steps} steps · ${formatUsage(result)}`);
-    } else {
-      console.log(`[done ${id}] ${result.steps} steps · ${formatUsage(result)}`);
-      console.log(result.text);
-      emit("done", id, `${result.steps} steps · ${formatUsage(result)}`);
+      return { status: "cancelled", text: result.text, steps: result.steps };
     }
+    console.log(`[done ${id}] ${result.steps} steps · ${formatUsage(result)}`);
+    console.log(result.text);
+    emit("done", id, `${result.steps} steps · ${formatUsage(result)}`);
+    return { status: "done", text: result.text, steps: result.steps };
   } catch (err) {
     if (run.cancelRequested) {
       console.log(`[cancelled ${id}] stopped by user`);
-    } else {
-      const text = String((err as Error)?.message ?? err);
-      console.error(`[error ${id}] ${text}`);
-      emit("error", id, text);
+      return { status: "cancelled", text: "", steps: 0 };
     }
+    const text = String((err as Error)?.message ?? err);
+    console.error(`[error ${id}] ${text}`);
+    emit("error", id, text);
+    return { status: "error", error: text };
   } finally {
     if (!paused) {
       run.busy = false;
@@ -274,6 +285,73 @@ void (async () => {
     );
   }
 })();
+
+// Task API: lets another program on this computer (such as a marketing engine)
+// run a task and get its result, without a second broker. Off unless
+// TASK_API_TOKEN is set. Listens on 127.0.0.1 only.
+const API_TOKEN = process.env.TASK_API_TOKEN?.trim();
+if (API_TOKEN) startTaskApi(API_TOKEN, Number(process.env.TASK_API_PORT ?? 7332));
+
+function startTaskApi(token: string, port: number) {
+  const expected = Buffer.from(`Bearer ${token}`);
+  const authorized = (header: string | undefined) => {
+    const got = Buffer.from(header ?? "");
+    return got.length === expected.length && timingSafeEqual(got, expected);
+  };
+  const reply = (res: ServerResponse, status: number, body: unknown) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(body));
+  };
+
+  createServer(async (req, res) => {
+    try {
+      if (!authorized(req.headers.authorization)) return reply(res, 401, { error: "unauthorized" });
+      const url = new URL(req.url ?? "/", "http://127.0.0.1");
+
+      if (req.method === "GET" && url.pathname === "/api/health") {
+        return reply(res, 200, { ok: true, extension: server.isConnected(), busy: runningIds().size > 0, model: activeModelLabel(USER) });
+      }
+
+      if (req.method === "POST" && url.pathname === "/api/task") {
+        let raw = "";
+        for await (const chunk of req) {
+          raw += chunk;
+          if (raw.length > 64_000) return reply(res, 413, { error: "task too large" });
+        }
+        const body = JSON.parse(raw || "{}") as { text?: string; rules?: string; approvalMode?: string; timeoutMs?: number };
+        const text = String(body.text ?? "").trim();
+        if (!text) return reply(res, 400, { error: "text is required" });
+        if (!server.isConnected()) return reply(res, 503, { error: "the extension is not connected (is Chrome open with CopperOS?)" });
+        // The extension drives one tab at a time, so tasks never overlap.
+        if (runningIds().size > 0) return reply(res, 409, { error: "busy: another task is running" });
+
+        // A fresh chat per task: never mixed into the person's own chats.
+        const agent = register(Agent.blank(USER));
+        const mode = (["all", "submits", "none"] as const).find((m) => m === body.approvalMode) ?? "submits";
+        await agent.setApprovalMode(mode);
+        const limit = Math.min(Math.max(Number(body.timeoutMs) || 600_000, 30_000), 1_800_000);
+        const extras: TaskExtras = body.rules?.trim() ? { rules: body.rules.trim().slice(0, 2000) } : {};
+        const outcome = await runTask(agent, text, extras, limit);
+
+        // A caller waiting on an answer can't click Approve in the panel, so a
+        // task that stopped to ask is ended rather than left waiting.
+        if (outcome.status === "paused") {
+          const request = await agent.cancelPause();
+          if (request) withdrawRequest(request.id);
+          const run = runOf(agent.info().id);
+          run.busy = false;
+          run.task = null;
+          return reply(res, 200, { status: "blocked", chatId: agent.info().id, request: outcome.request });
+        }
+        return reply(res, 200, { ...outcome, chatId: agent.info().id });
+      }
+
+      return reply(res, 404, { error: "not found" });
+    } catch (err) {
+      return reply(res, 500, { error: String((err as Error)?.message ?? err) });
+    }
+  }).listen(port, "127.0.0.1", () => console.log(`[broker] task API on http://127.0.0.1:${port}`));
+}
 
 // One-shot CLI:  npm run task -- "find the pricing page"
 const flagIndex = process.argv.indexOf("--task");

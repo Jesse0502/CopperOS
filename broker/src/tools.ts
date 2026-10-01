@@ -4,6 +4,8 @@
 // never sees a pixel position, so it cannot invent one; resolution from ref to
 // coordinates happens in the extension against the live box model.
 
+import fs from "node:fs";
+import path from "node:path";
 import type OpenAI from "openai";
 import {
   call,
@@ -811,6 +813,71 @@ const hover: BrowserTool = {
   },
 };
 
+// ── uploads ─────────────────────────────────────────────────────────────────
+//
+// Only files under UPLOAD_DIRS (a list of folders separated by ":") can be
+// uploaded; with none set the tool is not offered at all. A page the agent
+// reads could try to talk it into uploading something private, so the folder
+// check happens here, before any bytes leave this machine, not in the model.
+
+const UPLOAD_DIRS = (process.env.UPLOAD_DIRS ?? "")
+  .split(":")
+  .map((d) => d.trim())
+  .filter(Boolean)
+  .map((d) => path.resolve(d));
+const UPLOAD_MAX_BYTES = 15 * 1024 * 1024;
+const UPLOAD_TYPES: Record<string, string> = {
+  ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp",
+};
+
+function uploadable(file: string): { abs: string; mime: string } {
+  const abs = path.resolve(file);
+  let real: string;
+  try {
+    real = fs.realpathSync(abs); // a symlink must not lead out of the allowed folders
+  } catch {
+    throw new Error(`upload_file: no file at ${abs}. Use the exact path you were given.`);
+  }
+  if (!UPLOAD_DIRS.some((dir) => real.startsWith(dir + path.sep))) {
+    throw new Error(`upload_file: ${abs} is outside the folders the user allows uploads from.`);
+  }
+  const mime = UPLOAD_TYPES[path.extname(real).toLowerCase()];
+  if (!mime) throw new Error(`upload_file: only images can be uploaded (${Object.keys(UPLOAD_TYPES).join(", ")}).`);
+  if (fs.statSync(real).size > UPLOAD_MAX_BYTES) throw new Error("upload_file: the file is over 15 MB.");
+  return { abs: real, mime };
+}
+
+const uploadFile: BrowserTool = {
+  def: {
+    name: "upload_file",
+    description:
+      "Attach an image file to the page's upload control. Pass the ref of the " +
+      "file input, or of the button that opens the file picker (\"Add media\", " +
+      "\"Add a photo\"); no picker window opens. Use the exact file path you " +
+      "were given in the task. The result shows what changed, such as the " +
+      "image preview appearing.",
+    input_schema: {
+      type: "object",
+      properties: {
+        ref: str('Ref of the file input or the button that opens the file picker, e.g. "e41"'),
+        path: str("Absolute path of the image to upload, exactly as given in the task"),
+        why: str("What this upload is for. Shown to the user."),
+      },
+      required: ["ref", "path", "why"],
+    },
+  },
+  async run({ ref, path: file, why }, ctx) {
+    const { abs, mime } = uploadable(String(file));
+    const name = path.basename(abs);
+    const what = `Upload ${name} via ${ref} — ${why}`;
+    await gate("click", what, ctx);
+    emit("upload", ctx.chatId, `${name} via ${ref}`);
+    const files = [{ name, mime, base64: fs.readFileSync(abs).toString("base64") }];
+    const r = await call("upload_file", ctx.chatId, { ref, files }, undefined, ctx.signal);
+    return describeAction(what, r, ctx);
+  },
+};
+
 const selectOption: BrowserTool = {
   def: {
     name: "select_option",
@@ -1553,6 +1620,7 @@ const updateProgress: BrowserTool = {
 export const TOOLS: BrowserTool[] = [
   snapshot, screenshot, readPage,
   click, type, paste, hover, selectOption, pressKey, scroll,
+  ...(UPLOAD_DIRS.length ? [uploadFile] : []),
   sheetRead, sheetWrite, sheetSelect,
   navigate, goBack, waitForIdle,
   listTabs, openTab, activateTab, closeTab,

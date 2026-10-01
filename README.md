@@ -202,6 +202,9 @@ saved to `storage/config.json` and take precedence over `.env`. With
 OpenRouter, the transcript cap follows the chosen model's context window.
 
 | `RECONNECT_GRACE_MS` | `30000` | How long an op waits for the extension to come back before failing. |
+| `TASK_API_TOKEN` | — (off) | Turns on the [task API](#task-api) and is the bearer token callers must send. |
+| `TASK_API_PORT` | `7332` | Port for the task API (127.0.0.1 only). |
+| `UPLOAD_DIRS` | — (off) | Folders, separated by `:`, that `upload_file` may upload images from. With none set the tool isn't offered. |
 | `TASK_BUDGET_MS` | — (no limit) | Optional limit on each task's active time, in ms. Time spent waiting on you does not count. The task stops cleanly before the limit, and "continue" picks it up. |
 | `STORAGE_DIR` | `<repo>/storage` | Where chat transcripts are written. |
 | `HISTORY_BUDGET_CHARS` | 60% of `OLLAMA_NUM_CTX` | Transcript size cap before old turns are dropped. |
@@ -210,6 +213,36 @@ Approval prompts appear in the side panel. The pill next to Send sets when a
 chat asks first (every action, submits only, or never); **Ask before** in
 Settings sets it for new chats. Declining returns "user declined" to the model
 as a tool result, so it adapts instead of dying.
+
+## Task API
+
+Other programs on this computer can run a task and wait for its result,
+through the broker that's already running. Set `TASK_API_TOKEN` in
+`broker/.env` and restart the broker. It listens on 127.0.0.1 only.
+
+```bash
+curl -H "Authorization: Bearer $TASK_API_TOKEN" http://127.0.0.1:7332/api/health
+# {"ok":true,"extension":true,"busy":false,"model":"..."}
+
+curl -X POST -H "Authorization: Bearer $TASK_API_TOKEN" http://127.0.0.1:7332/api/task \
+  -d '{"text":"open example.com and tell me the heading","rules":"read only","approvalMode":"submits","timeoutMs":300000}'
+# {"status":"done","text":"...","steps":4,"chatId":"..."}
+```
+
+- Every task gets a fresh chat, never one of yours. It shows up in the chat list like any other.
+- `approvalMode` is `all`, `submits` (default) or `none`. Nobody can click Approve for an API task, so a task that stops to ask is ended and answered with `{"status":"blocked","request":"..."}`.
+- `rules` are supervisor rules for the task, as in the Supervisor box.
+- `timeoutMs` (30s to 30min, default 10min) is the task's active-time limit; reaching it answers `{"status":"timeout",...}`.
+- Other answers: `{"status":"error","error":"..."}`, `409` while another task runs (one tab at a time), `503` while the extension isn't connected.
+
+## Uploading images
+
+`upload_file` attaches an image to a page's upload control. The model passes
+the ref of the file input, or of the button that opens the file picker. The
+click is made with file-chooser interception on, so no picker window opens,
+and the bytes are set on the input from an isolated world, so no file path
+reaches the page and no file-URL permission is needed. Files must be under one
+of the `UPLOAD_DIRS`, checked in the broker before anything is read.
 
 ## The chat is sticky
 
