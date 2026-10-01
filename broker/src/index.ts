@@ -68,6 +68,7 @@ async function chatStateFor(id: string): Promise<ChatState> {
     running: run.busy,
     task: run.task,
     approvalMode: info.approvalMode,
+    supervisor: info.supervisor,
   };
 }
 
@@ -244,6 +245,12 @@ server.start(PORT, {
       if (!["all", "submits", "none"].includes(mode)) return;
       const agent = await getAgent(chatId);
       await agent.setApprovalMode(mode as ApprovalMode);
+    })();
+  },
+  onSetSupervisor: (chatId, on) => {
+    void (async () => {
+      const agent = await getAgent(chatId);
+      await agent.setSupervisor(on);
     })();
   },
   onApproval: (requestId, approved) => answer(requestId, approved ? "approved" : "denied"),

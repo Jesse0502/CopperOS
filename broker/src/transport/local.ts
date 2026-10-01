@@ -144,6 +144,10 @@ export class LocalServer implements Transport {
       handlers.onSetApprovalMode(msg.chatId, msg.mode);
       return;
     }
+    if (msg.type === "set_supervisor" && typeof msg.chatId === "string") {
+      handlers.onSetSupervisor(msg.chatId, msg.on === true);
+      return;
+    }
     if (msg.type === "approval" && typeof msg.id === "string") {
       this.shown.delete(msg.id);
       handlers.onApproval(msg.id, Boolean(msg.approved));

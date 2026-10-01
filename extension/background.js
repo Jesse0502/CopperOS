@@ -71,6 +71,9 @@ let chosen = true;
 // "Ask before" in Settings: the approval mode new chats start with, or null
 // to leave it to the broker.
 let approvalDefault = null;
+// Whether new chats start with the supervisor on: the last choice made with
+// the composer's Supervisor button, or null to leave it to the broker.
+let supervisorDefault = null;
 // Connection attempts in a row that the hosted socket refused before opening
 // — an expired or revoked token. The next one refreshes the token first.
 let refused = 0;
@@ -115,6 +118,7 @@ let session = {
   running: false,
   task: null,
   approvalMode: "submits",
+  supervisor: false, // whether the viewed chat's tasks get supervisor check-ins
   events: [],
   approval: null, // { id, text } while a gate is open on the viewed chat
   watching: false, // live-view toggle, restored with the panel
@@ -135,9 +139,12 @@ const sessionKey = () => `session:${backend}`;
 const ready = (async () => {
   backend = await getBackend();
   signedIn = await auth.account().catch(() => null);
-  const stored = await chrome.storage.local.get(["backend", "approvalDefault"]).catch(() => ({}));
+  const stored = await chrome.storage.local
+    .get(["backend", "approvalDefault", "supervisorDefault"])
+    .catch(() => ({}));
   chosen = stored.backend === "local" || stored.backend === "cloud";
   approvalDefault = ["all", "submits", "none"].includes(stored.approvalDefault) ? stored.approvalDefault : null;
+  supervisorDefault = typeof stored.supervisorDefault === "boolean" ? stored.supervisorDefault : null;
   try {
     const { [sessionKey()]: saved, tabsByChat: savedTabs } =
       await chrome.storage.session.get([sessionKey(), "tabsByChat"]);
@@ -842,6 +849,7 @@ function wire(sock) {
       session.running = Boolean(msg.running);
       session.task = msg.task ?? null;
       session.approvalMode = msg.approvalMode ?? "submits";
+      session.supervisor = msg.supervisor === true;
       if (!session.running) {
         session.approval = null;
         session.ask = null;
@@ -859,6 +867,11 @@ function wire(sock) {
         if (approvalDefault && !session.running && session.events.length === 0 && session.approvalMode !== approvalDefault) {
           session.approvalMode = approvalDefault;
           send({ type: "set_approval_mode", chatId: session.chatId, mode: approvalDefault });
+        }
+        // And with the supervisor as it was last left.
+        if (supervisorDefault !== null && !session.running && session.events.length === 0 && session.supervisor !== supervisorDefault) {
+          session.supervisor = supervisorDefault;
+          send({ type: "set_supervisor", chatId: session.chatId, on: supervisorDefault });
         }
         persist();
         broadcastToPanels({ ...restoreMessage(), connected: true });
@@ -1126,6 +1139,14 @@ chrome.runtime.onConnect.addListener((port) => {
       persist();
       send({ type: "set_approval_mode", chatId: session.chatId, mode: msg.mode });
     }
+    if (msg.type === "set_supervisor" && typeof msg.on === "boolean") {
+      session.supervisor = msg.on; // optimistic, like the approval mode
+      persist();
+      send({ type: "set_supervisor", chatId: session.chatId, on: msg.on });
+      // New chats start the way it was last left.
+      supervisorDefault = msg.on;
+      chrome.storage.local.set({ supervisorDefault }).catch(() => {});
+    }
     if (msg.type === "approval") {
       send({ type: "approval", id: msg.id, approved: msg.approved });
       session.approval = null;
@@ -1217,6 +1238,7 @@ function restoreMessage() {
     ask: session.ask,
     watching: session.watching,
     approvalMode: session.approvalMode,
+    supervisor: session.supervisor,
     pendingApprovalChatIds: waitingChatIds(),
     welcome: !chosen,
     approvalDefault,
@@ -1260,7 +1282,7 @@ chrome.tabs.onUpdated.addListener((_tabId, change) => {
 
 function blankSession() {
   return {
-    chatId: null, running: false, task: null, approvalMode: "submits", events: [],
+    chatId: null, running: false, task: null, approvalMode: "submits", supervisor: false, events: [],
     approval: null, watching: false, pendingApprovals: {}, ask: null, pendingAsks: {}, chats: null,
   };
 }

@@ -31,6 +31,8 @@ let lastChats = []; // most recent "chats" response, re-rendered when the flags 
 // The approval mode new chats start with ("Ask before" in Settings), or null
 // to leave it to the broker.
 let approvalDefault = null;
+// Whether the viewed chat's tasks get supervisor check-ins.
+let supervisor = false;
 // Set right before an optimistic bubble is added for a task this panel just
 // sent, so the broker's echoed "start" event for the same text isn't drawn
 // twice.
@@ -562,8 +564,7 @@ function renderComposer() {
   send.disabled = running ? false : !task.value.trim();
   // The broker takes the next message once this task is over.
   task.disabled = running;
-  $("rules-btn").disabled = running;
-  if (running) setRulesOpen(false);
+  renderRulesBox();
   task.placeholder = running
     ? "Working… you can stop it anytime"
     : $("empty") ? "e.g. Find the cheapest paid tier" : "Ask a follow-up…";
@@ -580,46 +581,44 @@ function setRunning(on) {
   renderDot();
 }
 
-// Rules for the supervisor: set before sending, and sent with the next task only.
-function rulesText() {
-  return $("rules").value.trim();
-}
-
-function setRulesOpen(open) {
-  $("rules-box").hidden = !open;
-  $("rules-btn").setAttribute("aria-expanded", String(open));
-  renderRulesButton();
-}
-
-function renderRulesButton() {
-  const set = Boolean(rulesText());
+// The supervisor: on or off for the chat, a setting like the approval mode,
+// and while it is on, rules for it that go with the next task only. It can be
+// switched mid-task: the broker reads it at each check-in.
+function setSupervisor(on) {
+  supervisor = on;
   const btn = $("rules-btn");
-  btn.classList.toggle("set", set);
-  btn.title = set ? "Supervisor rules set for this task" : "Rules the supervisor holds this task to";
-  btn.setAttribute("aria-label", btn.title);
+  btn.classList.toggle("set", on);
+  btn.setAttribute("aria-pressed", String(on));
+  $("rules-btn-text").textContent = on ? "Supervisor on" : "Supervisor";
+  btn.title = on
+    ? "The supervisor checks the agent's work every few steps and keeps it on track. Click to turn it off."
+    : "Add a supervisor that checks the agent's work every few steps and keeps it on track";
+  renderRulesBox();
+}
+
+function renderRulesBox() {
+  $("rules-box").hidden = !supervisor || running;
+}
+
+function rulesText() {
+  return supervisor ? $("rules").value.trim() : "";
+}
+
+function resizeRules() {
+  $("rules").style.height = "auto";
+  $("rules").style.height = Math.min($("rules").scrollHeight, 120) + "px";
 }
 
 $("rules-btn").addEventListener("click", () => {
-  const open = $("rules-box").hidden;
-  setRulesOpen(open);
-  if (open) $("rules").focus();
+  setSupervisor(!supervisor);
+  port.postMessage({ type: "set_supervisor", on: supervisor });
 });
-$("rules").addEventListener("input", () => {
-  renderRulesButton();
-  $("rules").style.height = "auto";
-  $("rules").style.height = Math.min($("rules").scrollHeight, 120) + "px";
-});
+$("rules").addEventListener("input", resizeRules);
 $("rules").addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     e.stopPropagation();
-    setRulesOpen(false);
     task.focus();
   }
-});
-$("rules-clear").addEventListener("click", () => {
-  $("rules").value = "";
-  setRulesOpen(false);
-  task.focus();
 });
 
 function autoResize() {
@@ -1253,6 +1252,7 @@ port.onMessage.addListener((msg) => {
       watching = Boolean(msg.watching);
       setRunning(Boolean(msg.running));
       setApprovalMode(msg.approvalMode ?? "submits");
+      setSupervisor(msg.supervisor === true);
       setPendingApprovalChatIds(msg.pendingApprovalChatIds ?? []);
       renderStatus();
       renderAccount();
@@ -1350,7 +1350,7 @@ function sendTask() {
   port.postMessage({ type: "task", text, ...(rules ? { rules } : {}) });
   // Rules are for one task: the next one starts without them.
   $("rules").value = "";
-  setRulesOpen(false);
+  resizeRules();
   task.value = "";
   autoResize();
   renderComposer();

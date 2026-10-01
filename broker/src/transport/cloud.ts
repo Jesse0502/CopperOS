@@ -18,8 +18,11 @@ type Pending = {
   timer: NodeJS.Timeout;
 };
 
-/** Messages the relay passes on from the person: stop the task, or change its approval mode. */
-export type Control = { type: "cancel" } | { type: "set_approval_mode"; mode: string };
+/** Messages the relay passes on from the person: stop the task, or change its approval mode or supervisor. */
+export type Control =
+  | { type: "cancel" }
+  | { type: "set_approval_mode"; mode: string }
+  | { type: "set_supervisor"; on: boolean };
 
 // A restarted service worker drops the socket for a few seconds; ops wait
 // that out instead of failing the run.
@@ -97,7 +100,7 @@ export class CloudTransport implements Transport {
       return;
     }
     if (msg.type === "pong") return;
-    if (msg.type === "cancel" || msg.type === "set_approval_mode") {
+    if (msg.type === "cancel" || msg.type === "set_approval_mode" || msg.type === "set_supervisor") {
       this.onControl(msg);
       return;
     }

@@ -25,6 +25,8 @@ export type ChatState = {
   running: boolean;
   task: string | null;
   approvalMode: string;
+  /** Whether the chat's tasks get supervisor check-ins. */
+  supervisor: boolean;
 };
 
 /** What the panel can ask of the broker, besides answering ops. */
@@ -40,6 +42,8 @@ export type BridgeHandlers = {
   onSwitchChat: (id: string) => void;
   /** Per-chat setting change. */
   onSetApprovalMode: (chatId: string, mode: string) => void;
+  /** The supervisor turned on or off for a chat. */
+  onSetSupervisor: (chatId: string, on: boolean) => void;
   /** The person approved or denied a request shown with show(). */
   onApproval: (requestId: string, approved: boolean) => void;
   /** The person answered (or closed) a question form shown with show(). */

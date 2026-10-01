@@ -33,6 +33,8 @@ export async function runJob(job: AgentJob, lambdaMsLeft: number): Promise<void>
       agent?.cancel();
     } else if (control.type === "set_approval_mode" && agent) {
       void agent.setApprovalMode(control.mode as ApprovalMode);
+    } else if (control.type === "set_supervisor" && agent) {
+      void agent.setSupervisor(control.on === true);
     }
   });
   useTransport(transport);

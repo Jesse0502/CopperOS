@@ -18,6 +18,10 @@ export type ApprovalMode = "all" | "submits" | "none";
 const DEFAULT_APPROVAL_MODE: ApprovalMode =
   (process.env.APPROVAL_MODE as ApprovalMode | undefined) ?? "submits";
 
+// Whether a new chat's tasks get supervisor check-ins (see supervisor.ts).
+// Off unless the user turns it on in the chat, or SUPERVISOR=on.
+const DEFAULT_SUPERVISOR = process.env.SUPERVISOR === "on";
+
 /**
  * A task stopped to wait for the person — an approval or a question form.
  * The transcript keeps the tool call that asked, unanswered; `loop` is where
@@ -62,8 +66,11 @@ export type Session = {
   answers: string[];
   /** Full history minus the system prompt, which is a frozen constant. */
   messages: Msg[];
-  /** Per-chat settings — each agent is independent, so these are not global. */
-  settings: { approvalMode: ApprovalMode };
+  /**
+   * Per-chat settings — each agent is independent, so these are not global.
+   * `supervisor` turns on check-ins for the chat's tracked tasks.
+   */
+  settings: { approvalMode: ApprovalMode; supervisor: boolean };
   /** Set while the chat's task is waiting on the person. */
   paused?: Paused;
 };
@@ -79,7 +86,7 @@ export function blank(model: string): Session {
   const now = new Date().toISOString();
   return {
     id: newId(), createdAt: now, updatedAt: now, model, tasks: [], answers: [], messages: [],
-    settings: { approvalMode: DEFAULT_APPROVAL_MODE },
+    settings: { approvalMode: DEFAULT_APPROVAL_MODE, supervisor: DEFAULT_SUPERVISOR },
   };
 }
 
@@ -170,7 +177,10 @@ async function loadById(userId: string, id: string, model: string): Promise<Sess
     messages: sanitize(raw.messages ?? [], Boolean(raw.paused)),
     tasks: raw.tasks ?? [],
     answers: raw.answers ?? [],
-    settings: { approvalMode: raw.settings?.approvalMode ?? DEFAULT_APPROVAL_MODE },
+    settings: {
+      approvalMode: raw.settings?.approvalMode ?? DEFAULT_APPROVAL_MODE,
+      supervisor: raw.settings?.supervisor ?? DEFAULT_SUPERVISOR,
+    },
   };
 }
 

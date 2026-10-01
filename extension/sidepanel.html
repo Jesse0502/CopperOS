@@ -1010,33 +1010,27 @@
         gap: 6px;
         margin-top: 6px;
       }
-      /* Rules for the supervisor, set before the task is sent. */
+      /* Rules for the supervisor, shown while it is on, sent with the next task. */
       #rules-box {
+        display: flex;
+        align-items: flex-start;
+        gap: 6px;
         margin-top: 8px;
-        padding-top: 8px;
+        padding-top: 7px;
         border-top: 1px dashed var(--border);
       }
-      .rules-head {
-        display: flex;
-        align-items: center;
-        gap: 5px;
-        margin-bottom: 4px;
-        font-size: 11.5px;
-        font-weight: 600;
-        color: var(--brand);
-      }
-      .rules-head .i {
+      #rules-box .i {
+        flex: none;
         width: 12px;
         height: 12px;
-      }
-      .rules-head .link {
-        margin-left: auto;
-        font-size: 11.5px;
+        margin-top: 2px;
+        color: var(--brand);
       }
       #rules {
         display: block;
-        width: 100%;
-        min-height: 36px;
+        flex: 1;
+        min-width: 0;
+        min-height: 18px;
         max-height: 120px;
         padding: 0;
         border: none;
@@ -1721,11 +1715,8 @@
         <div class="inp">
           <textarea id="task" rows="1" placeholder="e.g. Find the cheapest paid tier"></textarea>
           <div id="rules-box" hidden>
-            <div class="rules-head">
-              <i class="i i-look"></i>What should the supervisor hold it to?
-              <button id="rules-clear" class="link quiet" type="button">Clear</button>
-            </div>
-            <textarea id="rules" rows="2" placeholder="e.g. Only jobs posted this week. Never use LinkedIn. Stop after 10." aria-label="Rules for the supervisor"></textarea>
+            <i class="i i-look"></i>
+            <textarea id="rules" rows="1" placeholder="Rules for the supervisor (optional)" title="e.g. Only jobs posted this week. Never use LinkedIn. Stop after 10." aria-label="Rules for the supervisor (optional)"></textarea>
           </div>
           <div class="row">
             <label class="perm" title="When this chat asks before acting">
@@ -1738,7 +1729,7 @@
                 <option value="none">Never ask</option>
               </select>
             </label>
-            <button id="rules-btn" class="pill-btn" type="button" title="Rules the supervisor holds this task to" aria-expanded="false" aria-controls="rules-box">
+            <button id="rules-btn" class="pill-btn" type="button" aria-pressed="false">
               <i class="i i-look"></i><span id="rules-btn-text">Supervisor</span>
             </button>
             <button id="send" type="button" title="Send" aria-label="Send">

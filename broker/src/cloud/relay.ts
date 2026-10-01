@@ -201,6 +201,21 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
       return;
     }
 
+    case "set_supervisor": {
+      if (typeof msg.chatId !== "string") return;
+      const on = msg.on === true;
+      const item = await store.chatItem(userId, msg.chatId);
+      // As with the approval mode: a running task holds the transcript.
+      if (item?.run && item.run.until > Date.now() && !item.pending) {
+        for (const w of await workersOf(userId, msg.chatId)) {
+          await post(w.connectionId, { type: "set_supervisor", on });
+        }
+        return;
+      }
+      await (await Agent.forChat(userId, msg.chatId)).setSupervisor(on);
+      return;
+    }
+
     case "get_config": {
       await reply({ type: "config", config: withoutKeys(getConfig(userId)) });
       return;
@@ -264,6 +279,7 @@ function state(agent: Agent, item: ChatItem | undefined) {
     running,
     task: running ? (item?.run?.task ?? info.lastTask) : null,
     approvalMode: info.approvalMode,
+    supervisor: info.supervisor,
   };
 }
 

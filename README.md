@@ -164,13 +164,18 @@ shortcuts are refused, because they would use your clipboard. `type` and
 | `PORT` | `7331` | Broker WebSocket port. Must match `BROKER_URL` in `extension/background.js`. |
 | `JEV_AI_API_KEY` | — | Enables Jev: task rounds, check-ins, memory ranking and the other judgments. Nothing else depends on it. |
 | `TASK_MAX_ROUNDS` | `15` | Most fresh-context rounds one message can start while Jev says there is more to do. |
-| `CHECK_IN_EVERY` | `10` | Steps between check-ins on a tracked task. `0` turns them off. |
+| `SUPERVISOR` | off | `on` starts new chats with the supervisor on. Each chat's own setting is the **Supervisor** button in the panel. |
+| `CHECK_IN_EVERY` | `10` | Steps between check-ins on a tracked task. `0` turns them off in every chat, whatever the Supervisor button says. |
 | `FRESH_CONTEXT_TOKENS` | `25000` | Context size at which a check-in hands the task over to a fresh round. |
 
 ### Check-ins
 
-With Jev enabled, a long task doesn't run unsupervised. Every
-`CHECK_IN_EVERY` steps the model stops and says, in words, what it is doing,
+With Jev enabled and the supervisor on, a long task doesn't run unsupervised.
+The **Supervisor** button next to the approval pill turns it on or off for the
+chat. It's off in a new chat, unless `SUPERVISOR=on` is set or you left it on
+in your last chat; the panel remembers your last choice for new chats. You
+can switch it mid-task, and the change takes effect at the next check-in.
+Every `CHECK_IN_EVERY` steps the model stops and says, in words, what it is doing,
 how, and what's next. Jev compares that, and the last 20 actions it actually
 took (each clicked element's label and how the page responded), with the
 user's instructions. On course, the model carries on. Off course (working on
@@ -180,16 +185,16 @@ naming what's wrong. If it's still off course at the next check-in, the task
 continues in a fresh round, with the correction in its brief. At four
 off-course check-ins in a row, the task stops and waits for the user.
 
-You can give the supervisor rules of your own before a task starts: click
-**Supervisor** next to the approval pill and write what it should hold the
-task to ("only jobs posted this week, never LinkedIn, stop after 10"). The
-agent reads them with the task, every check-in restates them, and Jev judges
-the agent against them as firmly as against the task. They belong to that
-task: a follow-up like "continue" keeps them, and the next new task starts
-without.
+While the supervisor is on, a box under the message takes optional rules for
+it: what it should hold the task to ("only jobs posted this week, never
+LinkedIn, stop after 10"). The agent reads them with the task, every check-in
+restates them, and Jev judges the agent against them as firmly as against the
+task. They belong to that task: a follow-up like "continue" keeps them, and
+the next new task starts without.
 
 Separately, a check-in hands over to a fresh round whenever the context has
-grown past `FRESH_CONTEXT_TOKENS`, including earlier turns of the chat. The
+grown past `FRESH_CONTEXT_TOKENS`, including earlier turns of the chat (so
+this too happens only with the supervisor on). The
 model's check-in answer becomes the handover note, so the next round knows
 how the work was being done and keeps doing it that way.
 
@@ -231,7 +236,7 @@ curl -X POST -H "Authorization: Bearer $TASK_API_TOKEN" http://127.0.0.1:7332/ap
 
 - Every task gets a fresh chat, never one of yours. It shows up in the chat list like any other.
 - `approvalMode` is `all`, `submits` (default) or `none`. Nobody can click Approve for an API task, so a task that stops to ask is ended and answered with `{"status":"blocked","request":"..."}`.
-- `rules` are supervisor rules for the task, as in the Supervisor box.
+- `rules` are supervisor rules for the task, as in the Supervisor box. Sending rules turns the supervisor on for the task's chat.
 - `timeoutMs` (30s to 30min, default 10min) is the task's active-time limit; reaching it answers `{"status":"timeout",...}`.
 - Other answers: `{"status":"error","error":"..."}`, `409` while another task runs (one tab at a time), `503` while the extension isn't connected.
 

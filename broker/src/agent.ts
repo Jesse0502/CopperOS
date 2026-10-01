@@ -774,12 +774,19 @@ export class Agent {
       turns: this.session.tasks.length,
       messages: this.session.messages.length,
       approvalMode: this.session.settings.approvalMode,
+      supervisor: this.session.settings.supervisor,
       lastTask: this.session.tasks.at(-1) ?? null,
     };
   }
 
   setApprovalMode(mode: ApprovalMode): Promise<void> {
     this.session.settings.approvalMode = mode;
+    return this.persist();
+  }
+
+  /** Turns check-ins on or off — read at each one, so it takes effect mid-task too. */
+  setSupervisor(on: boolean): Promise<void> {
+    this.session.settings.supervisor = on;
     return this.persist();
   }
 
@@ -859,6 +866,8 @@ export class Agent {
         abort.signal,
       );
       this.jobTask = intent.jobs;
+      // Rules are for the supervisor, so sending some turns it on.
+      if (options.rules) this.session.settings.supervisor = true;
       const tracked = await this.track(task, intent, recorded, options.rules ?? null);
       this.rules = tracked?.rules ?? options.rules ?? null;
 
@@ -870,8 +879,10 @@ export class Agent {
         markBefore: false,
         tracked,
         // Check-ins hold the model to a task on record, so only a tracked one
-        // gets them. Strikes carry across rounds: a fresh round that goes off
-        // course again is closer to stopping, not back at the start.
+        // gets them, and only while the chat's supervisor is on. The trail is
+        // kept either way, so turning it on mid-task has actions to judge.
+        // Strikes carry across rounds: a fresh round that goes off course
+        // again is closer to stopping, not back at the start.
         watch: tracked && CHECK_IN_EVERY > 0 ? { strikes: 0, trail: [] } : null,
         from: null,
         finalText: "",
@@ -1594,6 +1605,7 @@ export class Agent {
 
       if (
         loop.watch &&
+        this.session.settings.supervisor &&
         loop.step % CHECK_IN_EVERY === 0 &&
         loop.step < MAX_STEPS &&
         !this.clock?.late()
