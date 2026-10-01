@@ -317,6 +317,20 @@ const TIME_UP_NOTICE =
   "user asks you to continue, pick it back up from where it stopped — take " +
   "a fresh snapshot first, since the page may have moved on.]";
 
+// Added to the user's message for one request only, never stored, when Jev
+// found it needs an answer rather than browser work (classifyIntent): that
+// request goes out with tools off.
+const REPLY_NOTE =
+  "\n\n[This message asks for an answer, not browser work, so your tools " +
+  "are off for this reply. Answer in words from what this chat already " +
+  "shows. If answering really needs a page you have not read, say what you " +
+  "would check and ask whether to go ahead.]";
+
+// The reply when a words-only request came back with no words: a model that
+// ignores tool_choice (Ollama) and only called tools, which are never run.
+const NO_REPLY =
+  "I'd need to look at the page to answer that. Say \"go ahead\" if you'd like me to.";
+
 // How long before a time limit no new step starts, so the one in progress
 // can finish and the turn be saved. A quarter of the limit, if that is less.
 const FINISH_MS = 30_000;
@@ -486,6 +500,8 @@ type Loop = {
   /** Where this round's context starts: null for the whole chat, or a fresh round's brief. */
   from: Msg | null;
   finalText: string;
+  /** The message needs an answer, not browser work: one request, tools off, nothing run. */
+  wordsOnly?: boolean;
 };
 
 type ToolCall = OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
@@ -856,8 +872,10 @@ export class Agent {
       // Only the first completion of the turn gets the discount: if the
       // classification was wrong and the model still emits tool_calls, every
       // completion after that reverts to full reasoning effort as normal.
-      // It also says whether this message resumes the task on record, and
-      // whether the work is about jobs, which is all job checks run on.
+      // It also says whether this message resumes the task on record,
+      // whether it needs an answer in words rather than browser work (a
+      // question about a finished task, say), and whether the work is about
+      // jobs, which is all job checks run on.
       const intent = await classifyIntent(
         task,
         earlier,
@@ -886,7 +904,10 @@ export class Agent {
         watch: tracked && CHECK_IN_EVERY > 0 ? { strikes: 0, trail: [] } : null,
         from: null,
         finalText: "",
+        // Rules mean the user wants work done and watched.
+        wordsOnly: intent.reply && !options.rules,
       };
+      if (loop.wordsOnly) console.log(`[agent] chat=${this.session.id} answering in words, tools off`);
       return await this.drive(
         active,
         budget,
@@ -1277,9 +1298,10 @@ export class Agent {
     rules: string | null,
   ): Promise<TaskState | null> {
     if (!jevEnabled) return null;
-    // Rules for the supervisor mean the user wants this watched, whatever
-    // the message looks like.
-    if (intent.greeting && !rules) return null;
+    // Small talk or a question answered in words leaves the task on record
+    // alone. Rules for the supervisor mean the user wants this watched,
+    // whatever the message looks like.
+    if (intent.reply && !rules) return null;
     let task: TaskState;
     if (recorded && intent.scope === "resume") {
       task = {
@@ -1565,12 +1587,21 @@ export class Agent {
           { role: "system", content: SYSTEM },
           ...this.session.messages.slice(start),
         ];
+        const wordsOnly = Boolean(loop.wordsOnly) && loop.step === 1;
+        if (wordsOnly) {
+          // The user's message is last: this request alone carries the note.
+          const last = messages.at(-1)!;
+          if (last.role === "user" && typeof last.content === "string") {
+            messages[messages.length - 1] = { ...last, content: last.content + REPLY_NOTE };
+          }
+        }
 
         const res = await createCompletion(
           active,
           messages,
           signal,
           loop.step === 1 ? firstEffort : "high",
+          wordsOnly ? "none" : undefined,
         );
 
         usage.input += res.usage?.prompt_tokens ?? 0;
@@ -1578,7 +1609,13 @@ export class Agent {
         usage.cached += res.usage?.prompt_tokens_details?.cached_tokens ?? 0;
 
         // createCompletion never returns without a choice.
-        const msg = res.choices[0]!.message;
+        let msg = res.choices[0]!.message;
+        if (wordsOnly) {
+          // Only the words are kept. A model that calls tools anyway (Ollama
+          // ignores tool_choice) has those calls dropped, never run.
+          const { tool_calls: _dropped, ...words } = msg;
+          msg = { ...words, content: msg.content?.trim() ? msg.content : NO_REPLY };
+        }
 
         this.session.messages.push(msg);
 

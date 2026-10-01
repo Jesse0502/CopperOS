@@ -168,6 +168,17 @@ shortcuts are refused, because they would use your clipboard. `type` and
 | `CHECK_IN_EVERY` | `10` | Steps between check-ins on a tracked task. `0` turns them off in every chat, whatever the Supervisor button says. |
 | `FRESH_CONTEXT_TOKENS` | `25000` | Context size at which a check-in hands the task over to a fresh round. |
 
+### Answers and tasks
+
+With Jev enabled, each message is sorted first: work to do, a question or
+comment the agent can answer from the chat ("how many did you apply to?",
+"why did you skip that one?"), or small talk. The last two get a reply in
+words with the agent's tools switched off. The task on record is left as it
+was, so a follow-up question never starts browsing or replaces the task. A
+message that may carry the task on, including a complaint about how it's
+going ("I asked you to colour the rows"), counts as work. If an answer really
+needs a page, the agent says so, and "go ahead" sends it to look.
+
 ### Check-ins
 
 With Jev enabled and the supervisor on, a long task doesn't run unsupervised.

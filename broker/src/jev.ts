@@ -394,6 +394,12 @@ export type Intent = {
   /** Small talk with nothing to do, on a confident verdict only. */
   greeting: boolean;
   /**
+   * Nothing to do in the browser: a question or comment the agent answers in
+   * words (or small talk), on a confident verdict only. Always true when
+   * `greeting` is.
+   */
+  reply: boolean;
+  /**
    * How the message relates to the task on record — null when there is none,
    * or when Jev did not answer confidently. Callers must treat null as
    * "leave the task on record alone."
@@ -411,6 +417,15 @@ export type Intent = {
 // "continue" with no context comes back as a near coin-flip (~0.1
 // confidence), and guessing wrong in that direction is the costly one.
 const GREETING_MIN_CONFIDENCE = 0.8;
+// At or above this chance that the message needs no browser work (an answer
+// or small talk), the agent replies in words with its tools off. Wrong one
+// way costs the user a "go ahead"; wrong the other, a task they never asked
+// for — which is what follow-up questions after a finished task kept getting.
+const REPLY_MIN_P = 0.7;
+// ...unless the message may well carry on the task on record: then it is
+// work, however it is put. "What are you doing? I asked you to colour the
+// rows" read as a question (p 0.75) but as resume, at 0.6–0.7 confidence.
+const RESUME_BLOCKS_REPLY_AT = 0.5;
 const SCOPE_MIN_CONFIDENCE = 0.7;
 // Job checks stay on at or above this chance that the work is about jobs.
 // Probed on 19 messages: job tasks — the user's Indeed prompt, Seek and
@@ -428,8 +443,9 @@ const JOBS_MIN_P = 0.5;
  * last few turns of the chat: without it, a follow-up like "continue" after
  * a cancelled task is ambiguous. A low-confidence answer, any error, a
  * timeout, a cancel, or no configured client all fall back to
- * { greeting: false, scope: null, jobs: true } — "treat this as a task,
- * leave the task on record alone, and keep job checks on," the safe default.
+ * { greeting: false, reply: false, scope: null, jobs: true } — "treat this
+ * as a task, leave the task on record alone, and keep job checks on," the
+ * safe default.
  */
 export async function classifyIntent(
   text: string,
@@ -438,14 +454,16 @@ export async function classifyIntent(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<Intent> {
-  const fallback: Intent = { greeting: false, scope: null, jobs: true };
+  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true };
   if (!client) return fallback;
   const started = Date.now();
   try {
     const intent = choice(
-      'Given the earlier turns of this chat, is the latest message a browser task to carry out — including a follow-up like "continue" or "yes, go ahead" that picks an earlier task back up — or just a greeting, thanks, farewell, or other small talk with nothing to do?',
+      "Given the earlier turns of this chat, does the latest message ask the browser agent for work to do, for an answer in words about what it already did or found, or is it just small talk?",
       {
-        task: "Asks for, describes, or resumes something to do in the browser — navigate, find, fill out, buy, check, or carry on with an earlier task.",
+        task: 'Asks for something to be done — in the browser (open, find or look up something on a page, fill out, buy, post, check) or in the agent\'s memory (remember a fact) — or to carry on with an earlier task: "continue", "yes, go ahead", an answer to a question the agent asked so it can go on, or a correction of, or complaint about, how it is doing the work, which asks for it to be done right.',
+        answer:
+          "A question or comment about the work so far — what the agent did or found, how many, which ones, why it made a choice, what it means — that it can answer in words without opening or reading any page. It asks for no more work, outright or implied: not a complaint that the work is being done wrong.",
         greeting:
           "A greeting, thanks, farewell, or other small talk with no browser action implied.",
       },
@@ -482,18 +500,24 @@ export async function classifyIntent(
     if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul") {
       throw new Error("unexpected answer shape");
     }
+    const pReply = (i.probabilities.answer ?? 0) + (i.probabilities.greeting ?? 0);
+    const pResume = s?.probabilities.resume ?? 0;
+    const greeting = i.choice === "greeting" && i.confidence >= GREETING_MIN_CONFIDENCE;
     console.log(
       `[jev] chat=${chatId} intent=${i.choice} confidence=${i.confidence.toFixed(2)} ` +
+        `p(reply)=${pReply.toFixed(2)} ` +
+        (s ? `p(resume)=${pResume.toFixed(2)} ` : "") +
         (s ? `scope=${s.choice} confidence=${s.confidence.toFixed(2)} ` : "") +
         `jobs=${j.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
     );
+    const onTask =
+      s && s.confidence >= SCOPE_MIN_CONFIDENCE
+        ? (s.choice as NonNullable<Intent["scope"]>)
+        : null;
     return {
-      greeting:
-        i.choice === "greeting" && i.confidence >= GREETING_MIN_CONFIDENCE,
-      scope:
-        s && s.confidence >= SCOPE_MIN_CONFIDENCE
-          ? (s.choice as NonNullable<Intent["scope"]>)
-          : null,
+      greeting,
+      reply: (greeting || pReply >= REPLY_MIN_P) && pResume < RESUME_BLOCKS_REPLY_AT,
+      scope: onTask,
       jobs: j.noul >= JOBS_MIN_P,
     };
   } catch (err) {
