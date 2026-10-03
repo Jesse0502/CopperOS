@@ -6,7 +6,7 @@
 //                        relay λ ──async──► agent λ (up to 15 min)
 //                            │                 │
 //                            ▼                 ▼
-//                  DynamoDB tables · S3 transcripts · KMS for users' API keys
+//                  DynamoDB tables · S3 transcripts · Parameter Store keys
 //
 // Sign-in is Cognito's hosted page: email one-time codes sent through SES
 // from the verified domain, and Google once `google` is switched on. The
@@ -16,7 +16,10 @@
 import { readFileSync } from "node:fs";
 import path from "node:path";
 import {
+  CfnDynamicReference,
+  CfnDynamicReferenceService,
   CfnOutput,
+  CfnParameter,
   Duration,
   RemovalPolicy,
   SecretValue,
@@ -31,7 +34,6 @@ import { SnsAction } from "aws-cdk-lib/aws-cloudwatch-actions";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import * as dynamodb from "aws-cdk-lib/aws-dynamodb";
 import * as iam from "aws-cdk-lib/aws-iam";
-import * as kms from "aws-cdk-lib/aws-kms";
 import * as lambda from "aws-cdk-lib/aws-lambda";
 import * as nodejs from "aws-cdk-lib/aws-lambda-nodejs";
 import * as logs from "aws-cdk-lib/aws-logs";
@@ -47,7 +49,7 @@ const SIGN_IN = path.resolve(import.meta.dirname, "../sign-in");
 
 export type CopperStackProps = StackProps & {
   stage: string;
-  /** Offer "Continue with Google" — needs the copperos/google-oauth secret. */
+  /** Offer "Continue with Google": needs the /copperos/google-oauth/ parameters. */
   google: boolean;
   /** The Chrome Web Store extension id: its chromiumapp.org URL is where sign-in returns. */
   extensionId: string;
@@ -102,11 +104,25 @@ export class CopperStack extends Stack {
 
     let google: cognito.UserPoolIdentityProviderGoogle | null = null;
     if (props.google) {
-      const oauth = "copperos/google-oauth";
+      // Both live in Parameter Store, which is free, where a Secrets Manager
+      // secret is $0.40 a month. The client id is public (it is in every
+      // sign-in URL), so CloudFormation reads it from a plain parameter. The
+      // secret is a SecureString, which CloudFormation cannot hand to Cognito,
+      // so the deploy passes it in as a NoEcho parameter: masked everywhere,
+      // never in the template, and reused by later deploys. Created by hand:
+      //   aws ssm put-parameter --name /copperos/google-oauth/client-id --type String --value …
+      //   aws ssm put-parameter --name /copperos/google-oauth/client-secret --type SecureString --value …
+      // and passed once per stage, on its first deploy with this parameter:
+      //   npx cdk deploy … --parameters GoogleClientSecret="$(aws ssm get-parameter --name /copperos/google-oauth/client-secret --with-decryption --query Parameter.Value --output text --profile jassydev)"
+      const clientSecret = new CfnParameter(this, "GoogleClientSecret", {
+        type: "String",
+        noEcho: true,
+        description: "The Google OAuth client secret, from /copperos/google-oauth/client-secret",
+      });
       google = new cognito.UserPoolIdentityProviderGoogle(this, "Google", {
         userPool: users,
-        clientId: SecretValue.secretsManager(oauth, { jsonField: "client_id" }).unsafeUnwrap(),
-        clientSecretValue: SecretValue.secretsManager(oauth, { jsonField: "client_secret" }),
+        clientId: new CfnDynamicReference(CfnDynamicReferenceService.SSM, "/copperos/google-oauth/client-id").toString(),
+        clientSecretValue: SecretValue.cfnParameter(clientSecret),
         scopes: ["openid", "email", "profile"],
         attributeMapping: { email: cognito.ProviderAttribute.GOOGLE_EMAIL },
       });
@@ -202,16 +218,12 @@ export class CopperStack extends Stack {
       autoDeleteObjects: !prod,
     });
 
-    // Encrypts the LLM API keys users bring; the key itself never leaves KMS.
-    const userKeys = new kms.Key(this, "UserKeys", {
-      alias: name("user-keys"),
-      enableKeyRotation: true,
-      removalPolicy,
-    });
-
     // Created by hand (a SecureString cannot come from CloudFormation):
     //   aws ssm put-parameter --name /copperos/<stage>/jev-api-key --type SecureString --value …
+    //   aws ssm put-parameter --name /copperos/<stage>/user-keys-secret --type SecureString --value "$(openssl rand -base64 32)"
+    // The second seals the LLM API keys users bring (broker/src/store/cloud.ts).
     const jevParam = `/copperos/${stage}/jev-api-key`;
+    const userKeysParam = `/copperos/${stage}/user-keys-secret`;
 
     // ── functions ────────────────────────────────────────────────────────
     const fn = (id: string, entry: string, opts: Partial<nodejs.NodejsFunctionProps>) =>
@@ -257,7 +269,7 @@ export class CopperStack extends Stack {
       TASKS_TABLE: tasks.tableName,
       CONNECTIONS_TABLE: connections.tableName,
       TRANSCRIPTS_BUCKET: transcripts.bucketName,
-      USER_KEYS_KEY: userKeys.keyArn,
+      USER_KEYS_PARAM: userKeysParam,
       JEV_PARAM: jevParam,
       // Nobody's Ollama is reachable from here.
       LLM_PROVIDER: "openrouter",
@@ -290,11 +302,12 @@ export class CopperStack extends Stack {
     for (const f of [relayFn, agentFn]) {
       for (const t of [usersTable, memories, chats, tasks, connections]) t.grantReadWriteData(f);
       transcripts.grantReadWrite(f);
-      userKeys.grantEncryptDecrypt(f);
       f.addToRolePolicy(
         new iam.PolicyStatement({
           actions: ["ssm:GetParameter"],
-          resources: [`arn:aws:ssm:${this.region}:${this.account}:parameter${jevParam}`],
+          resources: [jevParam, userKeysParam].map(
+            (p) => `arn:aws:ssm:${this.region}:${this.account}:parameter${p}`,
+          ),
         }),
       );
     }

@@ -512,10 +512,10 @@ worker termination.
 | `broker/src/memory.ts` | Durable cross-chat facts: save, search. |
 | `broker/src/store/store.ts` | The `Store` interface: where chats, memories, task progress and settings are kept, per user. |
 | `broker/src/store/fs.ts` | The local broker's store: files under `storage/`, one user. |
-| `broker/src/store/cloud.ts` | The hosted store: DynamoDB, S3 transcripts, and users' API keys encrypted with KMS. |
+| `broker/src/store/cloud.ts` | The hosted store: DynamoDB, S3 transcripts, and users' API keys sealed (AES-256-GCM) under a key kept in Parameter Store. |
 | `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect (users and task workers), the relay (the hosted `index.ts`), the agent, and `feedback.ts`, which emails "Send a suggestion" from Settings to the team. `testing/` holds a scripted model deployed to dev stacks only. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
-| `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB, S3, KMS, alarms. |
+| `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB, S3, alarms. Secrets live in Parameter Store (free). `-c stage=guard` deploys the account's spending guard: a budget that brakes every CopperOS Lambda when the month's bill passes `spendCap` in cdk.json, plus cost anomaly emails (see `infra/lib/guard-stack.ts`, which also has the release command). |
 
 ## Testing without Chrome
 

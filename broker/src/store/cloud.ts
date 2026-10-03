@@ -1,5 +1,6 @@
 // The hosted version's store: DynamoDB for everything small, S3 for chat
-// transcripts, and KMS for the LLM API keys users bring. Every item is keyed
+// transcripts, and a sealing key in Parameter Store for the LLM API keys users
+// bring (see seal). Every item is keyed
 // by the user's id, so one user's data is never within reach of another's.
 //
 //   Accounts   userId            → currentChatId, config (keys encrypted)
@@ -12,7 +13,7 @@
 // or resumes one, cleared by the agent when it ends. It is how two requests
 // for the same chat can never both start it (see claimRun).
 
-import { DecryptCommand, EncryptCommand, KMSClient } from "@aws-sdk/client-kms";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import {
   DeleteObjectsCommand,
   GetObjectCommand,
@@ -30,6 +31,7 @@ import {
   QueryCommand,
   UpdateCommand,
 } from "@aws-sdk/lib-dynamodb";
+import { GetParameterCommand, SSMClient } from "@aws-sdk/client-ssm";
 import type { PendingRequest } from "../bridge.js";
 import type { LLMConfig } from "../config.js";
 import type { TaskState } from "../progress.js";
@@ -40,7 +42,7 @@ const db = DynamoDBDocumentClient.from(new DynamoDBClient({}), {
   marshallOptions: { removeUndefinedValues: true },
 });
 const s3 = new S3Client({});
-const kms = new KMSClient({});
+const ssm = new SSMClient({});
 
 const env = (name: string): string => {
   const value = process.env[name];
@@ -53,8 +55,54 @@ const T = {
   memories: () => env("MEMORIES_TABLE"),
   tasks: () => env("TASKS_TABLE"),
   bucket: () => env("TRANSCRIPTS_BUCKET"),
-  userKeys: () => env("USER_KEYS_KEY"),
+  userKeys: () => env("USER_KEYS_PARAM"),
 };
+
+// Users' API keys are sealed with AES-256-GCM under a 32-byte key kept as a
+// SecureString in Parameter Store, which is free; a KMS key was $1 a month
+// per stage. The user's id and the provider are bound in as associated data,
+// as KMS's encryption context bound them, so a sealed key copied to another
+// user or provider will not open. Create the key once per stage:
+//   aws ssm put-parameter --name /copperos/<stage>/user-keys-secret --type SecureString --value "$(openssl rand -base64 32)"
+const SEALED = "gcm:";
+let sealingKey: Promise<Buffer> | null = null;
+
+function userKeysKey(): Promise<Buffer> {
+  if (!sealingKey) {
+    sealingKey = ssm
+      .send(new GetParameterCommand({ Name: T.userKeys(), WithDecryption: true }))
+      .then((res) => {
+        const key = Buffer.from(res.Parameter?.Value ?? "", "base64");
+        if (key.length !== 32) throw new Error(`${T.userKeys()} must hold 32 random bytes, base64`);
+        return key;
+      });
+    // A failed fetch is tried again on the next call, not remembered.
+    sealingKey.catch(() => (sealingKey = null));
+  }
+  return sealingKey;
+}
+
+function boundTo(userId: string, provider: string): Buffer {
+  return Buffer.from(`${userId}\n${provider}`, "utf8");
+}
+
+export async function seal(plain: string, userId: string, provider: string): Promise<string> {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", await userKeysKey(), iv);
+  cipher.setAAD(boundTo(userId, provider));
+  const body = Buffer.concat([cipher.update(plain, "utf8"), cipher.final()]);
+  return SEALED + Buffer.concat([iv, cipher.getAuthTag(), body]).toString("base64");
+}
+
+/** The key `sealed` holds, or null if it was sealed by the KMS key this replaced and cannot be opened. */
+export async function open(sealed: string, userId: string, provider: string): Promise<string | null> {
+  if (!sealed.startsWith(SEALED)) return null;
+  const raw = Buffer.from(sealed.slice(SEALED.length), "base64");
+  const decipher = createDecipheriv("aes-256-gcm", await userKeysKey(), raw.subarray(0, 12));
+  decipher.setAAD(boundTo(userId, provider));
+  decipher.setAuthTag(raw.subarray(12, 28));
+  return Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString("utf8");
+}
 
 /**
  * A task under way in a chat. `until` is when a run nobody ended counts as
@@ -328,13 +376,13 @@ export class CloudStore implements Store {
       const cipher = config[p]?.apiKeyCipher;
       if (!cipher) continue;
       delete config[p].apiKeyCipher;
-      const out = await kms.send(
-        new DecryptCommand({
-          CiphertextBlob: Buffer.from(cipher, "base64"),
-          EncryptionContext: { userId, provider: p },
-        }),
-      );
-      config[p].apiKey = Buffer.from(out.Plaintext!).toString("utf8");
+      const key = await open(cipher, userId, p);
+      // Saved under the old KMS key: as if never saved, so Settings asks again.
+      if (key === null) {
+        console.warn(`[store] ${p} key for ${userId} predates the sealing key; it must be entered again`);
+        continue;
+      }
+      config[p].apiKey = key;
     }
     return config;
   }
@@ -346,14 +394,7 @@ export class CloudStore implements Store {
       const key = stored[p]?.apiKey;
       delete stored[p].apiKey;
       if (!key) continue;
-      const out = await kms.send(
-        new EncryptCommand({
-          KeyId: T.userKeys(),
-          Plaintext: Buffer.from(key, "utf8"),
-          EncryptionContext: { userId, provider: p },
-        }),
-      );
-      stored[p].apiKeyCipher = Buffer.from(out.CiphertextBlob!).toString("base64");
+      stored[p].apiKeyCipher = await seal(key, userId, p);
     }
     await db.send(
       new UpdateCommand({
