@@ -7,6 +7,7 @@
     "emailDomain": "copper.jassydev.com",
     "emailSignIn": "dev",
     "alertEmail": "hello@jassydev.com",
+    "spendCap": "10",
     "feedbackEmail": "hello@jassydev.com",
     "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false,
     "testModel": true,
