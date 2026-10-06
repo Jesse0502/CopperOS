@@ -893,7 +893,7 @@ function closeHistory() {
 
 const PROVIDERS = ["ollama", "openai", "openrouter"];
 // Someone setting up OpenRouter for the first time starts on this model.
-const OPENROUTER_FIRST_MODEL = "z-ai/glm-4.5-air";
+const OPENROUTER_FIRST_MODEL = "deepseek/deepseek-v4.1-flash";
 let askBeforeShown = null; // what "Ask before" said when Settings opened
 
 function providerBlocks(provider) {
