@@ -59,6 +59,51 @@ export function memoryId(m: MemoryMeta): string {
   return `${m.topic}/${m.slug}`;
 }
 
+// ── the panel's Memories page ─────────────────────────────────────────────
+
+/** One memory as the Memories page shows it; `key` is what deleting it takes. */
+export type MemoryView = { key: string; topic: string; title: string; content: string; updated: string };
+
+// Where the facts people type on the Memories page go.
+const ADDED_TOPIC = "user/notes";
+const ADDED_MAX = 1000;
+const TITLE_MAX = 60;
+
+/** Every saved memory, newest first. */
+export async function memoriesForPage(userId: string): Promise<MemoryView[]> {
+  return (await allMemories(userId))
+    .map((m) => ({ key: memoryId(m), topic: m.topic, title: m.title, content: m.content, updated: m.updated }))
+    .sort((a, b) => b.updated.localeCompare(a.updated));
+}
+
+/**
+ * Saves something the user typed on the Memories page. It skips Jev's
+ * is-this-worth-keeping check (see the remember tool): the user asked for it
+ * to be kept. Titled by its opening words, with a number added if that title
+ * is taken, so a new fact never overwrites an old one.
+ */
+export async function addUserMemory(userId: string, text: string): Promise<MemoryMeta> {
+  const content = text.trim().replace(/\s+/g, " ");
+  if (!content) throw new Error("Type something to remember first.");
+  if (content.length > ADDED_MAX) throw new Error(`Keep it under ${ADDED_MAX} characters.`);
+  const opening = content.split(/(?<=[.!?])\s/)[0];
+  const base =
+    opening.length <= TITLE_MAX
+      ? opening.replace(/[.!?]$/, "")
+      : `${opening.slice(0, TITLE_MAX).replace(/\s+\S*$/, "")}…`;
+  let title = base;
+  for (let n = 2; await store().getMemory(userId, ADDED_TOPIC, slugify(title)); n++) title = `${base} (${n})`;
+  return saveMemory(userId, ADDED_TOPIC, title, content);
+}
+
+/** Removes the memory with this `key` (from memoriesForPage). */
+export async function deleteMemoryByKey(userId: string, key: string): Promise<void> {
+  const cut = key.lastIndexOf("/");
+  if (cut <= 0) throw new Error("That is not a saved memory.");
+  // The key comes from the page: made safe the same way saving made it.
+  await store().deleteMemory(userId, sanitizeTopic(key.slice(0, cut)), sanitizeSegment(key.slice(cut + 1)));
+}
+
 /**
  * Every memory last written before `cutoff` (an ISO time) — what tools.ts's
  * grounding check may count as something the user told us. A memory saved

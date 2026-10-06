@@ -17,6 +17,7 @@ import { Agent, listChats } from "../agent.js";
 import { requestChatId, requestMessage, type AskOutcome } from "../bridge.js";
 import { getConfig, initConfig, listModels, setConfig, type LLMConfig, type Provider } from "../config.js";
 import { setCurrent, type ApprovalMode } from "../session.js";
+import { addUserMemory, deleteMemoryByKey, memoriesForPage } from "../memory.js";
 import { taskExtras } from "../task-extras.js";
 import { busy, CloudStore, deleteUserData, type ChatItem } from "../store/cloud.js";
 import { useStore } from "../store/store.js";
@@ -213,6 +214,23 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
         return;
       }
       await (await Agent.forChat(userId, msg.chatId)).setSupervisor(on);
+      return;
+    }
+
+    case "list_memories":
+    case "add_memory":
+    case "delete_memory": {
+      try {
+        if (msg.type === "add_memory") await addUserMemory(userId, String(msg.text ?? ""));
+        if (msg.type === "delete_memory") await deleteMemoryByKey(userId, String(msg.key ?? ""));
+        await reply({
+          type: "memories",
+          memories: await memoriesForPage(userId),
+          ...(msg.type !== "list_memories" ? { done: msg.type } : {}),
+        });
+      } catch (err) {
+        await reply({ type: "memories", error: String((err as Error)?.message ?? err) });
+      }
       return;
     }
 

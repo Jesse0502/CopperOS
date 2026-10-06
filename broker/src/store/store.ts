@@ -65,6 +65,8 @@ export interface Store {
   listMemories(userId: string): Promise<MemoryRecord[]>;
   getMemory(userId: string, topic: string, slug: string): Promise<MemoryRecord | null>;
   putMemory(userId: string, memory: MemoryRecord): Promise<void>;
+  /** Removes one memory; one that is already gone is not an error. */
+  deleteMemory(userId: string, topic: string, slug: string): Promise<void>;
 
   loadTask(userId: string, chatId: string): Promise<TaskState | null>;
   saveTask(userId: string, chatId: string, task: TaskState): Promise<void>;

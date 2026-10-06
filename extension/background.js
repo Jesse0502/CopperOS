@@ -913,6 +913,11 @@ function wire(sock) {
       broadcastToPanels({ type: "config", config: msg.config });
       return;
     }
+    // Saved memories, in answer to listing, adding or deleting one.
+    if (msg.type === "memories") {
+      broadcastToPanels({ type: "memories", memories: msg.memories, error: msg.error, done: msg.done });
+      return;
+    }
     // Model list for one provider, sent in answer to a "list_models" request.
     if (msg.type === "models") {
       broadcastToPanels({ type: "models", provider: msg.provider, models: msg.models, error: msg.error });
@@ -1130,6 +1135,9 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg.type === "cancel") send({ type: "cancel", chatId: session.chatId });
     if (msg.type === "reset") send({ type: "reset" });
     if (msg.type === "chats") send({ type: "list_chats" });
+    if (msg.type === "list_memories") send({ type: "list_memories" });
+    if (msg.type === "add_memory" && typeof msg.text === "string") send({ type: "add_memory", text: msg.text });
+    if (msg.type === "delete_memory" && typeof msg.key === "string") send({ type: "delete_memory", key: msg.key });
     if (msg.type === "switch_chat" && msg.id) send({ type: "switch_chat", id: msg.id });
     if (msg.type === "get_config") send({ type: "get_config" });
     if (msg.type === "set_config" && msg.patch) send({ type: "set_config", patch: msg.patch });

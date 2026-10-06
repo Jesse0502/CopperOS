@@ -10,6 +10,7 @@
 // Every op is a request/response pair with an id; unsolicited traffic (tasks
 // from the panel, approvals) is typed instead.
 
+import type { MemoryView } from "./memory.js";
 import type { LLMConfig, Provider } from "./config.js";
 import type { TaskExtras } from "./task-extras.js";
 
@@ -48,6 +49,10 @@ export type BridgeHandlers = {
   onApproval: (requestId: string, approved: boolean) => void;
   /** The person answered (or closed) a question form shown with show(). */
   onAnswers: (requestId: string, outcome: AskOutcome) => void;
+  /** The Memories page: every saved memory, and adding or deleting one. Each answers with the list as it now is. */
+  onListMemories: () => Promise<MemoryView[]>;
+  onAddMemory: (text: string) => Promise<MemoryView[]>;
+  onDeleteMemory: (key: string) => Promise<MemoryView[]>;
   /** The Settings page wants the current LLM provider/model/key config. */
   onGetConfig: () => LLMConfig | Promise<LLMConfig>;
   /** The Settings page changed something — merge and persist it. */

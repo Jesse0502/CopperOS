@@ -14,6 +14,7 @@ import {
 } from "./bridge.js";
 import { Agent, activeModelLabel, formatUsage, listChats, type RunResult } from "./agent.js";
 import { listSessions, setCurrent, type ApprovalMode } from "./session.js";
+import { addUserMemory, deleteMemoryByKey, memoriesForPage } from "./memory.js";
 import { initConfig, getConfig, setConfig, listModels, type Provider } from "./config.js";
 import { LOCAL_USER, useStore } from "./store/store.js";
 import { FsStore } from "./store/fs.js";
@@ -261,6 +262,9 @@ server.start(PORT, {
   },
   onApproval: (requestId, approved) => answer(requestId, approved ? "approved" : "denied"),
   onAnswers: (requestId, outcome) => answer(requestId, outcome),
+  onListMemories: () => memoriesForPage(USER),
+  onAddMemory: async (text) => (await addUserMemory(USER, text), memoriesForPage(USER)),
+  onDeleteMemory: async (key) => (await deleteMemoryByKey(USER, key), memoriesForPage(USER)),
   onGetConfig: () => getConfig(USER),
   onSetConfig: (patch) => setConfig(USER, patch as Parameters<typeof setConfig>[1]),
   onListModels: (provider) => listModels(USER, provider),

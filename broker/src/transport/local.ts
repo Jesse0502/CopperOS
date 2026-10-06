@@ -165,6 +165,24 @@ export class LocalServer implements Transport {
       handlers.onAnswers(msg.id, outcome);
       return;
     }
+    if (msg.type === "list_memories" || msg.type === "add_memory" || msg.type === "delete_memory") {
+      void (async () => {
+        let reply: Record<string, unknown>;
+        try {
+          const memories =
+            msg.type === "add_memory"
+              ? await handlers.onAddMemory(String(msg.text ?? ""))
+              : msg.type === "delete_memory"
+                ? await handlers.onDeleteMemory(String(msg.key ?? ""))
+                : await handlers.onListMemories();
+          reply = { type: "memories", memories, ...(msg.type !== "list_memories" ? { done: msg.type } : {}) };
+        } catch (err) {
+          reply = { type: "memories", error: String((err as Error)?.message ?? err) };
+        }
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(reply));
+      })();
+      return;
+    }
     if (msg.type === "get_config") {
       void (async () => {
         const config = await handlers.onGetConfig();

@@ -11,7 +11,7 @@
 // mid-write leaves the previous version intact rather than a truncated file
 // that fails to parse on the next start.
 
-import { mkdir, readdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import type { LLMConfig } from "../config.js";
 import type { TaskState } from "../progress.js";
@@ -141,6 +141,10 @@ export class FsStore implements Store {
   putMemory(userId: string, memory: MemoryRecord): Promise<void> {
     const file = path.join(this.root(userId), "memories", memory.topic, `${memory.slug}.md`);
     return writeAtomic(file, toMemoryFile(memory));
+  }
+
+  deleteMemory(userId: string, topic: string, slug: string): Promise<void> {
+    return rm(path.join(this.root(userId), "memories", topic, `${slug}.md`), { force: true });
   }
 
   private taskFile(userId: string, chatId: string): string {

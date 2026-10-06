@@ -18,6 +18,9 @@ let running = false;
 let watching = false;
 let historyOpen = false;
 let settingsOpen = false;
+let memoriesOpen = false;
+let lastMemories = null; // the last "memories" list from the broker, shown at once on reopening
+let memoriesTimer = null; // a request the broker has not answered yet
 let currentConfig = null; // last "config" message from the broker
 let awaitingSave = false; // true between clicking Save and its "config" echo
 let viewedChatId = null;
@@ -865,6 +868,7 @@ function renderChats(chats) {
 function openHistory() {
   historyOpen = true;
   closeSettings();
+  closeMemories();
   $("history-page").classList.add("on");
   const list = $("history-list");
   const cached = lastChats.filter((c) => c.taskCount > 0).length > 0;
@@ -976,6 +980,7 @@ function openSettings() {
   awaitingSave = false;
   setBusy($("settings-save"), false);
   closeHistory();
+  closeMemories();
   $("settings-page").classList.add("on");
   setSettingsStatus("");
   askBeforeShown = approvalDefault ?? "submits";
@@ -1140,6 +1145,167 @@ $("copy-cmd").addEventListener("click", async () => {
   }, 1500);
 });
 
+// ── saved memories ───────────────────────────────────────────────────────
+
+// Topic paths the model picks ("user/job-search") as headings people read.
+const TOPIC_NAMES = { notes: "Added by you", answers: "Your answers to questions" };
+
+function topicName(topic) {
+  const rest = topic.replace(/^user\//, "").split("/").map((p) => p.replace(/-/g, " ")).join(" · ");
+  return TOPIC_NAMES[rest] ?? rest.charAt(0).toUpperCase() + rest.slice(1);
+}
+
+// A broker from before the Memories page never answers: say so rather than spin.
+const MEMORIES_TIMEOUT_MS = 10_000;
+
+function askMemories(msg) {
+  port.postMessage(msg);
+  clearTimeout(memoriesTimer);
+  memoriesTimer = setTimeout(() => {
+    memoriesResult({
+      error:
+        backend === "local"
+          ? "No answer from the broker on this computer. It may need updating: git pull in browsercontrol, then restart it."
+          : "No answer from CopperOS. Try again in a moment.",
+    });
+  }, MEMORIES_TIMEOUT_MS);
+}
+
+function setMemoryStatus(text, tone = "") {
+  const el = $("memory-status");
+  el.textContent = text;
+  el.className = `help${tone ? ` ${tone}` : ""}`;
+}
+
+function openMemories() {
+  memoriesOpen = true;
+  closeSettings();
+  closeHistory();
+  $("memories-page").classList.add("on");
+  setMemoryStatus("");
+  const list = $("memory-list");
+  if (lastMemories) renderMemories(lastMemories);
+  if (!connected) {
+    if (!lastMemories) list.innerHTML = '<div id="memory-loading">Not connected — can’t load memories.</div>';
+    return;
+  }
+  if (!lastMemories) list.innerHTML = '<div id="memory-loading"><span class="spinner"></span>Loading…</div>';
+  $("memories-refresh").hidden = !lastMemories;
+  askMemories({ type: "list_memories" });
+}
+
+function closeMemories() {
+  memoriesOpen = false;
+  $("memories-page").classList.remove("on");
+  $("memories-refresh").hidden = true;
+}
+
+/** Grouped by topic, the user's own first, then the most recently changed. */
+function renderMemories(memories) {
+  const list = $("memory-list");
+  list.innerHTML = "";
+  if (memories.length === 0) {
+    const empty = document.createElement("div");
+    empty.id = "memory-empty";
+    empty.textContent = "Nothing saved yet. CopperOS saves facts it learns as it works, like your answers to form questions, and you can add your own above.";
+    list.appendChild(empty);
+    return;
+  }
+  const groups = new Map();
+  for (const m of memories) {
+    if (!groups.has(m.topic)) groups.set(m.topic, []);
+    groups.get(m.topic).push(m);
+  }
+  const order = [...groups.keys()].sort((a, b) =>
+    (b === "user/notes") - (a === "user/notes") || groups.get(b)[0].updated.localeCompare(groups.get(a)[0].updated));
+  for (const topic of order) {
+    const head = document.createElement("div");
+    head.className = "mgroup";
+    head.textContent = topicName(topic);
+    list.appendChild(head);
+    for (const m of groups.get(topic)) list.appendChild(memoryItem(m));
+  }
+}
+
+function memoryItem(m) {
+  const item = document.createElement("div");
+  item.className = "mitem";
+  const title = document.createElement("div");
+  title.className = "t";
+  title.textContent = m.title;
+  const content = document.createElement("div");
+  content.className = "c";
+  content.textContent = m.content;
+  content.title = "Show all";
+  content.addEventListener("click", () => content.classList.toggle("open"));
+  const meta = document.createElement("div");
+  meta.className = "mt";
+  const when = document.createElement("span");
+  const date = new Date(m.updated);
+  when.textContent = isNaN(date) ? "" : `Saved ${date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}`;
+  // Two clicks: "Delete", then "Delete for good?" within a few seconds.
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "link danger";
+  del.textContent = "Delete";
+  let armed = null;
+  del.addEventListener("click", () => {
+    if (!armed) {
+      del.textContent = "Delete for good?";
+      armed = setTimeout(() => {
+        armed = null;
+        del.textContent = "Delete";
+      }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    setBusy(del, true);
+    askMemories({ type: "delete_memory", key: m.key });
+  });
+  meta.append(when, del);
+  // A one-sentence memory is its own title: no need to say it twice.
+  const same = m.content.trim().replace(/[.!?]$/, "") === m.title;
+  item.append(title, ...(same ? [] : [content]), meta);
+  return item;
+}
+
+function memoriesResult(msg) {
+  clearTimeout(memoriesTimer);
+  $("memories-refresh").hidden = true;
+  setBusy($("memory-save"), false);
+  if (msg.error) {
+    // A list that failed to load still needs something in its place.
+    if (!lastMemories) $("memory-list").innerHTML = "";
+    setMemoryStatus(msg.error, "err");
+    if (lastMemories && memoriesOpen) renderMemories(lastMemories);
+    $("memory-save").disabled = !$("memory-text").value.trim();
+    return;
+  }
+  lastMemories = msg.memories ?? [];
+  if (msg.done === "add_memory") {
+    $("memory-text").value = "";
+    setMemoryStatus("Saved.");
+  } else if (msg.done === "delete_memory") {
+    setMemoryStatus("Deleted.");
+  }
+  $("memory-save").disabled = !$("memory-text").value.trim();
+  if (memoriesOpen) renderMemories(lastMemories);
+}
+
+$("memories").addEventListener("click", openMemories);
+$("memories-close").addEventListener("click", closeMemories);
+$("memory-text").addEventListener("input", () => {
+  $("memory-save").disabled = !$("memory-text").value.trim();
+  if ($("memory-status").textContent) setMemoryStatus("");
+});
+$("memory-save").addEventListener("click", () => {
+  const text = $("memory-text").value.trim();
+  if (!text || !connected) return;
+  setMemoryStatus("");
+  setBusy($("memory-save"), true);
+  askMemories({ type: "add_memory", text });
+});
+
 // ── suggestions ──────────────────────────────────────────────────────────
 
 function openSuggest() {
@@ -1235,7 +1401,10 @@ port.onMessage.addListener((msg) => {
       connected = msg.connected;
       if ("backend" in msg) {
         // Another broker's chats: its settings are not this one's.
-        if (msg.backend !== backend) currentConfig = null;
+        if (msg.backend !== backend) {
+          currentConfig = null;
+          lastMemories = null;
+        }
         backend = msg.backend;
       }
       if ("account" in msg) account = msg.account;
@@ -1282,6 +1451,10 @@ port.onMessage.addListener((msg) => {
       lastChats = msg.chats ?? [];
       $("history-refresh").hidden = true;
       if (historyOpen) renderChats(lastChats);
+      break;
+
+    case "memories":
+      memoriesResult(msg);
       break;
 
     case "config":
@@ -1412,6 +1585,7 @@ $("history-close").addEventListener("click", closeHistory);
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("suggest").hidden) closeSuggest();
+  else if (memoriesOpen) closeMemories();
   else if (settingsOpen) closeSettings();
   else if (historyOpen) closeHistory();
 });

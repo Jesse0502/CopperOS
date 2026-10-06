@@ -350,6 +350,10 @@ export class CloudStore implements Store {
     );
   }
 
+  async deleteMemory(userId: string, topic: string, slug: string): Promise<void> {
+    await db.send(new DeleteCommand({ TableName: T.memories(), Key: { userId, key: `${topic}/${slug}` } }));
+  }
+
   async loadTask(userId: string, chatId: string): Promise<TaskState | null> {
     const res = await db.send(new GetCommand({ TableName: T.tasks(), Key: { userId, chatId } }));
     return (res.Item?.state as TaskState | undefined) ?? null;
