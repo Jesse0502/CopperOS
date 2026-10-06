@@ -167,9 +167,12 @@ export async function save(userId: string, session: Session): Promise<void> {
   await store().setCurrentChat(userId, session.id);
 }
 
+/** A chat that was never saved: a new one, or one that is gone. Any other load failure is not this. */
+export class ChatNotFound extends Error {}
+
 async function loadById(userId: string, id: string, model: string): Promise<Session> {
   const raw = (await store().loadChat(userId, id)) as Session | null;
-  if (!raw) throw new Error(`no saved chat ${id}`);
+  if (!raw) throw new ChatNotFound(`no saved chat ${id}`);
   return {
     ...blank(model),
     ...raw,

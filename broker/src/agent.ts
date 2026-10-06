@@ -67,6 +67,7 @@ import {
 import { splitTaskMessage, taskMessage, type TaskExtras } from "./task-extras.js";
 import {
   blank,
+  ChatNotFound,
   listSessions,
   loadCurrent,
   loadSession,
@@ -710,16 +711,51 @@ function pruneHistory(messages: Msg[]): Msg[] {
 }
 
 /**
- * Drop whole turns off the front until the transcript fits the budget.
+ * Fit the transcript to the budget without losing the conversation.
  *
- * The cut has to land on a user message. Every other boundary risks splitting
- * an assistant message from the tool results its tool_calls demand, which the
- * API rejects — and tool results are role "tool" here, so a "user" message is
- * always the start of a turn. Not a check-in's, though: those fall mid-turn,
- * and cutting there would drop the message that set the task.
+ * Earlier turns are compacted first, oldest first (see compactTurn): each
+ * keeps what the user said and what the agent answered, and loses the page
+ * steps in between, which are what fill the budget and which a follow-up like
+ * "how many did you apply to?" never needs. Only if the compacted chat is
+ * still too big are whole turns dropped off the front. Dropping came first
+ * before: one long task pushed every earlier turn out (for good, since the
+ * result is saved), and the agent met a follow-up as if the chat had just
+ * begun, saying it could not recall the last task.
+ *
+ * The turn in progress is never touched, however big it got, and keeps its
+ * message identity: a fresh round's `from` must still be found in it.
  */
 function trimTurns(history: Msg[], budget: number): Msg[] {
-  const starts = history.reduce<number[]>(
+  const fits = (msgs: Msg[]) => JSON.stringify(msgs).length <= budget;
+  if (fits(history)) return history;
+  const starts = turnStarts(history);
+  if (starts.length < 2) return history;
+  const head = history.slice(0, starts[0]);
+  const turns = starts.map((s, i) => history.slice(s, starts[i + 1] ?? history.length));
+
+  let out = history;
+  for (let t = 0; t < turns.length - 1; t++) {
+    turns[t] = compactTurn(turns[t]);
+    out = [...head, ...turns.flat()];
+    if (fits(out)) return out;
+  }
+  for (let cut = 1; cut < turns.length; cut++) {
+    out = turns.slice(cut).flat();
+    if (fits(out)) break;
+  }
+  return out;
+}
+
+/**
+ * Where each turn starts. A cut has to land on a user message: every other
+ * boundary risks splitting an assistant message from the tool results its
+ * tool_calls demand, which the API rejects, and tool results are role "tool"
+ * here, so a "user" message always starts a turn. Not a check-in's, though:
+ * those fall mid-turn, and cutting there would drop the message that set the
+ * task.
+ */
+function turnStarts(history: Msg[]): number[] {
+  return history.reduce<number[]>(
     (acc, m, i) =>
       m.role === "user" &&
       !(typeof m.content === "string" && isSupervisorNote(m.content))
@@ -727,11 +763,31 @@ function trimTurns(history: Msg[], budget: number): Msg[] {
         : acc,
     [],
   );
-  let out = history;
-  // Never drop the turn in progress, however big it got.
-  for (let cut = 1; cut < starts.length; cut++) {
-    if (JSON.stringify(out).length <= budget) break;
-    out = history.slice(starts[cut]);
+}
+
+/**
+ * A finished turn as the conversation it was: the user's messages and the
+ * agent's words, without the tool calls, page snapshots and check-ins in
+ * between. The calls go with their results, so what is left is still a valid
+ * request; the agent's words are joined into one message, since some
+ * providers refuse two assistant messages in a row.
+ */
+function compactTurn(turn: Msg[]): Msg[] {
+  const out: Msg[] = [];
+  for (const [i, m] of turn.entries()) {
+    if (m.role === "user") {
+      if (typeof m.content === "string" && isSupervisorNote(m.content)) continue;
+      out.push(m);
+    } else if (m.role === "assistant" && !answersCheckIn(turn, i)) {
+      const text = typeof m.content === "string" ? m.content.trim() : "";
+      if (!text) continue;
+      const prev = out.at(-1);
+      if (prev?.role === "assistant") {
+        out[out.length - 1] = { role: "assistant", content: `${prev.content as string}\n\n${text}` };
+      } else {
+        out.push(m.tool_calls?.length ? { role: "assistant", content: text } : m);
+      }
+    }
   }
   return out;
 }
@@ -774,12 +830,18 @@ export class Agent {
     return new Agent(userId, await loadCurrent(userId, activeLabel(getConfig(userId))));
   }
 
-  /** A specific past chat by id. Falls back to a blank chat under that same id if it is somehow gone. */
+  /**
+   * A specific past chat by id, or a blank chat under that id if it was never
+   * saved. A chat that is there but cannot be read (a storage hiccup, a
+   * damaged file) throws instead: a blank stand-in would answer as if the
+   * chat had just begun, and its first save would overwrite the history.
+   */
   static async forChat(userId: string, id: string): Promise<Agent> {
     const label = activeLabel(getConfig(userId));
     try {
       return new Agent(userId, await loadSession(userId, id, label));
-    } catch {
+    } catch (err) {
+      if (!(err instanceof ChatNotFound)) throw err;
       return new Agent(userId, { ...blank(label), id });
     }
   }

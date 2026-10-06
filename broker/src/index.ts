@@ -186,7 +186,13 @@ server.start(PORT, {
       // No chatId at all is a defensive fallback (should not happen once the
       // extension has completed its hello handshake) — start somewhere fresh
       // rather than silently dropping the task.
-      const agent = chatId ? await getAgent(chatId) : register(Agent.blank(USER));
+      let agent: Agent;
+      try {
+        agent = chatId ? await getAgent(chatId) : register(Agent.blank(USER));
+      } catch (err) {
+        emit("error", chatId ?? null, `Could not load this chat: ${String((err as Error)?.message ?? err)}`);
+        return;
+      }
       const id = agent.info().id;
       if (runOf(id).busy) {
         emit("error", id, "This chat is already running a task — cancel it, or start/switch to another chat.");
@@ -208,7 +214,7 @@ server.start(PORT, {
       run.busy = false;
       run.task = null;
       console.log(`[cancelled ${chatId}] while waiting on you`);
-    })();
+    })().catch((err) => console.error(`[cancel ${chatId}] ${String(err?.message ?? err)}`));
   },
   onReset: () => {
     void (async () => {
@@ -245,13 +251,13 @@ server.start(PORT, {
       if (!["all", "submits", "none"].includes(mode)) return;
       const agent = await getAgent(chatId);
       await agent.setApprovalMode(mode as ApprovalMode);
-    })();
+    })().catch((err) => emit("error", chatId, `Could not change this chat's setting: ${String(err?.message ?? err)}`));
   },
   onSetSupervisor: (chatId, on) => {
     void (async () => {
       const agent = await getAgent(chatId);
       await agent.setSupervisor(on);
-    })();
+    })().catch((err) => emit("error", chatId, `Could not change this chat's setting: ${String(err?.message ?? err)}`));
   },
   onApproval: (requestId, approved) => answer(requestId, approved ? "approved" : "denied"),
   onAnswers: (requestId, outcome) => answer(requestId, outcome),
@@ -259,7 +265,15 @@ server.start(PORT, {
   onSetConfig: (patch) => setConfig(USER, patch as Parameters<typeof setConfig>[1]),
   onListModels: (provider) => listModels(USER, provider),
   onHello: async (chatId) => {
-    const agent = chatId ? await getAgent(chatId) : register(await Agent.resumeLast(USER));
+    let agent: Agent;
+    try {
+      agent = chatId ? await getAgent(chatId) : register(await Agent.resumeLast(USER));
+    } catch (err) {
+      // The chat the extension knew is there but unreadable: open a new one
+      // rather than refuse the connection, and leave the old one untouched.
+      console.error(`[session] could not load chat ${chatId}: ${String((err as Error)?.message ?? err)}`);
+      agent = register(Agent.blank(USER));
+    }
     const id = agent.info().id;
     await setCurrent(USER, id);
     return chatStateFor(id);
