@@ -10,6 +10,7 @@ import type OpenAI from "openai";
 import {
   call,
   emit,
+  Halted,
   type AskOutcome,
   type AskQuestion,
   type AskRequest,
@@ -535,6 +536,7 @@ async function withVision(blocks: ContentPart[], weak: string | null, ctx: ToolC
       image,
     ];
   } catch (err) {
+    if (err instanceof Halted) throw err;
     return [...blocks, { type: "text", text: `(vision escalation failed: ${String(err)})` }];
   }
 }

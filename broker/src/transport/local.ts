@@ -5,6 +5,7 @@
 import { WebSocketServer, WebSocket } from "ws";
 import {
   abortedError,
+  opError,
   requestMessage,
   type AskOutcome,
   type BridgeHandlers,
@@ -222,7 +223,7 @@ export class LocalServer implements Transport {
     clearTimeout(p.timer);
     this.pending.delete(msg.id);
     if (msg.ok) p.resolve(msg.data);
-    else p.reject(new Error(msg.error ?? "unknown extension error"));
+    else p.reject(opError(msg));
   }
 
   waitForExtension(): Promise<void> {

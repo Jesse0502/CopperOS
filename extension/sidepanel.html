@@ -400,8 +400,73 @@
       }
       .acts {
         display: flex;
+        align-items: center;
         gap: 2px;
         margin-left: auto;
+      }
+      /* The chat's agent switch: off stops the agent and blocks anything it
+         tries in the browser until it is switched back on. */
+      #agent-switch {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        flex: none;
+        height: 28px;
+        margin-right: 4px;
+        padding: 0 6px;
+        border: none;
+        border-radius: 7px;
+        background: none;
+        color: var(--text-muted);
+        font: inherit;
+        font-size: 12px;
+        font-weight: 600;
+        cursor: pointer;
+        transition: background-color 0.15s ease, color 0.15s ease;
+      }
+      #agent-switch:hover {
+        background: var(--surface-2);
+        color: var(--text);
+      }
+      #agent-switch:focus-visible {
+        outline: 2px solid var(--brand);
+        outline-offset: 1px;
+      }
+      #agent-switch .sw-off,
+      #agent-switch.off .sw-on {
+        display: none;
+      }
+      #agent-switch.off .sw-off {
+        display: inline;
+      }
+      #agent-switch.off {
+        color: var(--err);
+      }
+      .sw-track {
+        position: relative;
+        width: 26px;
+        height: 15px;
+        border-radius: 999px;
+        background: var(--ok);
+        transition: background-color 0.15s ease;
+      }
+      .sw-knob {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 11px;
+        height: 11px;
+        border-radius: 50%;
+        background: #fff;
+        box-shadow: var(--lift);
+        transform: translateX(11px);
+        transition: transform 0.15s ease;
+      }
+      #agent-switch.off .sw-track {
+        background: var(--err);
+      }
+      #agent-switch.off .sw-knob {
+        transform: none;
       }
 
       /* ── chat ───────────────────────────────────────────────────────────── */
@@ -974,6 +1039,34 @@
         flex: none;
         padding: 10px 12px 12px;
         border-top: 1px solid var(--border);
+      }
+      #agent-off-note {
+        display: flex;
+        align-items: flex-start;
+        gap: 8px;
+        margin-bottom: 8px;
+        padding: 8px 10px;
+        border-radius: 8px;
+        background: var(--err-soft);
+        font-size: 12.5px;
+        line-height: 1.4;
+      }
+      #agent-off-note[hidden] {
+        display: none;
+      }
+      #agent-off-note .i {
+        width: 13px;
+        height: 13px;
+        margin-top: 2px;
+        color: var(--err);
+      }
+      #agent-off-note span {
+        flex: 1;
+        min-width: 0;
+      }
+      #agent-off-note .link {
+        flex: none;
+        font-size: 12.5px;
       }
       .inp {
         padding: 9px 10px 7px;
@@ -1766,6 +1859,10 @@
         <span id="site">…</span>
       </div>
       <div class="acts">
+        <button id="agent-switch" type="button" role="switch" aria-checked="true" aria-label="Agent in this chat">
+          <span class="sw-on">Agent</span><span class="sw-off">Agent off</span>
+          <span class="sw-track" aria-hidden="true"><span class="sw-knob"></span></span>
+        </button>
         <button id="new-chat" class="ib" type="button" title="New chat" aria-label="New chat"><i class="i i-new"></i></button>
         <button id="history" class="ib" type="button" title="Past chats" aria-label="Past chats"><i class="i i-hist"></i></button>
         <button id="memories" class="ib" type="button" title="Saved memories" aria-label="Saved memories"><i class="i i-memory"></i></button>
@@ -1817,6 +1914,11 @@
       </div>
 
       <div id="composer">
+        <div id="agent-off-note" role="status" hidden>
+          <i class="i i-stop"></i>
+          <span>The agent is switched off in this chat. It can't read, click or type anything here.</span>
+          <button id="agent-on" class="link" type="button">Switch on</button>
+        </div>
         <div class="inp">
           <textarea id="task" rows="1" placeholder="e.g. Find the cheapest paid tier"></textarea>
           <div id="rules-box" hidden>

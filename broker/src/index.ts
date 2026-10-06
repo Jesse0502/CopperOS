@@ -125,8 +125,11 @@ async function drive(agent: Agent, work: () => Promise<RunResult>): Promise<Outc
     }
     // Cancel already told the UI the moment it was clicked — the run
     // unwinding afterward (cleanly, or via an aborted tool call throwing)
-    // is not a second, different outcome worth re-announcing.
-    if (run.cancelRequested) {
+    // is not a second, different outcome worth re-announcing. A run the
+    // extension stopped (it refuses ops once the person stops the chat
+    // there) is announced here, since no cancel came through to say it.
+    if (run.cancelRequested || agent.stopped()) {
+      if (!run.cancelRequested) emit("cancelled", id, "");
       console.log(`[cancelled ${id}] ${result.steps} steps · ${formatUsage(result)}`);
       return { status: "cancelled", text: result.text, steps: result.steps };
     }
@@ -135,7 +138,8 @@ async function drive(agent: Agent, work: () => Promise<RunResult>): Promise<Outc
     emit("done", id, `${result.steps} steps · ${formatUsage(result)}`);
     return { status: "done", text: result.text, steps: result.steps };
   } catch (err) {
-    if (run.cancelRequested) {
+    if (run.cancelRequested || agent.stopped()) {
+      if (!run.cancelRequested) emit("cancelled", id, "");
       console.log(`[cancelled ${id}] stopped by user`);
       return { status: "cancelled", text: "", steps: 0 };
     }

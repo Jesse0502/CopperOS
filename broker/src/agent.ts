@@ -10,7 +10,9 @@
 import { setTimeout as sleep } from "node:timers/promises";
 import OpenAI from "openai";
 import {
+  abortedError,
   emit,
+  Halted,
   newRequestId,
   TimeUp,
   type ApprovalOutcome,
@@ -886,6 +888,16 @@ export class Agent {
 
   cancel() {
     this.abort?.abort();
+  }
+
+  /**
+   * Whether the last run was stopped by the person — Stop reaching the
+   * broker, or the extension refusing an op because they stopped the chat
+   * there — rather than finishing or running out of time.
+   */
+  stopped(): boolean {
+    const signal = this.abort?.signal;
+    return Boolean(signal?.aborted && !(signal.reason instanceof TimeUp));
   }
 
   /**
@@ -1803,6 +1815,12 @@ export class Agent {
     preApproved = false,
   ): Promise<Waiting | null> {
     for (const c of calls) {
+      // Stopped partway through a step: the calls left get answered, since
+      // every call needs a result, but none of them runs.
+      if (signal.aborted) {
+        this.session.messages.push({ role: "tool", tool_call_id: c.id, content: `Error: ${abortedError(signal).message}` });
+        continue;
+      }
       // The compat endpoint only emits function calls, but the union in the
       // SDK also covers custom tools.
       if (c.type !== "function") {
@@ -1860,10 +1878,14 @@ export class Agent {
           this.logAction(loop, describeAction(c.function.name, input, label, content));
           continue;
         }
+        // The person stopped this chat in the extension, which refuses every
+        // op from now on: end the run here, as a cancel, whether or not the
+        // cancel itself reached the broker.
+        if (err instanceof Halted) this.cancel();
         // Failures are values, not exceptions. A stale ref or a timeout is
         // recoverable and the model handles it well when it can see it.
         const text = String((err as Error)?.message ?? err);
-        emit("tool-error", this.session.id, `${c.function.name}: ${text}`);
+        if (!(err instanceof Halted)) emit("tool-error", this.session.id, `${c.function.name}: ${text}`);
         this.session.messages.push({
           role: "tool",
           tool_call_id: c.id,

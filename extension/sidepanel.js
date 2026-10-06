@@ -1,4 +1,45 @@
-const port = chrome.runtime.connect({ name: "sidepanel" });
+// The panel's line to the service worker. Chrome can recycle the worker (or
+// update the extension) under an open panel, which disconnects a port for
+// good — and a dead port silently swallowed Stop. So every message goes
+// through `port`, which opens a fresh connection when the last one is gone,
+// and the worker answers each new connection with the whole state ("restore").
+const portListeners = [];
+let livePort = null;
+
+function openPort() {
+  const p = chrome.runtime.connect({ name: "sidepanel" });
+  p.onMessage.addListener((msg) => {
+    for (const fn of portListeners) fn(msg);
+  });
+  p.onDisconnect.addListener(() => {
+    if (livePort !== p) return;
+    livePort = null;
+    // Mid-run, reconnect at once so the log and Stop keep working. Idle, the
+    // next message reconnects; reconnecting now would keep waking a worker
+    // Chrome is trying to put to sleep.
+    if (running) setTimeout(() => livePort ?? openPort(), 250);
+  });
+  livePort = p;
+  return p;
+}
+
+const port = {
+  postMessage(msg) {
+    try {
+      (livePort ?? openPort()).postMessage(msg);
+    } catch {
+      // Disconnected between the check and the send: once more on a new one.
+      livePort = null;
+      openPort().postMessage(msg);
+    }
+  },
+  onMessage: { addListener: (fn) => portListeners.push(fn) },
+};
+openPort();
+// The worker came back on its own (an alarm, the broker): rejoin it.
+chrome.runtime.onMessage.addListener((msg) => {
+  if (msg?.type === "worker_started" && !livePort) openPort();
+});
 
 const $ = (id) => document.getElementById(id);
 const log = $("log");
@@ -36,6 +77,11 @@ let lastChats = []; // most recent "chats" response, re-rendered when the flags 
 let approvalDefault = null;
 // Whether the viewed chat's tasks get supervisor check-ins.
 let supervisor = false;
+// The viewed chat's agent switch. Off, the extension refuses every browser
+// action the chat's agent asks for, and no task can be sent to it.
+let agentOn = true;
+// Stop was clicked and the broker has not said the run ended yet.
+let stopTimer = null;
 // Set right before an optimistic bubble is added for a task this panel just
 // sent, so the broker's echoed "start" event for the same text isn't drawn
 // twice.
@@ -562,21 +608,48 @@ function renderWelcome() {
 function renderComposer() {
   const send = $("send");
   send.classList.toggle("running", running);
-  send.title = running ? "Stop" : "Send";
+  send.title = running ? (stopTimer !== null ? "Stopping…" : "Stop") : "Send";
   send.setAttribute("aria-label", send.title);
   // While running, #send is the Stop button, so it stays clickable
-  // regardless of what's in the textarea.
-  send.disabled = running ? false : !task.value.trim();
+  // regardless of what's in the textarea — unless a Stop is on its way.
+  send.disabled = running ? stopTimer !== null : !agentOn || !task.value.trim();
   // The broker takes the next message once this task is over.
-  task.disabled = running;
+  task.disabled = running || !agentOn;
   renderRulesBox();
-  task.placeholder = running
-    ? "Working… you can stop it anytime"
-    : $("empty") ? "e.g. Find the cheapest paid tier" : "Ask a follow-up…";
+  task.placeholder = !agentOn
+    ? "The agent is switched off in this chat"
+    : running
+      ? "Working… you can stop it anytime"
+      : $("empty") ? "e.g. Find the cheapest paid tier" : "Ask a follow-up…";
+  $("agent-off-note").hidden = agentOn;
 }
+
+/** The viewed chat's agent switch, as the service worker last said it is. */
+function setAgentOn(on) {
+  agentOn = on;
+  const sw = $("agent-switch");
+  sw.classList.toggle("off", !on);
+  sw.setAttribute("aria-checked", String(on));
+  sw.title = on
+    ? "The agent can act in this chat. Switch it off to stop it at once and block anything it tries in the browser."
+    : "The agent is off in this chat: it can't read, click or type anything. Switch it on to let it work here again.";
+  renderComposer();
+}
+
+function switchAgent(on) {
+  if (!viewedChatId) return;
+  setAgentOn(on); // optimistic; the service worker echoes it back
+  port.postMessage({ type: "set_agent", chatId: viewedChatId, on });
+}
+$("agent-switch").addEventListener("click", () => switchAgent(!agentOn));
+$("agent-on").addEventListener("click", () => switchAgent(true));
 
 function setRunning(on) {
   running = on;
+  if (!on) {
+    clearTimeout(stopTimer);
+    stopTimer = null;
+  }
   if (on && !run) startRun(null);
   if (!on && run) finishRun(null, "");
   clearInterval(runTimer);
@@ -1424,6 +1497,7 @@ port.onMessage.addListener((msg) => {
       setRunning(Boolean(msg.running));
       setApprovalMode(msg.approvalMode ?? "submits");
       setSupervisor(msg.supervisor === true);
+      setAgentOn(msg.agentOn !== false);
       setPendingApprovalChatIds(msg.pendingApprovalChatIds ?? []);
       renderStatus();
       renderAccount();
@@ -1437,6 +1511,10 @@ port.onMessage.addListener((msg) => {
         showApproval(null);
         showAsk(null);
       }
+      break;
+
+    case "agent_switch":
+      if (msg.chatId === viewedChatId) setAgentOn(msg.on !== false);
       break;
 
     case "approval_flags":
@@ -1516,7 +1594,7 @@ port.onMessage.addListener((msg) => {
 
 function sendTask() {
   const text = task.value.trim();
-  if (!text || running) return;
+  if (!text || running || !agentOn) return;
   // The log is not cleared: each task is a turn in one ongoing chat, and the
   // broker keeps the transcript. "New chat" is how you start over.
   pendingEcho = text;
@@ -1553,18 +1631,33 @@ log.addEventListener("click", (e) => {
 });
 
 function cancelRun() {
-  port.postMessage({ type: "cancel" });
+  // The chat on screen, by name: the service worker's own idea of it may not
+  // be read back yet if it was just woken.
+  port.postMessage({ type: "cancel", chatId: viewedChatId });
   // Not setRunning(false) here: that flips this panel's own composer state
   // without touching the service worker's session.running, which would
   // still say the chat is running the next time this panel opens. The
   // broker answers a cancel with a "cancelled" event almost immediately
   // (see agent.ts's abort-aware tool/approval waits), so waiting for the
-  // real event keeps both in sync instead of just looking done.
+  // real event keeps both in sync instead of just looking done. Meanwhile
+  // the service worker refuses the chat's browser actions, so nothing more
+  // happens on the page either way. Stop comes back after a few seconds
+  // without an answer, so it can be clicked again.
+  clearTimeout(stopTimer);
+  stopTimer = setTimeout(stopAnswered, 6000);
   const btn = $("send");
   btn.disabled = true;
   btn.title = "Stopping…";
   const stop = run?.el.querySelector(".stop");
   if (stop) stop.disabled = true;
+}
+
+function stopAnswered() {
+  clearTimeout(stopTimer);
+  stopTimer = null;
+  const stop = run?.el.querySelector(".stop");
+  if (stop) stop.disabled = false;
+  renderComposer();
 }
 
 // #send doubles as Stop while a run is in progress — same slot, same

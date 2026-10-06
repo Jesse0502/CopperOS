@@ -143,6 +143,24 @@ export class TimeUp extends Error {
   }
 }
 
+/**
+ * The extension refused an op because the person stopped this chat there —
+ * Stop, or the chat's agent switch turned off. The run ends as a cancel even
+ * if the cancel message itself never arrived.
+ */
+export class Halted extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "Halted";
+  }
+}
+
+/** An op's failure as the extension reported it. */
+export function opError(msg: { error?: string; halt?: boolean }): Error {
+  const text = msg.error ?? "unknown extension error";
+  return msg.halt ? new Halted(text) : new Error(text);
+}
+
 /** What an op stopped by `signal` reports: a cancel, unless the run hit its time limit. */
 export function abortedError(signal: AbortSignal): Error {
   return new Error(signal.reason instanceof TimeUp ? signal.reason.message : "Cancelled by user.");

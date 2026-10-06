@@ -9,7 +9,7 @@
 // result — a screenshot — as numbered chunks, joined back together here.
 
 import WebSocket from "ws";
-import { abortedError, requestMessage, type PendingRequest, type Transport } from "../bridge.js";
+import { abortedError, opError, requestMessage, type PendingRequest, type Transport } from "../bridge.js";
 import { extensionsOf, post } from "../cloud/connections.js";
 
 type Pending = {
@@ -109,7 +109,7 @@ export class CloudTransport implements Transport {
     clearTimeout(p.timer);
     this.pending.delete(msg.id);
     if (msg.ok) p.resolve(msg.data);
-    else p.reject(new Error(msg.error ?? "unknown extension error"));
+    else p.reject(opError(msg));
   }
 
   /** Run a send behind everything sent before it; resolves to whether it arrived. */

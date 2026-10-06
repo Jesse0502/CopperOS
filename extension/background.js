@@ -78,6 +78,33 @@ let supervisorDefault = null;
 // — an expired or revoked token. The next one refreshes the token first.
 let refused = 0;
 
+// The person's brakes, enforced here whatever the broker does: an op for a
+// chat under either is refused, and the broker ends that chat's run when it
+// sees the refusal (Halted, in its bridge.ts). So Stop and the agent switch
+// work even if the cancel never reaches the broker.
+//  - agentOff: chats whose agent switch is off, until switched back on.
+//    Kept across browser restarts.
+//  - session.stopped: chats stopped with Stop, until their next task starts.
+let agentOff = {};
+// Stops clicked while the broker was out of reach, sent once it is back.
+const pendingCancels = new Set();
+
+function haltReason(chatId) {
+  if (!chatId) return null;
+  if (agentOff[chatId]) return "The user switched the agent off in this chat, so it cannot act in the browser.";
+  if (session.stopped[chatId]) return "The user stopped this task.";
+  return null;
+}
+
+/** Stop a chat's task: refuse its ops from now on, and tell the broker — now, or once it is back. */
+function stopChat(chatId) {
+  if (!chatId) return;
+  session.stopped[chatId] = true;
+  persist();
+  if (ws && ws.readyState === WebSocket.OPEN) send({ type: "cancel", chatId });
+  else pendingCancels.add(chatId);
+}
+
 // ── per-chat tab context ─────────────────────────────────────────────────────
 //
 // Every chat gets its own tab to drive, tracked here by chat id. Only `tabId`
@@ -131,6 +158,8 @@ let session = {
   // The last list of saved chats, shown at once when Past chats opens while
   // a fresh one loads.
   chats: null,
+  // chatId -> true for chats stopped with Stop; see haltReason.
+  stopped: {},
 };
 
 // Each backend keeps its own panel state; switching never mixes them.
@@ -140,8 +169,9 @@ const ready = (async () => {
   backend = await getBackend();
   signedIn = await auth.account().catch(() => null);
   const stored = await chrome.storage.local
-    .get(["backend", "approvalDefault", "supervisorDefault"])
+    .get(["backend", "approvalDefault", "supervisorDefault", "agentOff"])
     .catch(() => ({}));
+  if (stored.agentOff && typeof stored.agentOff === "object") agentOff = stored.agentOff;
   chosen = stored.backend === "local" || stored.backend === "cloud";
   approvalDefault = ["all", "submits", "none"].includes(stored.approvalDefault) ? stored.approvalDefault : null;
   supervisorDefault = typeof stored.supervisorDefault === "boolean" ? stored.supervisorDefault : null;
@@ -154,6 +184,7 @@ const ready = (async () => {
         ...saved,
         pendingApprovals: saved.pendingApprovals ?? {},
         pendingAsks: saved.pendingAsks ?? {},
+        stopped: saved.stopped ?? {},
       };
     }
     if (savedTabs) tabsByChat = savedTabs;
@@ -164,6 +195,9 @@ const ready = (async () => {
   } catch {
     // First run in this browser session; defaults are already correct.
   }
+  // A panel left open while this worker was gone has lost its connection to
+  // it; this tells it to open a new one.
+  chrome.runtime.sendMessage({ type: "worker_started" }).catch(() => {});
 })();
 
 function persist() {
@@ -220,6 +254,12 @@ function recordEvent(msg) {
     persist();
     if (forViewed) broadcastToPanels(msg);
     return;
+  }
+
+  // A chat stopped with Stop acts again once its next task starts — the run
+  // before it has ended by then, since a chat runs one task at a time.
+  if (msg.event === "start" && chatId !== null && session.stopped[chatId]) {
+    delete session.stopped[chatId];
   }
 
   if (msg.event === "start" && forViewed) {
@@ -814,6 +854,8 @@ function wire(sock) {
       // falls back to the last-viewed chat on a true cold start) and answers
       // with a chat_state.
       send({ type: "hello", client: "extension", version: chrome.runtime.getManifest().version, chatId: session.chatId });
+      for (const chatId of pendingCancels) send({ type: "cancel", chatId });
+      pendingCancels.clear();
     })();
     clearInterval(pingTimer);
     // MV3 kills idle service workers; steady WebSocket traffic keeps this one
@@ -925,6 +967,12 @@ function wire(sock) {
     }
     if (msg.type === "pong") return;
     if (!msg.id || !msg.op) return;
+
+    const halt = haltReason(msg.chatId);
+    if (halt) {
+      sendResult({ id: msg.id, ok: false, error: halt, halt: true });
+      return;
+    }
 
     const handler = OPS[msg.op];
     if (!handler) {
@@ -1065,6 +1113,9 @@ chrome.runtime.onConnect.addListener((port) => {
     if (panelPorts.size === 0) void screencast.stop();
   });
   port.onMessage.addListener(async (msg) => {
+    // A worker just woken by this message has not read back which chat is
+    // on screen yet; a Stop sent before that would name no chat at all.
+    await ready;
     if (msg.type === "set_backend" && (msg.backend === "local" || msg.backend === "cloud")) {
       await switchBackend(msg.backend);
       return;
@@ -1120,6 +1171,15 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
     if (msg.type === "delete_account" && backend === "cloud") send({ type: "delete_account" });
+    if (msg.type === "task" && agentOff[session.chatId]) {
+      recordEvent({
+        type: "agent_event",
+        event: "error",
+        chatId: session.chatId,
+        text: "The agent is switched off in this chat. Switch it on to send it a task.",
+      });
+      return;
+    }
     if (msg.type === "task") {
       // The tab it starts on, so "this page" means something to the agent,
       // and any rules the person set for its supervisor.
@@ -1132,7 +1192,25 @@ chrome.runtime.onConnect.addListener((port) => {
         ...(typeof msg.rules === "string" && msg.rules.trim() ? { rules: msg.rules.trim() } : {}),
       });
     }
-    if (msg.type === "cancel") send({ type: "cancel", chatId: session.chatId });
+    if (msg.type === "cancel") stopChat(typeof msg.chatId === "string" ? msg.chatId : session.chatId);
+    // The chat's agent switch. Off stops whatever it is doing — a run, or a
+    // question or approval it waits on — and refuses its ops until it is on.
+    if (msg.type === "set_agent" && typeof msg.chatId === "string") {
+      const id = msg.chatId;
+      if (msg.on === false) {
+        agentOff[id] = true;
+        const busy =
+          id === session.chatId
+            ? session.running || Boolean(session.approval || session.ask)
+            : Boolean(session.pendingApprovals[id] || session.pendingAsks[id] || session.chats?.find((c) => c.id === id)?.running);
+        if (busy) stopChat(id);
+        runChanged(id, false);
+      } else {
+        delete agentOff[id];
+      }
+      await chrome.storage.local.set({ agentOff }).catch(() => {});
+      broadcastToPanels({ type: "agent_switch", chatId: id, on: msg.on !== false });
+    }
     if (msg.type === "reset") send({ type: "reset" });
     if (msg.type === "chats") send({ type: "list_chats" });
     if (msg.type === "list_memories") send({ type: "list_memories" });
@@ -1247,6 +1325,7 @@ function restoreMessage() {
     watching: session.watching,
     approvalMode: session.approvalMode,
     supervisor: session.supervisor,
+    agentOn: !agentOff[session.chatId],
     pendingApprovalChatIds: waitingChatIds(),
     welcome: !chosen,
     approvalDefault,
@@ -1292,6 +1371,7 @@ function blankSession() {
   return {
     chatId: null, running: false, task: null, approvalMode: "submits", supervisor: false, events: [],
     approval: null, watching: false, pendingApprovals: {}, ask: null, pendingAsks: {}, chats: null,
+    stopped: {},
   };
 }
 

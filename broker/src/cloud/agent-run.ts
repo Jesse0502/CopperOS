@@ -56,8 +56,11 @@ export async function runJob(job: AgentJob, lambdaMsLeft: number): Promise<void>
       paused = true;
       showRequest(result.paused);
       console.log(`[agent ${chatId}] waiting on the user: ${result.paused.kind}`);
-    } else if (cancelled) {
-      // The relay told the panel the moment Cancel was clicked.
+    } else if (cancelled || agent.stopped()) {
+      // The relay told the panel the moment Cancel was clicked. A run the
+      // extension stopped (it refuses ops once the person stops the chat
+      // there) is announced here, since no cancel came through to say it.
+      if (!cancelled) emit("cancelled", chatId, "");
       console.log(`[agent ${chatId}] cancelled · ${formatUsage(result)}`);
     } else if (result.timeUp) {
       console.log(`[agent ${chatId}] time's up · ${formatUsage(result)}`);
@@ -69,7 +72,8 @@ export async function runJob(job: AgentJob, lambdaMsLeft: number): Promise<void>
   } catch (err) {
     const text = String((err as Error)?.message ?? err);
     console.error(`[agent ${chatId}] ${(err as Error)?.stack ?? text}`);
-    if (!cancelled) emit("error", chatId, text);
+    if (agent?.stopped() && !cancelled) emit("cancelled", chatId, "");
+    else if (!cancelled) emit("error", chatId, text);
   } finally {
     // A paused task keeps its request on the chat; anything else frees it.
     await store.endRun(userId, chatId, paused, usedMs).catch((err) =>
