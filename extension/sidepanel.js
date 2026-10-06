@@ -131,6 +131,8 @@ const STEPS = {
   remember: ["check", "Remember", same],
   progress: ["check", "Progress", same],
   "task-check": ["check", "Task check", same],
+  loop: ["repeat", "Loop", same],
+  skipped: ["slash", "Skipped", same],
   "job-fit": ["check", "Job check", same],
   answered: ["check", "Answers", same],
   ask: ["q", "Questions", same],
@@ -320,7 +322,7 @@ function addStep(kind, text) {
   if (!run) startRun(null);
   const [name, label, describe] = STEPS[kind] ?? ["dot", kind.charAt(0).toUpperCase() + kind.slice(1), same];
   const warn =
-    kind === "awaiting-approval" || kind === "blocked" ||
+    kind === "awaiting-approval" || kind === "blocked" || kind === "skipped" ||
     (kind === "supervisor" && text.startsWith("off course"));
   const row = document.createElement("div");
   row.className = `s${kind === "tool-error" ? " err" : warn ? " warn" : ""}`;

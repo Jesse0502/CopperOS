@@ -100,6 +100,10 @@ const CHECK_IN_EVERY = Number(process.env.CHECK_IN_EVERY ?? 10);
 // "check again and verify" turn that went off course in the user's Sheets
 // run started with ~45k tokens of earlier chat behind it.
 const FRESH_CONTEXT_TOKENS = Number(process.env.FRESH_CONTEXT_TOKENS ?? 25_000);
+// A loop (TaskState.loop) ends only when the user stops it, or when this many
+// rounds in a row record nothing at all: by then it is stuck, not working, and
+// would otherwise spend the user's API credit until they noticed.
+const LOOP_STALLED_ROUNDS = 5;
 // Off course at this many check-ins in a row stops the task for the user to
 // steer. Before that, odd strikes get a correction and even ones a fresh
 // round with the correction in its brief. Any on-course verdict resets it.
@@ -327,6 +331,17 @@ const REPLY_NOTE =
   "shows. If answering really needs a page you have not read, say what you " +
   "would check and ask whether to go ahead.]";
 
+// Pushed after the user's message when it starts or resumes a loop, and
+// filtered out of replay() the same way RESUME_NOTICE is. A fresh round's
+// brief says the same (progress.ts).
+const LOOP_NOTICE =
+  "[This task repeats until the user stops it. Keep going on your own: never " +
+  "ask whether to continue, and never stop because a batch is done; find " +
+  "more (the next page, a new search) instead. If an item needs the user (a " +
+  "question, an approval, something you do not know), skip it and move on to " +
+  "the next: it is recorded for them. Record each finished or skipped item " +
+  "with update_progress.]";
+
 // The reply when a words-only request came back with no words: a model that
 // ignores tool_choice (Ollama) and only called tools, which are never run.
 const NO_REPLY =
@@ -425,6 +440,7 @@ function earlierTurns(messages: Msg[]): EarlierTurn[] {
     if (m.role === "user" && typeof m.content === "string") {
       if (
         m.content === RESUME_NOTICE ||
+        m.content === LOOP_NOTICE ||
         isBrief(m.content) ||
         isSupervisorNote(m.content)
       )
@@ -758,7 +774,7 @@ function turnStarts(history: Msg[]): number[] {
   return history.reduce<number[]>(
     (acc, m, i) =>
       m.role === "user" &&
-      !(typeof m.content === "string" && isSupervisorNote(m.content))
+      !(typeof m.content === "string" && (isSupervisorNote(m.content) || m.content === LOOP_NOTICE))
         ? (acc.push(i), acc)
         : acc,
     [],
@@ -887,6 +903,7 @@ export class Agent {
           m.content === RESUME_NOTICE ||
           m.content === CANCEL_NOTICE ||
           m.content === TIME_UP_NOTICE ||
+          m.content === LOOP_NOTICE ||
           isBrief(m.content) ||
           isSupervisorNote(m.content)
         )
@@ -950,6 +967,10 @@ export class Agent {
       if (options.rules) this.session.settings.supervisor = true;
       const tracked = await this.track(task, intent, recorded, options.rules ?? null);
       this.rules = tracked?.rules ?? options.rules ?? null;
+      if (tracked?.loop) {
+        this.session.messages.push({ role: "user", content: LOOP_NOTICE });
+        emit("loop", this.session.id, "repeats until you stop it; anything that needs you is skipped and listed");
+      }
 
       loop = {
         round: 1,
@@ -967,7 +988,7 @@ export class Agent {
         from: null,
         finalText: "",
         // Rules mean the user wants work done and watched.
-        wordsOnly: intent.reply && !options.rules,
+        wordsOnly: intent.reply && !options.rules && !tracked?.loop,
       };
       if (loop.wordsOnly) console.log(`[agent] chat=${this.session.id} answering in words, tools off`);
       return await this.drive(
@@ -1325,6 +1346,26 @@ export class Agent {
     return null;
   }
 
+  /** In a loop: records what needed the user as skipped, and tells the model to move on. */
+  private async skipForLoop(request: UserRequest): Promise<string> {
+    const what = (
+      request.kind === "approval"
+        ? `needs your approval: ${request.text}`
+        : `needs your answer: ${request.ask.questions.map((q) => q.question).join(" / ")}`
+    ).slice(0, 300);
+    const task = await loadTask(this.userId, this.session.id);
+    if (task) {
+      task.skipped.push(what);
+      await saveTask(this.userId, this.session.id, task);
+    }
+    emit("skipped", this.session.id, what);
+    return (
+      `Not ${request.kind === "approval" ? "done" : "asked"}: this task repeats until the user ` +
+      `stops it, so nothing waits on them. It is recorded as skipped for them (${what}). ` +
+      `Leave this item and move on to the next one.`
+    );
+  }
+
   private toolCtx(active: Active, signal: AbortSignal, preApproved = false): ToolCtx {
     return {
       userId: this.userId,
@@ -1372,9 +1413,12 @@ export class Agent {
         status: "active",
         // New rules replace the old; none sent keeps what was set.
         ...(rules ? { rules } : {}),
+        // "Keep going until I stop you" turns a task into a loop; nothing
+        // said here turns one back.
+        ...(intent.loop ? { loop: true } : {}),
       };
     } else if (!recorded || intent.scope === "new_task" || rules) {
-      task = { ...newTask(text), ...(rules ? { rules } : {}) };
+      task = { ...newTask(text), ...(rules ? { rules } : {}), ...(intent.loop ? { loop: true } : {}) };
     } else {
       // "other" (a question about how it went, say), or Jev could not tell:
       // either way the progress on record must survive for a later "continue".
@@ -1398,6 +1442,7 @@ export class Agent {
     signal: AbortSignal,
   ): Promise<boolean> {
     if (handover) return this.handOver(task, round, handover);
+    if (task.loop) return this.keepLooping(task, round, stalls);
     const check = await judgeCompletion(
       {
         instructions: task.instructions,
@@ -1569,12 +1614,30 @@ export class Agent {
    * there is no finished round for judgeCompletion to judge — only the
    * check-in's own call, and the round limit.
    */
+  /**
+   * checkRound for a loop: no asking Jev whether it is finished, since it is
+   * not meant to finish, and no round limit. It stops only when rounds stop
+   * getting anything done (see LOOP_STALLED_ROUNDS), or when the user stops it.
+   */
+  private keepLooping(task: TaskState, round: number, stalls: number): boolean {
+    const stop = stalls >= LOOP_STALLED_ROUNDS ? `${stalls} rounds in a row got nothing done, so it looks stuck` : null;
+    if (stop) task.status = "needs_user";
+    task.lastCheck = `Round ${task.rounds}: loop — ${stop ? `stopped: ${stop}` : "continuing"}`;
+    emit(
+      "task-check",
+      this.session.id,
+      `${task.done.length} done, ${task.skipped.length} skipped · repeats until you stop it · ` +
+        (stop ? `stopping: ${stop}` : `starting round ${round + 1} with a fresh context`),
+    );
+    return stop !== null;
+  }
+
   private handOver(task: TaskState, round: number, handover: Handover): boolean {
     let stop: string | null = null;
     if (handover.stop) {
       task.status = "needs_user";
       stop = handover.why;
-    } else if (round >= MAX_ROUNDS) {
+    } else if (round >= MAX_ROUNDS && !task.loop) {
       stop = `reached the limit of ${MAX_ROUNDS} rounds`;
     }
     task.lastCheck =
@@ -1787,8 +1850,16 @@ export class Agent {
         });
         this.logAction(loop, describeAction(c.function.name, input, label, out));
       } catch (err) {
-        // Not a failure: the call is waiting on the person, and so is the turn.
-        if (err instanceof PauseForUser) return { callId: c.id, request: err.request };
+        // Not a failure: the call is waiting on the person, and so is the
+        // turn. Not in a loop, though, which runs until the user stops it:
+        // what needed them is skipped and recorded, and the loop goes on.
+        if (err instanceof PauseForUser) {
+          if (!loop.tracked?.loop) return { callId: c.id, request: err.request };
+          const content = await this.skipForLoop(err.request);
+          this.session.messages.push({ role: "tool", tool_call_id: c.id, content });
+          this.logAction(loop, describeAction(c.function.name, input, label, content));
+          continue;
+        }
         // Failures are values, not exceptions. A stale ref or a timeout is
         // recoverable and the model handles it well when it can see it.
         const text = String((err as Error)?.message ?? err);

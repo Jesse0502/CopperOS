@@ -411,6 +411,12 @@ export type Intent = {
    * failed check never switches them off.
    */
   jobs: boolean;
+  /**
+   * The work repeats with no set end: keep going until the user stops it
+   * ("keep applying until I say stop"). Only on a confident verdict; false
+   * whenever Jev could not answer.
+   */
+  loop: boolean;
 };
 
 // Below this, a "greeting" verdict is treated as a task anyway. A bare
@@ -434,6 +440,8 @@ const SCOPE_MIN_CONFIDENCE = 0.7;
 // a weekend trip, a new task straight after a job one, and "apply" meaning
 // a theme, a coupon, a Gmail label or a credit card scored 0.01–0.29.
 const JOBS_MIN_P = 0.5;
+// A loop never stops by itself, so only a clear ask for one turns it on.
+const LOOP_MIN_P = 0.6;
 
 /**
  * Real, blocking: ask Jev whether `text` is a browser task to carry out or
@@ -443,9 +451,9 @@ const JOBS_MIN_P = 0.5;
  * last few turns of the chat: without it, a follow-up like "continue" after
  * a cancelled task is ambiguous. A low-confidence answer, any error, a
  * timeout, a cancel, or no configured client all fall back to
- * { greeting: false, reply: false, scope: null, jobs: true } — "treat this
- * as a task, leave the task on record alone, and keep job checks on," the
- * safe default.
+ * { greeting: false, reply: false, scope: null, jobs: true, loop: false } —
+ * "treat this as a task, leave the task on record alone, keep job checks on,
+ * and stop when the work looks done," the safe default.
  */
 export async function classifyIntent(
   text: string,
@@ -454,7 +462,7 @@ export async function classifyIntent(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<Intent> {
-  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true };
+  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true, loop: false };
   if (!client) return fallback;
   const started = Date.now();
   try {
@@ -481,6 +489,9 @@ export async function classifyIntent(
     const jobs = noul(
       "Is the work the latest message asks for — on its own, or by picking up an earlier turn or the task on record — about finding jobs or applying for them?",
     );
+    const loop = noul(
+      'Does the latest message ask for work that repeats with no set end — to keep going on its own until the user stops it, like "keep applying until I tell you to stop" or "do this nonstop" — rather than a set amount, a fixed list, or a single job?',
+    );
     const { answers } = await client.systemOne(
       {
         state: {
@@ -488,7 +499,7 @@ export async function classifyIntent(
           ...(onRecord && { task_on_record: onRecord }),
           latest_message: text,
         },
-        questions: onRecord ? { intent, scope, jobs } : { intent, jobs },
+        questions: onRecord ? { intent, scope, jobs, loop } : { intent, jobs, loop },
       },
       { signal },
     );
@@ -497,7 +508,8 @@ export async function classifyIntent(
     const i = answers.intent;
     const s = "scope" in answers ? answers.scope : null;
     const j = answers.jobs;
-    if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul") {
+    const l = answers.loop;
+    if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul" || l.type !== "noul") {
       throw new Error("unexpected answer shape");
     }
     const pReply = (i.probabilities.answer ?? 0) + (i.probabilities.greeting ?? 0);
@@ -508,7 +520,7 @@ export async function classifyIntent(
         `p(reply)=${pReply.toFixed(2)} ` +
         (s ? `p(resume)=${pResume.toFixed(2)} ` : "") +
         (s ? `scope=${s.choice} confidence=${s.confidence.toFixed(2)} ` : "") +
-        `jobs=${j.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
+        `jobs=${j.noul.toFixed(2)} loop=${l.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
     );
     const onTask =
       s && s.confidence >= SCOPE_MIN_CONFIDENCE
@@ -519,6 +531,7 @@ export async function classifyIntent(
       reply: (greeting || pReply >= REPLY_MIN_P) && pResume < RESUME_BLOCKS_REPLY_AT,
       scope: onTask,
       jobs: j.noul >= JOBS_MIN_P,
+      loop: l.noul >= LOOP_MIN_P,
     };
   } catch (err) {
     console.warn(

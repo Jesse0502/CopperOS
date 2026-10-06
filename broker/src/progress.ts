@@ -28,6 +28,12 @@ export type TaskState = {
   supervisor?: string;
   /** Rules the user set for the supervisor before sending the task, if any. */
   rules?: string;
+  /**
+   * The work repeats until the user stops it ("keep applying until I say
+   * stop"): rounds never end it on their own, and whatever needs the user is
+   * skipped and recorded rather than waited on (agent.ts).
+   */
+  loop?: boolean;
   status: "active" | "done" | "needs_user";
   /** Why the loop last stopped, or that it is still going — for whoever opens this file. */
   lastCheck: string;
@@ -100,6 +106,9 @@ export function progressMark(task: TaskState): string {
 
 const BRIEF_PREFIX = "[Fresh round ";
 const REPORT_CAP = 1500;
+// The brief shows the latest of each list: a loop's grow without end, and
+// every round's context would grow with them.
+const BRIEF_LIST_CAP = 100;
 
 /** Whether a transcript message is a fresh round's brief rather than something the user typed. */
 export function isBrief(text: string): boolean {
@@ -108,6 +117,11 @@ export function isBrief(text: string): boolean {
 
 function list(items: string[]): string {
   return items.length ? items.map((s) => `- ${s}`).join("\n") : "(none)";
+}
+
+function latest(items: string[]): string {
+  if (items.length <= BRIEF_LIST_CAP) return list(items);
+  return `(${items.length - BRIEF_LIST_CAP} earlier, not shown)\n${list(items.slice(-BRIEF_LIST_CAP))}`;
 }
 
 /**
@@ -128,11 +142,18 @@ export function brief(task: TaskState): string {
       ? `<later_instructions>\n${list(task.followUps)}\n</later_instructions>\n\n`
       : "") +
     (task.rules ? `<supervisor_rules>\n${task.rules}\n</supervisor_rules>\n\n` : "") +
-    `<progress>\nDone (${task.done.length}):\n${list(task.done)}\n\n` +
-    `Skipped (${task.skipped.length}):\n${list(task.skipped)}\n\n` +
+    `<progress>\nDone (${task.done.length}):\n${latest(task.done)}\n\n` +
+    `Skipped (${task.skipped.length}):\n${latest(task.skipped)}\n\n` +
     `Note: ${task.note || "(none)"}\n</progress>\n\n` +
     `<last_report>\n${report || "(none)"}\n</last_report>\n\n` +
     (task.supervisor ? `<supervisor>\n${task.supervisor}\n</supervisor>\n\n` : "") +
+    (task.loop
+      ? `This task repeats until the user stops it. Keep going on your own: ` +
+        `never ask whether to continue, and never stop because a batch is ` +
+        `done; find more (the next page, a new search) instead. If an item ` +
+        `needs the user (a question, an approval, something you do not know), ` +
+        `skip it and move on to the next. `
+      : "") +
     `Pick up where the last round stopped. Do not redo anything listed as ` +
     `done or skipped. If the last report says how the work was being done ` +
     `and no supervisor note says otherwise, keep doing it that way rather ` +
