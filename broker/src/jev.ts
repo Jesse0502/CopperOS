@@ -417,6 +417,13 @@ export type Intent = {
    * whenever Jev could not answer.
    */
   loop: boolean;
+  /**
+   * The message says when the agent should finish on its own — "100 more and
+   * then stop", "stop after this page" — so a loop on record turns back into
+   * a task that ends. Only on a confident verdict; false whenever Jev could
+   * not answer, which leaves a loop as it was.
+   */
+  ends: boolean;
 };
 
 // Below this, a "greeting" verdict is treated as a task anyway. A bare
@@ -442,6 +449,10 @@ const SCOPE_MIN_CONFIDENCE = 0.7;
 const JOBS_MIN_P = 0.5;
 // A loop never stops by itself, so only a clear ask for one turns it on.
 const LOOP_MIN_P = 0.6;
+// At or above this chance that the message sets its own end, a loop is
+// turned back into a task that finishes ("ok make 100 more replies and then
+// stop" kept looping, since nothing said after a loop could end it).
+const ENDS_MIN_P = 0.6;
 
 /**
  * Real, blocking: ask Jev whether `text` is a browser task to carry out or
@@ -451,7 +462,7 @@ const LOOP_MIN_P = 0.6;
  * last few turns of the chat: without it, a follow-up like "continue" after
  * a cancelled task is ambiguous. A low-confidence answer, any error, a
  * timeout, a cancel, or no configured client all fall back to
- * { greeting: false, reply: false, scope: null, jobs: true, loop: false } —
+ * { greeting: false, reply: false, scope: null, jobs: true, loop: false, ends: false } —
  * "treat this as a task, leave the task on record alone, keep job checks on,
  * and stop when the work looks done," the safe default.
  */
@@ -462,7 +473,7 @@ export async function classifyIntent(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<Intent> {
-  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true, loop: false };
+  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true, loop: false, ends: false };
   if (!client) return fallback;
   const started = Date.now();
   try {
@@ -492,6 +503,9 @@ export async function classifyIntent(
     const loop = noul(
       'Does the latest message ask for work that repeats with no set end — to keep going on its own until the user stops it, like "keep applying until I tell you to stop" or "do this nonstop" — rather than a set amount, a fixed list, or a single job?',
     );
+    const ends = noul(
+      'Does the latest message set a point where the agent should finish the work on its own — a number of items (in all, or more), a time, or a condition, like "do 100 more and then stop", "stop after this page" or "until you have 20" — rather than leaving the stopping to the user ("until I tell you to stop") or saying nothing about when to stop?',
+    );
     const { answers } = await client.systemOne(
       {
         state: {
@@ -499,7 +513,7 @@ export async function classifyIntent(
           ...(onRecord && { task_on_record: onRecord }),
           latest_message: text,
         },
-        questions: onRecord ? { intent, scope, jobs, loop } : { intent, jobs, loop },
+        questions: onRecord ? { intent, scope, jobs, loop, ends } : { intent, jobs, loop, ends },
       },
       { signal },
     );
@@ -509,7 +523,8 @@ export async function classifyIntent(
     const s = "scope" in answers ? answers.scope : null;
     const j = answers.jobs;
     const l = answers.loop;
-    if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul" || l.type !== "noul") {
+    const e = answers.ends;
+    if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul" || l.type !== "noul" || e.type !== "noul") {
       throw new Error("unexpected answer shape");
     }
     const pReply = (i.probabilities.answer ?? 0) + (i.probabilities.greeting ?? 0);
@@ -520,7 +535,7 @@ export async function classifyIntent(
         `p(reply)=${pReply.toFixed(2)} ` +
         (s ? `p(resume)=${pResume.toFixed(2)} ` : "") +
         (s ? `scope=${s.choice} confidence=${s.confidence.toFixed(2)} ` : "") +
-        `jobs=${j.noul.toFixed(2)} loop=${l.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
+        `jobs=${j.noul.toFixed(2)} loop=${l.noul.toFixed(2)} ends=${e.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
     );
     const onTask =
       s && s.confidence >= SCOPE_MIN_CONFIDENCE
@@ -532,6 +547,7 @@ export async function classifyIntent(
       scope: onTask,
       jobs: j.noul >= JOBS_MIN_P,
       loop: l.noul >= LOOP_MIN_P,
+      ends: e.noul >= ENDS_MIN_P,
     };
   } catch (err) {
     console.warn(

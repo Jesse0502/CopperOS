@@ -344,6 +344,28 @@ const LOOP_NOTICE =
   "the next: it is recorded for them. Record each finished or skipped item " +
   "with update_progress.]";
 
+// Pushed after the user's message when it ends a loop on record by saying
+// when to finish ("100 more, then stop"): the LOOP_NOTICE from earlier turns
+// is still in the context, and this one overrides it. Filtered out the same way.
+const LOOP_END_NOTICE =
+  "[This task no longer repeats until the user stops it: their latest " +
+  "message says when to finish. Do what it asks, then stop. Keep recording " +
+  "each finished or skipped item with update_progress.]";
+
+/** The loop notes: the agent's own, never the user's words. */
+function isLoopNote(text: string): boolean {
+  return text === LOOP_NOTICE || text === LOOP_END_NOTICE;
+}
+
+/**
+ * Whether `intent`'s message ends the loop on record by saying when to
+ * finish. Ended even when Jev was not sure the message carries on that task
+ * (only a different task leaves it): stopping is the safe way to be wrong.
+ */
+function endsLoop(intent: Intent, recorded: TaskState | null): boolean {
+  return Boolean(recorded?.loop) && intent.ends && !intent.reply && intent.scope !== "new_task";
+}
+
 // The reply when a words-only request came back with no words: a model that
 // ignores tool_choice (Ollama) and only called tools, which are never run.
 const NO_REPLY =
@@ -442,7 +464,7 @@ function earlierTurns(messages: Msg[]): EarlierTurn[] {
     if (m.role === "user" && typeof m.content === "string") {
       if (
         m.content === RESUME_NOTICE ||
-        m.content === LOOP_NOTICE ||
+        isLoopNote(m.content) ||
         isBrief(m.content) ||
         isSupervisorNote(m.content)
       )
@@ -776,7 +798,7 @@ function turnStarts(history: Msg[]): number[] {
   return history.reduce<number[]>(
     (acc, m, i) =>
       m.role === "user" &&
-      !(typeof m.content === "string" && (isSupervisorNote(m.content) || m.content === LOOP_NOTICE))
+      !(typeof m.content === "string" && (isSupervisorNote(m.content) || isLoopNote(m.content)))
         ? (acc.push(i), acc)
         : acc,
     [],
@@ -915,7 +937,7 @@ export class Agent {
           m.content === RESUME_NOTICE ||
           m.content === CANCEL_NOTICE ||
           m.content === TIME_UP_NOTICE ||
-          m.content === LOOP_NOTICE ||
+          isLoopNote(m.content) ||
           isBrief(m.content) ||
           isSupervisorNote(m.content)
         )
@@ -982,6 +1004,9 @@ export class Agent {
       if (tracked?.loop) {
         this.session.messages.push({ role: "user", content: LOOP_NOTICE });
         emit("loop", this.session.id, "repeats until you stop it; anything that needs you is skipped and listed");
+      } else if (endsLoop(intent, recorded)) {
+        this.session.messages.push({ role: "user", content: LOOP_END_NOTICE });
+        emit("loop", this.session.id, "no longer repeats: it stops once what you just asked for is done");
       }
 
       loop = {
@@ -1419,21 +1444,33 @@ export class Agent {
     if (intent.reply && !rules) return null;
     let task: TaskState;
     if (recorded && intent.scope === "resume") {
+      // "Keep going until I stop you" turns a task into a loop, and a loop
+      // stays one through "continue" and the like — until a message says
+      // when to finish ("100 more, then stop"), which turns it back.
+      const loop = !intent.ends && (intent.loop || Boolean(recorded.loop));
+      const { loop: _was, ...rest } = recorded;
       task = {
-        ...recorded,
-        followUps: [...recorded.followUps, text],
+        ...rest,
+        // How far it had got when this was said, so "100 more" can be counted.
+        followUps: [
+          ...recorded.followUps,
+          recorded.done.length ? `${text} (said when ${recorded.done.length} were recorded done)` : text,
+        ],
         status: "active",
         // New rules replace the old; none sent keeps what was set.
         ...(rules ? { rules } : {}),
-        // "Keep going until I stop you" turns a task into a loop; nothing
-        // said here turns one back.
-        ...(intent.loop ? { loop: true } : {}),
+        ...(loop ? { loop: true } : {}),
       };
     } else if (!recorded || intent.scope === "new_task" || rules) {
-      task = { ...newTask(text), ...(rules ? { rules } : {}), ...(intent.loop ? { loop: true } : {}) };
+      task = { ...newTask(text), ...(rules ? { rules } : {}), ...(intent.loop && !intent.ends ? { loop: true } : {}) };
     } else {
       // "other" (a question about how it went, say), or Jev could not tell:
-      // either way the progress on record must survive for a later "continue".
+      // either way the progress on record must survive for a later "continue"
+      // — but not as a loop, if this message said when to finish.
+      if (endsLoop(intent, recorded)) {
+        const { loop: _was, ...rest } = recorded;
+        await saveTask(this.userId, this.session.id, rest);
+      }
       return null;
     }
     await saveTask(this.userId, this.session.id, task);
