@@ -4,7 +4,17 @@
 // them without restarting the broker or touching .env. First load seeds
 // itself from the existing env vars, so upgrading from an .env-only setup
 // keeps working with no action needed.
+//
+// The hosted service has a second mode. Unless their plan allows their own key
+// (Foundry) and they have saved one, users run on CopperOS's own model and
+// key: getConfig() then answers with those, whatever the user's saved provider
+// and model say, and the agent meters what each call costs against their plan
+// (meter.ts). What the user saved is kept apart (getStoredConfig), so the
+// platform key is never written to their account or sent to the page. A
+// Foundry plan that lapses puts its owner back on CopperOS's model without
+// touching what they saved.
 
+import type { JevChoice } from "./jev.js";
 import { store } from "./store/store.js";
 
 export type Provider = "ollama" | "openai" | "openrouter";
@@ -14,9 +24,22 @@ export type LLMConfig = {
   ollama: { host: string; model: string; numCtx: number };
   openai: { model: string; apiKey: string };
   openrouter: { model: string; apiKey: string };
+  /**
+   * The user's own Jev (typesafe.ai) key, optional: on Foundry it is the only
+   * Jev their runs get (the supervisor and the safety checks); elsewhere it
+   * replaces the broker's. Empty for none.
+   */
+  jev: { apiKey: string };
 };
 
 export const OPENROUTER_BASE = "https://openrouter.ai/api/v1";
+
+// Running as the hosted CopperOS (its Lambdas set STAGE), where users have
+// no .env and no Ollama of their own.
+export const HOSTED = Boolean(process.env.STAGE);
+
+/** The model everyone on the hosted service runs on unless they bring their own key. Not the user's to change. */
+export const PLATFORM_MODEL = process.env.PLATFORM_MODEL ?? "deepseek/deepseek-v4.1-flash";
 
 function defaults(): LLMConfig {
   return {
@@ -37,13 +60,24 @@ function defaults(): LLMConfig {
       model: process.env.OPENROUTER_MODEL ?? "deepseek/deepseek-v4.1-flash",
       apiKey: process.env.OPENROUTER_API_KEY ?? "",
     },
+    jev: { apiKey: "" },
   };
 }
 
 // Loaded per user and kept in memory; every read is synchronous so the agent
 // loop never blocks on storage mid-run. initConfig() always reloads, so an
 // entry point that serves a user again can pick up changes made elsewhere.
+// What is kept is what the user saved; getConfig() adds the platform on top.
 const cache = new Map<string, LLMConfig>();
+// Whether each user's plan lets them run on their own key, as of initConfig().
+const ownKeyOk = new Map<string, boolean>();
+
+let ownKeyGate: ((userId: string) => Promise<boolean>) | null = null;
+
+/** Set once at startup by the hosted entry points: whether a user's plan allows their own key. */
+export function useOwnKeyGate(gate: (userId: string) => Promise<boolean>): void {
+  ownKeyGate = gate;
+}
 
 function merge(base: LLMConfig, patch: DeepPartial<LLMConfig>): LLMConfig {
   return {
@@ -51,6 +85,8 @@ function merge(base: LLMConfig, patch: DeepPartial<LLMConfig>): LLMConfig {
     ollama: { ...base.ollama, ...patch.ollama },
     openai: { ...base.openai, ...patch.openai },
     openrouter: { ...base.openrouter, ...patch.openrouter },
+    // Only the key is kept: a "remove it" marker the page sends ({ clear: true }) is not a setting.
+    jev: { apiKey: (patch.jev as { clear?: boolean } | undefined)?.clear === true ? "" : (patch.jev?.apiKey ?? base.jev?.apiKey ?? "") },
   };
 }
 
@@ -66,19 +102,72 @@ export async function initConfig(userId: string): Promise<LLMConfig> {
     cfg = defaults();
   }
   cache.set(userId, cfg);
+  // A failed lookup is a no: the platform's model, metered, is the safe side.
+  ownKeyOk.set(userId, HOSTED && ownKeyGate ? await ownKeyGate(userId).catch(() => false) : false);
   return cfg;
 }
 
-/** Synchronous — call initConfig() for the user before using this. */
-export function getConfig(userId: string): LLMConfig {
+/**
+ * Whose Jev a user's runs use (jev.ts's withJev). On the hosted service a
+ * Foundry account brings its own, or has none: CopperOS's Jev is part of the
+ * plans that pay for CopperOS's model, not of Foundry. Everyone else there runs
+ * on CopperOS's. On a broker of your own it is a key saved in Settings, else
+ * the broker's (JEV_AI_API_KEY). Synchronous — call initConfig() first.
+ */
+export function jevFor(userId: string): JevChoice {
+  const key = cache.get(userId)?.jev?.apiKey?.trim() || null;
+  if (HOSTED) return ownKeyAllowed(userId) ? key : "default";
+  return key ?? "default";
+}
+
+/** Whether this user's plan lets them run on their own API key. Synchronous — call initConfig() first. */
+export function ownKeyAllowed(userId: string): boolean {
+  return ownKeyOk.get(userId) ?? false;
+}
+
+/** What the user saved, for the Settings page. Synchronous — call initConfig() for the user first. */
+export function getStoredConfig(userId: string): LLMConfig {
   const cfg = cache.get(userId);
   if (!cfg) throw new Error(`config not initialized for ${userId} — call initConfig() first`);
   return cfg;
 }
 
-/** Merges `patch` into the user's config, applies it immediately, and saves it. */
+/** Whether the provider a user chose has a key of theirs saved. */
+export function hasOwnKey(cfg: LLMConfig): boolean {
+  if (cfg.provider === "openai") return Boolean(cfg.openai.apiKey.trim());
+  if (cfg.provider === "openrouter") return Boolean(cfg.openrouter.apiKey.trim());
+  return false;
+}
+
+/**
+ * Whether this user's runs are CopperOS's own model on CopperOS's key —
+ * metered against their plan — rather than a model and key of their own.
+ * Only a plan that allows it (Foundry) runs on its own key, and then as soon
+ * as one is saved: there is no switch. A Foundry account with no key saved
+ * runs on CopperOS's model, paid from credits.
+ */
+export function usesPlatformKey(userId: string): boolean {
+  return HOSTED && !(ownKeyAllowed(userId) && hasOwnKey(getStoredConfig(userId)));
+}
+
+/**
+ * The settings a run is made with. On the platform that is OpenRouter with
+ * CopperOS's model and key, which the key's holder cannot change; otherwise
+ * what the user saved. Synchronous — call initConfig() for the user first.
+ */
+export function getConfig(userId: string): LLMConfig {
+  const stored = getStoredConfig(userId);
+  if (!usesPlatformKey(userId)) return stored;
+  return {
+    ...stored,
+    provider: "openrouter",
+    openrouter: { model: PLATFORM_MODEL, apiKey: process.env.PLATFORM_OPENROUTER_KEY ?? "" },
+  };
+}
+
+/** Merges `patch` into the user's saved config, applies it immediately, and saves it. */
 export async function setConfig(userId: string, patch: DeepPartial<LLMConfig>): Promise<LLMConfig> {
-  const next = merge(getConfig(userId), patch);
+  const next = merge(getStoredConfig(userId), patch);
   cache.set(userId, next);
   try {
     await store().saveConfig(userId, next);
@@ -170,7 +259,7 @@ export async function acceptsImages(cfg: LLMConfig): Promise<boolean | null> {
 
 /** Model ids available right now for `provider`, given the user's current settings. */
 export async function listModels(userId: string, provider: Provider): Promise<string[]> {
-  const cfg = getConfig(userId);
+  const cfg = getStoredConfig(userId);
   if (provider === "openrouter") {
     // The agent cannot work without tool calling. ":batch" variants are for
     // OpenRouter's batch API, not chat completions.

@@ -5,7 +5,14 @@
 // only what the user typed.
 
 export type TabInfo = { url: string; title: string };
-export type TaskExtras = { tab?: TabInfo | null; rules?: string };
+export type TaskExtras = {
+  tab?: TabInfo | null;
+  rules?: string;
+  /** The task is a saved mold being run (its id): it is never offered to be saved again. */
+  fromMold?: string;
+  /** The person pressed New mold: help them make one, by asking, rather than do anything now. */
+  makeMold?: boolean;
+};
 
 const TITLE_CAP = 150;
 const URL_CAP = 500;
@@ -16,7 +23,7 @@ const RULES_OPEN = "\n\n[Supervisor rules the user set for this task";
 const RULES_TAG = /<rules>\n([\s\S]*?)\n<\/rules>/;
 
 /** A task message's extras as sent by the extension, cleaned up; anything malformed is dropped. */
-export function taskExtras(msg: { tab?: unknown; rules?: unknown }): TaskExtras {
+export function taskExtras(msg: { tab?: unknown; rules?: unknown; fromMold?: unknown; makeMold?: unknown }): TaskExtras {
   const out: TaskExtras = {};
   const tab = msg.tab as Partial<TabInfo> | null | undefined;
   if (tab && typeof tab === "object" && typeof tab.url === "string") {
@@ -28,6 +35,9 @@ export function taskExtras(msg: { tab?: unknown; rules?: unknown }): TaskExtras 
   if (typeof msg.rules === "string" && msg.rules.trim()) {
     out.rules = msg.rules.trim().slice(0, RULES_CAP);
   }
+  const m = msg as { fromMold?: unknown; makeMold?: unknown };
+  if (typeof m.fromMold === "string" && /^wf_[a-z0-9]{1,40}$/.test(m.fromMold)) out.fromMold = m.fromMold;
+  if (m.makeMold === true) out.makeMold = true;
   return out;
 }
 

@@ -71,8 +71,22 @@ export type Session = {
    * `supervisor` turns on check-ins for the chat's tracked tasks.
    */
   settings: { approvalMode: ApprovalMode; supervisor: boolean };
+  /**
+   * The person has been asked whether to keep a repeating task as a mold (once
+   * a chat is enough), or the chat is running a saved mold, which is never
+   * offered to be saved again.
+   */
+  workflowOffered?: boolean;
+  /** The chat is helping the person make a mold, until one is shown to them (propose_mold). */
+  molding?: boolean;
   /** Set while the chat's task is waiting on the person. */
   paused?: Paused;
+  /**
+   * Set when a long task's run ended only because its Lambda was about to be
+   * cut off, not because the task was done or out of time: where the loop
+   * stood, so the next Lambda carries it on (Agent.continueSlice).
+   */
+  slice?: { loop: Paused["loop"] };
 };
 
 export type SessionSummary = ChatSummary;

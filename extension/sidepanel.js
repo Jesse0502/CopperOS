@@ -42,6 +42,22 @@ chrome.runtime.onMessage.addListener((msg) => {
 });
 
 const $ = (id) => document.getElementById(id);
+
+// The panel opens on the mark and a moving line, and stays there until the
+// service worker has said where things stand — for at least a moment, so it
+// reads as a start and not a flash.
+const bootedAt = Date.now();
+function endBoot() {
+  const boot = $("boot");
+  if (!boot || boot.classList.contains("done")) return;
+  setTimeout(() => boot.classList.add("done"), Math.max(0, 500 - (Date.now() - bootedAt)));
+}
+setTimeout(endBoot, 6000);
+try {
+  $("version").textContent = `CopperOS v${chrome.runtime.getManifest().version}`;
+} catch {
+  // No manifest to read (a page opened outside the extension): no version line.
+}
 const log = $("log");
 const task = $("task");
 
@@ -52,9 +68,6 @@ let connected = false;
 // Which broker, and who is signed in to it when it is the hosted one.
 let backend = "local";
 let account = null; // { email } or null
-// A new install has not said where CopperOS should run yet.
-let welcome = false;
-let welcomeChoice = null;
 let running = false;
 let watching = false;
 let historyOpen = false;
@@ -63,6 +76,28 @@ let memoriesOpen = false;
 let lastMemories = null; // the last "memories" list from the broker, shown at once on reopening
 let memoriesTimer = null; // a request the broker has not answered yet
 let currentConfig = null; // last "config" message from the broker
+let workflows = null; // the saved workflows, from the last "workflows" message, or null until asked
+let libraryTab = "chats"; // which half of the Chats and workflows window is showing
+let offer = null; // the popup asking whether to keep a repeating task as a workflow: { chatId, text }
+let autoSave = null; // the popup's workflow, written up and saved without the editor: null, "drafting" or "saving"
+let toastTimer = null;
+let localBrokerUp = false; // a broker is answering on this computer (the sign-in screen offers it)
+let editing = null; // the workflow editor, when open: { id (null for a new one), drafting }
+let workflowsTimer = null; // a request the broker has not answered yet
+let draftTimer = null;
+let afterReset = null; // what to do once a fresh chat is ready: { then, from (the chat left), timer }
+let moldDraft = false; // New mold was pressed: the next message is the person's idea for the mold
+let usage = null; // last "usage" message from the hosted service: { usage, ownKey }
+let platformModel = ""; // the model the hosted service runs on, from the last "config"
+let ownKeyAllowed = false; // the plan allows it (Foundry): the service says, the switch obeys
+let jevAvailable = true; // this user's runs have Jev, which the supervisor needs (a Foundry account only with its own key)
+let localOffer = false; // a broker is running on this computer and the panel may offer to switch to it
+let billing = null; // last "billing" message: the plan, what is for sale, and whether payments are on
+let plansOpen = false;
+let buying = null; // a payment page has been asked for and not yet opened: "portal", a plan id, or a price id
+let buyingTimer = null;
+let awaiting = null; // a payment page is open: what to watch for, { plan, credits, until }
+let awaitingTimer = null;
 let awaitingSave = false; // true between clicking Save and its "config" echo
 let viewedChatId = null;
 let pendingApprovalId = null;
@@ -79,7 +114,6 @@ let approvalDefault = null;
 let supervisor = false;
 // The viewed chat's agent switch. Off, the extension refuses every browser
 // action the chat's agent asks for, and no task can be sent to it.
-let agentOn = true;
 // Stop was clicked and the broker has not said the run ended yet.
 let stopTimer = null;
 // Set right before an optimistic bubble is added for a task this panel just
@@ -277,6 +311,10 @@ function renderMarkdown(raw) {
 // { el, steps, startedAt (ms, or null when unknown), showAll }
 let run = null;
 let runTimer = null;
+// A message just sent, before anyone knows what kind it is: three dots under
+// it. Jev's "intent" settles it. Work gets a run card (steps, timer, Stop); a
+// question or small talk gets words back and never a card. { el, startedAt }
+let pending = null;
 
 function hideEmpty() {
   $("empty")?.remove();
@@ -289,14 +327,43 @@ function scrollToBottom() {
 function resetLog() {
   log.innerHTML = EMPTY_HTML;
   run = null;
+  pending = null;
+  renderWorkflowChips();
 }
 
-/** Puts a message above the running card, if there is one, so the card stays last. */
+/** Puts a message above the running card (or the dots), if there is one, so that stays last. */
 function place(el) {
   hideEmpty();
-  if (run) log.insertBefore(el, run.el);
+  const last = run?.el ?? pending?.el;
+  if (last) log.insertBefore(el, last);
   else log.appendChild(el);
   scrollToBottom();
+}
+
+/** A message was sent: show that it is being looked at, until its kind is known. */
+function beginPending(startedAt) {
+  if (run) finishRun(null, "");
+  clearPending();
+  hideEmpty();
+  const el = document.createElement("div");
+  el.className = "typing";
+  el.setAttribute("aria-label", "Working on it");
+  el.innerHTML = "<i></i><i></i><i></i>";
+  log.appendChild(el);
+  pending = { el, startedAt };
+  scrollToBottom();
+}
+
+function clearPending() {
+  pending?.el.remove();
+  pending = null;
+}
+
+/** It is work: the dots become the run card, counting from when the message was sent. */
+function showRun() {
+  const startedAt = pending?.startedAt ?? null;
+  clearPending();
+  return startRun(startedAt);
 }
 
 function addMine(text) {
@@ -365,7 +432,7 @@ function startRun(startedAt) {
 }
 
 function addStep(kind, text) {
-  if (!run) startRun(null);
+  if (!run) showRun();
   const [name, label, describe] = STEPS[kind] ?? ["dot", kind.charAt(0).toUpperCase() + kind.slice(1), same];
   const warn =
     kind === "awaiting-approval" || kind === "blocked" || kind === "skipped" ||
@@ -502,13 +569,35 @@ function renderEvent(ev, live = false) {
   const at = ev.at ?? (live ? Date.now() : null);
   if (kind === "task" || kind === "start") {
     addMine(text);
-    startRun(at);
+    beginPending(at);
     return;
   }
-  if (kind === "say") return addTheirs(text);
+  // A mold the model wrote while helping the person make one.
+  if (kind === "mold_proposal") {
+    clearPending();
+    showMoldProposal(text);
+    return;
+  }
+  // The first task in a chat that repeats until stopped: ask whether to keep it.
+  if (kind === "offer_workflow") {
+    if (live) showWorkflowOffer(text, ev.chatId);
+    return;
+  }
+  // Jev's verdict on the message. Work gets its card at once; an answer in
+  // words never does. (Without Jev there is no verdict, and the first step
+  // brings the card.)
+  if (kind === "intent") {
+    if (text === "task" && !run) showRun();
+    return;
+  }
+  if (kind === "say") {
+    clearPending();
+    return addTheirs(text);
+  }
   if (kind === "rules") return addRules(text);
   if (kind === "think") return setThink(text);
   if (TERMINAL.includes(kind)) {
+    clearPending();
     if (run) finishRun(kind, text, at);
     else if (kind !== "done") addNote(kind === "error" ? "err" : "muted", text || (kind === "error" ? "Error" : "Stopped"));
     return;
@@ -521,10 +610,11 @@ function renderEvent(ev, live = false) {
 function renderDot() {
   const dot = $("dot");
   const gated = Boolean(pendingApprovalId || ask);
-  const state = !connected ? "off" : gated ? "wait" : running ? "busy" : "ok";
+  const state = signedOut() ? "idle" : !connected ? "off" : gated ? "wait" : running ? "busy" : "ok";
   dot.className = `dot${state === "off" ? "" : ` ${state}`}`;
   const says = {
-    off: backend === "local" ? "Broker offline" : account ? "Reconnecting…" : "Signed out",
+    idle: "Not signed in",
+    off: backend === "local" ? "Broker offline" : "Reconnecting…",
     wait: "Waiting for you",
     busy: "Running",
     ok: "Connected",
@@ -561,11 +651,15 @@ $("fav").addEventListener("error", () => {
   $("fav-none").hidden = false;
 });
 
+/** Signed out of the cloud: the panel opens on the chat anyway, and asks for an account at the first message. */
+const signedOut = () => backend === "cloud" && !account;
+
 function renderStatus() {
   renderDot();
   $("offline-local").hidden = backend !== "local";
-  $("offline-signin").hidden = !(backend === "cloud" && !account);
   $("offline-cloud").hidden = !(backend === "cloud" && account);
+  // "Your chats are encrypted" is a thing about the cloud; chats on this computer are plain files.
+  document.body.classList.toggle("cloud", backend === "cloud");
   renderOffline();
 }
 
@@ -576,11 +670,11 @@ const OFFLINE_DELAY_MS = 1500;
 let offlineTimer = null;
 
 function renderOffline() {
-  // Signed out is a steady state, not a blip: no reason to hold it back.
-  if (!connected && backend === "cloud" && !account) {
+  // Signed out is not offline: there is nothing to connect to yet, and the chat is there to use.
+  if (signedOut()) {
     clearTimeout(offlineTimer);
     offlineTimer = null;
-    document.body.classList.add("offline");
+    document.body.classList.remove("offline");
     return;
   }
   if (connected) {
@@ -595,14 +689,6 @@ function renderOffline() {
   }
 }
 
-function renderWelcome() {
-  document.body.classList.toggle("welcome", welcome);
-  const choice = welcomeChoice ?? backend;
-  for (const b of document.querySelectorAll("#welcome [data-choice]")) {
-    b.setAttribute("aria-checked", String(b.dataset.choice === choice));
-  }
-}
-
 // ── composer ─────────────────────────────────────────────────────────────
 
 function renderComposer() {
@@ -612,37 +698,25 @@ function renderComposer() {
   send.setAttribute("aria-label", send.title);
   // While running, #send is the Stop button, so it stays clickable
   // regardless of what's in the textarea — unless a Stop is on its way.
-  send.disabled = running ? stopTimer !== null : !agentOn || !task.value.trim();
+  send.disabled = running ? stopTimer !== null : !task.value.trim();
   // The broker takes the next message once this task is over.
-  task.disabled = running || !agentOn;
+  task.disabled = running;
   renderRulesBox();
-  task.placeholder = !agentOn
-    ? "The agent is switched off in this chat"
-    : running
-      ? "Working… you can stop it anytime"
+  task.placeholder = running
+    ? "Working… you can stop it anytime"
+    : moldDraft
+      ? "e.g. Apply to remote design jobs on LinkedIn"
       : $("empty") ? "e.g. Find the cheapest paid tier" : "Ask a follow-up…";
-  $("agent-off-note").hidden = agentOn;
 }
 
-/** The viewed chat's agent switch, as the service worker last said it is. */
-function setAgentOn(on) {
-  agentOn = on;
-  const sw = $("agent-switch");
-  sw.classList.toggle("off", !on);
-  sw.setAttribute("aria-checked", String(on));
-  sw.title = on
-    ? "The agent can act in this chat. Switch it off to stop it at once and block anything it tries in the browser."
-    : "The agent is off in this chat: it can't read, click or type anything. Switch it on to let it work here again.";
+/** New mold: the composer takes the person's own description of it, and the model asks about what is missing. */
+function setMoldDraft(on) {
+  moldDraft = on;
+  $("mold-draft").hidden = !on;
+  document.body.classList.toggle("mold-draft", on);
   renderComposer();
+  if (on) task.focus();
 }
-
-function switchAgent(on) {
-  if (!viewedChatId) return;
-  setAgentOn(on); // optimistic; the service worker echoes it back
-  port.postMessage({ type: "set_agent", chatId: viewedChatId, on });
-}
-$("agent-switch").addEventListener("click", () => switchAgent(!agentOn));
-$("agent-on").addEventListener("click", () => switchAgent(true));
 
 function setRunning(on) {
   running = on;
@@ -650,7 +724,10 @@ function setRunning(on) {
     clearTimeout(stopTimer);
     stopTimer = null;
   }
-  if (on && !run) startRun(null);
+  // A panel opened mid-run has no message to tell what kind of run it is: a
+  // card, unless it is one the dots already stand for.
+  if (on && !run && !pending) startRun(null);
+  if (!on) clearPending();
   if (!on && run) finishRun(null, "");
   clearInterval(runTimer);
   runTimer = on ? setInterval(renderRun, 1000) : null;
@@ -665,21 +742,25 @@ function setRunning(on) {
 function setSupervisor(on) {
   supervisor = on;
   const btn = $("rules-btn");
-  btn.classList.toggle("set", on);
-  btn.setAttribute("aria-pressed", String(on));
-  $("rules-btn-text").textContent = on ? "Supervisor on" : "Supervisor";
-  btn.title = on
-    ? "The supervisor checks the agent's work every few steps and keeps it on track. Click to turn it off."
-    : "Add a supervisor that checks the agent's work every few steps and keeps it on track";
+  btn.classList.toggle("set", on && jevAvailable);
+  btn.setAttribute("aria-pressed", String(on && jevAvailable));
+  // The supervisor is Jev: without it (Foundry with no Jev key) there is nothing to switch on.
+  btn.disabled = !jevAvailable;
+  $("rules-btn-text").textContent = on && jevAvailable ? "Supervisor on" : "Supervisor";
+  btn.title = !jevAvailable
+    ? "The supervisor needs Jev. On Foundry, add your own Jev API key in Settings to turn it on."
+    : on
+      ? "The supervisor checks the agent's work every few steps and keeps it on track. Click to turn it off."
+      : "Add a supervisor that checks the agent's work every few steps and keeps it on track";
   renderRulesBox();
 }
 
 function renderRulesBox() {
-  $("rules-box").hidden = !supervisor || running;
+  $("rules-box").hidden = !supervisor || running || !jevAvailable;
 }
 
 function rulesText() {
-  return supervisor ? $("rules").value.trim() : "";
+  return supervisor && jevAvailable ? $("rules").value.trim() : "";
 }
 
 function resizeRules() {
@@ -904,7 +985,7 @@ function renderChats(chats) {
     const waiting = pendingApprovalChatIds.includes(chat.id);
     const item = document.createElement("button");
     item.type = "button";
-    item.className = `hitem${viewing ? " on" : ""}`;
+    item.className = `hitem${viewing ? " on" : ""}${chat.running && !waiting ? " running" : ""}`;
 
     const title = document.createElement("div");
     title.className = "t";
@@ -940,17 +1021,42 @@ function renderChats(chats) {
   }
 }
 
-function openHistory() {
+function openHistory(tab = "chats") {
   historyOpen = true;
   closeSettings();
   closeMemories();
   $("history-page").classList.add("on");
+  showLibraryTab(tab);
+}
+
+function closeHistory() {
+  historyOpen = false;
+  $("history-page").classList.remove("on");
+  $("history-refresh").hidden = true;
+}
+
+/** Past chats and saved workflows share one window; this is which of them shows. */
+function showLibraryTab(tab) {
+  libraryTab = tab;
+  for (const b of document.querySelectorAll("#library-tabs [role=tab]")) {
+    b.setAttribute("aria-selected", String(b.dataset.tab === tab));
+  }
+  $("history-list").hidden = tab !== "chats";
+  $("workflows-pane").hidden = tab !== "workflows";
+  $("history-refresh").hidden = true;
+  if (tab === "chats") loadChatsTab();
+  else loadWorkflowsTab();
+}
+
+const workflowsShown = () => historyOpen && libraryTab === "workflows";
+
+function loadChatsTab() {
   const list = $("history-list");
   const cached = lastChats.filter((c) => c.taskCount > 0).length > 0;
   // The last list shows at once; a fresh one replaces it when it comes.
   if (cached) renderChats(lastChats);
   if (!connected) {
-    if (!cached) list.innerHTML = '<div id="history-loading">Not connected — can’t load chats.</div>';
+    if (!cached) list.innerHTML = `<div id="history-loading">${signedOut() ? "Sign up and your chats are kept here, encrypted." : "Not connected — can’t load chats."}</div>`;
     return;
   }
   if (!cached) list.innerHTML = '<div id="history-loading"><span class="spinner"></span>Loading…</div>';
@@ -958,10 +1064,8 @@ function openHistory() {
   port.postMessage({ type: "chats" });
 }
 
-function closeHistory() {
-  historyOpen = false;
-  $("history-page").classList.remove("on");
-  $("history-refresh").hidden = true;
+for (const b of document.querySelectorAll("#library-tabs [role=tab]")) {
+  b.addEventListener("click", () => showLibraryTab(b.dataset.tab));
 }
 
 // ── settings ─────────────────────────────────────────────────────────────
@@ -1002,6 +1106,9 @@ function renderAccount() {
   for (const b of document.querySelectorAll(".seg [data-backend]")) {
     b.setAttribute("aria-checked", String(b.dataset.backend === backend));
   }
+  // Cloud or this computer is a choice only for someone with a broker running on this computer (or
+  // already on it): everyone else is in the cloud, and has nothing to choose.
+  $("backend-seg").hidden = !(localBrokerUp || backend === "local");
   $("account-row").hidden = backend !== "cloud";
   $("local-row").hidden = backend !== "local";
   $("account-who").textContent = account ? account.email ?? "Signed in" : "Not signed in";
@@ -1015,7 +1122,6 @@ function renderAccount() {
 /** Model settings come from the broker, so they are only there while connected. */
 function renderSettingsAvailability() {
   const note = $("model-offline");
-  $("model-settings").hidden = !connected;
   note.hidden = connected;
   note.textContent =
     backend === "local"
@@ -1023,11 +1129,437 @@ function renderSettingsAvailability() {
       : account
         ? "Connecting to CopperOS…"
         : "Sign in to choose your model and API key.";
+  renderOwnKey();
+  renderPlan();
 }
 
-function applyConfig(cfg) {
+// Named for copper on its way from the ground to the mark on the logo.
+const PLAN_NAMES = { ore: "Ore", ingot: "Ingot", facet: "Facet", foundry: "Foundry" };
+
+/**
+ * On the hosted service, a signed-in user runs on CopperOS's own model. On
+ * Foundry the provider, key and model are theirs to set, and a saved key is
+ * used as soon as it is there: there is no switch. On a broker of your own
+ * they always are.
+ */
+function renderOwnKey() {
+  const hosted = backend === "cloud" && Boolean(account) && connected;
+  const model = platformModel ? platformModel.split("/").pop() : "its own model";
+  const saved = Boolean(currentConfig?.[$("cfg-provider").value]?.hasKey);
+  $("own-key-row").hidden = !hosted;
+  $("own-key-plans").hidden = ownKeyAllowed;
+  $("own-key-clear").hidden = !(ownKeyAllowed && saved);
+  $("own-key-help").textContent = !ownKeyAllowed
+    ? `CopperOS runs on ${model}. Your own model and API key come with the Foundry plan: you pay your provider for the model, and CopperOS only for hosting and storage.`
+    : saved
+      ? "Foundry: your tasks run on your own key and the model you choose. CopperOS puts no limit on your usage: your provider bills you for it."
+      : `Foundry: add your OpenRouter or OpenAI key and choose any model. Until you do, CopperOS runs on ${model}, paid from your credits.`;
+  $("model-settings").hidden = !connected || (backend === "cloud" && !ownKeyAllowed);
+}
+
+/** The service says whether this plan may use its own key; a plan that may not has the switch off. */
+function setOwnKeyAllowed(allowed) {
+  if (typeof allowed !== "boolean" || allowed === ownKeyAllowed) return;
+  ownKeyAllowed = allowed;
+  renderOwnKey();
+  renderPlan();
+}
+
+/** Credits left. A service from before credits sent only dollars of model use: 100 credits a dollar paid, 55 cents of model use. */
+function creditsLeft(u) {
+  if (typeof u?.credits === "number") return u.credits;
+  return Math.floor((u?.creditsUsd ?? 0) / 0.0055 + 1e-9);
+}
+
+/** 1500 → "1,500 credits". */
+const creditText = (n) => `${n.toLocaleString()} credit${n === 1 ? "" : "s"}`;
+
+/** 1234567 → "1.2M", 45600 → "46k": tokens, for the plan card. */
+function tokenText(n) {
+  if (n >= 1e6) return `${(n / 1e6).toFixed(n >= 1e7 ? 0 : 1)}M`;
+  if (n >= 1e3) return `${Math.round(n / 1e3)}k`;
+  return String(n);
+}
+
+// How long a plan lets one task run, in words.
+function spanText(minutes) {
+  if (minutes < 60) return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  const hours = Math.round((minutes / 60) * 10) / 10;
+  return `${hours} hour${hours === 1 ? "" : "s"}`;
+}
+
+/** What the plan says about how long a task may run, and the week's running time where that is limited. */
+function runtimeLine(u) {
+  const r = u.runtime;
+  if (!r) return "";
+  const task = r.taskMinutes === null ? "No limit on how long one task runs." : `A task can run for up to ${spanText(r.taskMinutes)}.`;
+  if (r.weeklyHours === null) return task;
+  const left = Math.max(0, Math.round((r.weeklyHours - r.usedHours) * 10) / 10);
+  return `${task} ${left} of ${r.weeklyHours} running hours left this week.`;
+}
+
+// A plan that has not arrived in a few seconds is not coming: say so, rather than loading for ever.
+const PLAN_WAIT_MS = 8000;
+let planFailed = false;
+let planTimer = null;
+
+/**
+ * The Settings plan card. It is always there, and says what is true: what
+ * this week looks like on the cloud, that there is nothing to pay on this
+ * computer, that there is no account yet, or that the plan is on its way (or
+ * is not coming, with a way to ask again).
+ */
+function renderPlan() {
+  const card = $("plan-card");
+  const set = (name, line, { meter = false, resets = false, plans = false, signin = false, retry = false, runtime = "" } = {}) => {
+    $("plan-name").textContent = name;
+    $("plan-line").textContent = line;
+    $("plan-meter").hidden = !meter;
+    $("plan-resets").hidden = !resets;
+    $("plans-open").hidden = !plans;
+    $("plan-signin").hidden = !signin;
+    $("plan-retry").hidden = !retry;
+    $("plan-runtime").hidden = !runtime;
+    $("plan-runtime").textContent = runtime;
+  };
+  card.classList.remove("low", "out");
+  if (backend === "local") {
+    set("This computer", "Set your own APIs and run it locally.");
+    return;
+  }
+  if (!account) {
+    set("Not signed in", "Sign up to start. A free trial comes with it, and your plan shows here.", { signin: true });
+    return;
+  }
+  if (!usage) {
+    set(
+      "Your plan",
+      planFailed
+        ? "Couldn't load your plan. Check your connection and try again."
+        : connected
+          ? "Loading your plan…"
+          : "Connecting to CopperOS…",
+      { retry: planFailed },
+    );
+    return;
+  }
+  const { usage: u, ownKey } = usage;
+  const runtime = runtimeLine(u);
+  const credits = creditsLeft(u);
+  const foundry = u.plan === "foundry";
+  if (ownKey) {
+    set(foundry ? "Foundry · your own API key" : "Your own API key", "Your usage is billed by your provider, with no limit from CopperOS.", { plans: true, runtime });
+    return;
+  }
+  // Foundry has no allowance of CopperOS's model: only credits pay for it.
+  if (foundry) {
+    set(
+      "Foundry",
+      credits > 0
+        ? `Using CopperOS's model on your credits: ${creditText(credits)} left. Add your own API key below to use your own model.`
+        : "Foundry runs on your own API key. Add yours below, or buy credits to use CopperOS's model.",
+      { plans: true, runtime },
+    );
+    return;
+  }
+  // The trial's allowance is a week; a paid plan's is its billing month.
+  const period = u.period === "month" ? "month" : "week";
+  const used = u.allowanceUsd > 0 ? Math.min(100, Math.round((u.spentUsd / u.allowanceUsd) * 100)) : 100;
+  const left = typeof u.leftPct === "number" ? u.leftPct : 100 - used;
+  const pct = 100 - left; // how full the bar is
+  const out = u.leftUsd <= 0 && credits <= 0;
+  const t = u.tokens ? u.tokens.input + u.tokens.output : 0;
+  const tokens = t ? ` · ${tokenText(t)} tokens used` : "";
+  const when = (ms) =>
+    new Date(ms).toLocaleString(undefined, { weekday: "short", month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  set(
+    // Ore is the trial, and says so: nobody should have to know what ore is.
+    u.plan === "ore" ? "Ore · trial" : (PLAN_NAMES[u.plan] ?? "Plan"),
+    u.poolFull
+      ? out
+        ? "The trial usage is used up this month, for everyone. Choose a plan or buy credits to keep going now, or wait for it to return."
+        : `The trial usage is used up this month, for everyone. Using your credits: ${creditText(credits)} left.`
+      : out
+        ? period === "month"
+          ? `You've used this month's usage${tokens}. Buy credits to keep going, or wait for your plan to renew.`
+          : `You've used this week's usage${tokens}. Choose a plan or buy credits to keep going, or wait for the reset.`
+        : u.leftUsd <= 0
+          ? `This ${period}'s usage is spent${tokens}. Using your credits: ${creditText(credits)} left.`
+          : `${left}% of this ${period}'s usage left${tokens}.` + (credits > 0 ? ` ${creditText(credits)}.` : ""),
+    { meter: true, resets: true, plans: true, runtime },
+  );
+  // With the free pool spent, the wait is for the month to turn, not the week.
+  $("plan-resets").textContent = `${period === "month" && !u.poolFull ? "Renews" : "Resets"} ${when(u.poolFull ? u.poolResetsAt : u.resetsAt)}`;
+  $("plan-fill").style.width = `${u.poolFull ? 100 : pct}%`;
+  $("plan-meter").setAttribute("aria-valuenow", String(u.poolFull ? 100 : pct));
+  $("plan-meter").setAttribute("aria-label", `This ${period}'s usage`);
+  card.classList.toggle("out", out);
+  card.classList.toggle("low", !out && !u.poolFull && pct >= 80);
+}
+
+/** Ask the hosted service where this week's usage stands. */
+function requestUsage() {
+  if (!(backend === "cloud" && account && connected)) return;
+  port.postMessage({ type: "get_usage" });
+  if (!usage && !planTimer) {
+    planTimer = setTimeout(() => {
+      planTimer = null;
+      if (usage) return;
+      planFailed = true;
+      renderPlan();
+    }, PLAN_WAIT_MS);
+  }
+}
+
+function plansArrived() {
+  clearTimeout(planTimer);
+  planTimer = null;
+  planFailed = false;
+}
+
+$("plan-retry").addEventListener("click", () => {
+  planFailed = false;
+  renderPlan();
+  requestUsage();
+});
+
+// ── plans and credits ────────────────────────────────────────────────────────
+
+// The plans are asked for, and if they do not come in a few seconds the page says so and offers to ask
+// again, rather than saying "Loading" for ever (a service that has not been updated never answers).
+let billingTimer = null;
+
+function requestBilling() {
+  if (!(backend === "cloud" && account && connected)) return;
+  port.postMessage({ type: "get_billing" });
+  if (!billing && !billingTimer) {
+    billingTimer = setTimeout(() => {
+      billingTimer = null;
+      if (billing) return;
+      billing = { enabled: false, failed: true, error: "Plans and credits couldn't be loaded. Check your connection and try again." };
+      renderPlans();
+    }, PLAN_WAIT_MS);
+  }
+}
+
+function billingArrived() {
+  clearTimeout(billingTimer);
+  billingTimer = null;
+}
+
+$("plans-retry").addEventListener("click", () => {
+  billing = null;
+  renderPlans();
+  requestBilling();
+});
+
+/** An amount in a currency's smallest unit, as that currency: 1000 → $10. */
+function money(amount, currency) {
+  const cents = amount % 100 !== 0;
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: String(currency || "usd").toUpperCase(),
+      minimumFractionDigits: cents ? 2 : 0,
+      maximumFractionDigits: 2,
+    }).format(amount / 100);
+  } catch {
+    return `${(amount / 100).toFixed(cents ? 2 : 0)} ${currency}`;
+  }
+}
+
+function plansStatus(text, tone) {
+  const el = $("plans-status");
+  el.textContent = text || "";
+  el.classList.toggle("err", tone === "err");
+  el.classList.toggle("ok", tone === "ok");
+}
+
+function openPlans() {
+  plansOpen = true;
+  $("plans-page").classList.add("on");
+  plansStatus("");
+  renderPlans();
+  requestBilling();
+  requestUsage();
+}
+
+function closePlans() {
+  plansOpen = false;
+  $("plans-page").classList.remove("on");
+}
+
+function renderPlans() {
+  const b = billing;
+  const on = Boolean(b && b.enabled);
+  $("plans-loading").hidden = Boolean(b);
+  $("plans-loading").textContent = connected ? "Loading plans…" : "Connecting to CopperOS…";
+  $("plans-off").hidden = !(b && !b.enabled);
+  if (b && !b.enabled) $("plans-off").textContent = b.error || "Plans and credits are not available yet.";
+  // A load that failed can be tried again; a service with nothing for sale cannot do better.
+  $("plans-retry").hidden = !(b && b.failed);
+  $("plans-now").hidden = !on;
+  $("plans-credits").hidden = !(on && b.packs.length);
+  const list = $("plans-list");
+  const packs = $("packs");
+  list.textContent = "";
+  packs.textContent = "";
+  if (!on) return;
+
+  const ends = b.endsAt ? new Date(b.endsAt).toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" }) : null;
+  $("plans-now-name").textContent = b.plan === "ore" ? "Ore · trial" : b.planName;
+  $("plans-now-tag").textContent = "Your plan";
+  $("plans-now-line").textContent =
+    b.plan === "ore"
+      ? "Free trial. Choose a plan for more, or buy credits."
+      : ends
+        ? `Ends on ${ends}, and you'll be back on Ore after that.`
+        : "Renews every month. Change or cancel any time from Manage billing.";
+  // Anyone who has bought anything has a billing page: invoices, card, cancel.
+  $("plans-manage").hidden = !b.hasCustomer;
+  $("plans-manage").disabled = buying !== null;
+
+  for (const p of b.plans) {
+    const here = p.id === b.plan;
+    const card = document.createElement("div");
+    card.className = "plan-opt" + (here ? " current" : "");
+    const top = document.createElement("div");
+    top.className = "plan-opt-top";
+    const name = document.createElement("span");
+    name.className = "plan-opt-name";
+    name.textContent = p.name;
+    const price = document.createElement("span");
+    price.className = "plan-opt-price";
+    price.textContent = money(p.amount, p.currency);
+    const per = document.createElement("small");
+    per.textContent = " /month";
+    price.appendChild(per);
+    top.append(name, price);
+    const blurb = document.createElement("div");
+    blurb.className = "plan-opt-blurb";
+    blurb.textContent = p.blurb;
+    card.append(top, blurb);
+    if (here) {
+      const tag = document.createElement("span");
+      tag.className = "plan-opt-here";
+      tag.textContent = "Your plan";
+      card.appendChild(tag);
+    } else {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.className = "btn sm pr";
+      btn.textContent = b.plan === "ore" ? "Choose" : "Switch to " + p.name;
+      btn.disabled = buying !== null;
+      btn.addEventListener("click", () => buy({ type: "billing_checkout", plan: p.id }, p.id));
+      card.appendChild(btn);
+    }
+    list.appendChild(card);
+  }
+
+  for (const k of b.packs) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pack";
+    btn.disabled = buying !== null;
+    const price = document.createElement("span");
+    price.className = "pack-price";
+    price.textContent = money(k.amount, k.currency);
+    const gets = document.createElement("span");
+    gets.className = "pack-gets";
+    // What it buys, in credits: never the dollars of model use behind them.
+    gets.textContent = creditText(typeof k.credits === "number" ? k.credits : creditsLeft({ creditsUsd: k.creditsUsd }));
+    btn.append(price, gets);
+    btn.addEventListener("click", () => buy({ type: "billing_checkout", priceId: k.priceId }, k.priceId));
+    packs.appendChild(btn);
+  }
+}
+
+/** Ask for a payment page. The service opens it in a new tab, if it is Stripe's. */
+function buy(message, what) {
+  if (buying !== null || !connected) return;
+  buying = what;
+  plansStatus("Opening Stripe…");
+  renderPlans();
+  port.postMessage(message);
+  // A service that never answers must not leave the buttons dead.
+  buyingTimer = setTimeout(() => {
+    if (buying === null) return;
+    stopBuying();
+    renderPlans();
+    plansStatus("No answer. Try again in a moment.", "err");
+  }, 20_000);
+}
+
+function stopBuying() {
+  buying = null;
+  clearTimeout(buyingTimer);
+}
+
+/** A payment page is open: look for the plan or the credits to change, for a few minutes. */
+function watchPurchase() {
+  awaiting = { plan: billing?.plan ?? "ore", credits: creditsLeft(usage?.usage), until: Date.now() + 5 * 60_000 };
+  clearInterval(awaitingTimer);
+  awaitingTimer = setInterval(() => {
+    if (!awaiting || Date.now() > awaiting.until) return stopWatching();
+    requestBilling();
+    requestUsage();
+  }, 3000);
+}
+
+function stopWatching() {
+  awaiting = null;
+  clearInterval(awaitingTimer);
+}
+
+function checkPurchase() {
+  if (!awaiting) return;
+  if (billing?.enabled && billing.plan !== awaiting.plan) {
+    plansStatus(`You're on ${billing.planName}.`, "ok");
+    stopWatching();
+  } else if (usage && creditsLeft(usage.usage) > awaiting.credits) {
+    plansStatus(`Credits added. You have ${creditText(creditsLeft(usage.usage))}.`, "ok");
+    stopWatching();
+  }
+}
+
+$("plans-open").addEventListener("click", openPlans);
+$("own-key-plans").addEventListener("click", openPlans);
+$("plans-close").addEventListener("click", closePlans);
+$("plans-manage").addEventListener("click", () => buy({ type: "billing_portal" }, "portal"));
+// Coming back from the payment page: look again straight away.
+window.addEventListener("focus", () => {
+  if (!(plansOpen || settingsOpen)) return;
+  requestBilling();
+  requestUsage();
+});
+
+/** Jev's key: the user's own, optional. What it is for depends on where CopperOS runs. */
+function renderJev(cfg) {
+  const jev = cfg?.jev ?? { apiKey: "" };
+  $("cfg-jev-key").value = jev.apiKey || "";
+  $("cfg-jev-key").placeholder = jev.hasKey ? "Saved — leave blank to keep it" : "From typesafe.ai";
+  $("jev-clear").hidden = !jev.hasKey;
+  $("jev-help").textContent =
+    backend === "cloud"
+      ? "Optional. Turns on the supervisor and Jev's safety checks for your tasks. On Foundry, CopperOS's own Jev is not used, so without a key your tasks run without them."
+      : "Optional. Turns on the supervisor and Jev's safety checks. Without one, the broker's own key (JEV_AI_API_KEY in its .env) is used, if it has one.";
+}
+
+$("jev-clear").addEventListener("click", () => {
+  if (!connected) return;
+  $("cfg-jev-key").value = "";
+  setSettingsStatus("");
+  setBusy($("settings-save"), true);
+  awaitingSave = true;
+  port.postMessage({ type: "set_config", patch: { jev: { apiKey: "", clear: true } } });
+});
+
+function applyConfig(cfg, model, allowed) {
   currentConfig = cfg;
+  if (model) platformModel = model;
+  if (typeof allowed === "boolean") ownKeyAllowed = allowed;
   $("cfg-provider").value = cfg.provider;
+  renderOwnKey();
   providerBlocks(cfg.provider);
   $("cfg-ollama-host").value = cfg.ollama.host;
   fillModelSelect($("cfg-ollama-model"), [], cfg.ollama.model);
@@ -1039,6 +1571,7 @@ function applyConfig(cfg) {
   const openrouter = cfg.openrouter ?? { model: "", apiKey: "" };
   $("cfg-openrouter-key").value = openrouter.apiKey || "";
   $("cfg-openrouter-key").placeholder = openrouter.hasKey ? "Saved — leave blank to keep it" : "sk-or-…";
+  renderJev(cfg);
   const openrouterSetUp = Boolean(openrouter.hasKey || openrouter.apiKey);
   fillModelSelect($("cfg-openrouter-model"), [], openrouterSetUp ? openrouter.model : OPENROUTER_FIRST_MODEL);
   requestModels(cfg.provider);
@@ -1063,10 +1596,14 @@ function openSettings() {
   renderAccount();
   renderSettingsAvailability();
   if (connected) port.postMessage({ type: "get_config" });
+  requestUsage();
+  // Also catches up with a payment whose webhook was missed: the service checks Stripe when billing is asked for.
+  requestBilling();
 }
 
 function closeSettings() {
   settingsOpen = false;
+  closePlans();
   $("settings-page").classList.remove("on");
 }
 
@@ -1088,8 +1625,8 @@ $("account-btn").addEventListener("click", () => {
 });
 $("delete-account").addEventListener("click", () => {
   const sure = confirm(
-    "Delete your CopperOS account?\n\nThis permanently deletes your chats, memories and settings " +
-      "(including your saved API keys) and signs you out. It cannot be undone.",
+    "Delete your CopperOS account?\n\nThis permanently deletes your chats, memories, settings " +
+    "(including your saved API keys), plan and any credits, and signs you out. It cannot be undone.",
   );
   if (!sure) return;
   if (!connected) {
@@ -1101,10 +1638,22 @@ $("delete-account").addEventListener("click", () => {
   port.postMessage({ type: "delete_account" });
 });
 
+// Foundry: back to CopperOS's model (on credits) by taking the key away.
+$("own-key-clear").addEventListener("click", () => {
+  const provider = $("cfg-provider").value;
+  if (!connected || (provider !== "openai" && provider !== "openrouter")) return;
+  $(`cfg-${provider}-key`).value = "";
+  setSettingsStatus("");
+  setBusy($("settings-save"), true);
+  awaitingSave = true;
+  port.postMessage({ type: "set_config", patch: { [provider]: { apiKey: "", clear: true } } });
+});
+
 $("cfg-provider").addEventListener("change", () => {
   const provider = $("cfg-provider").value;
   providerBlocks(provider);
   requestModels(provider);
+  renderOwnKey();
 });
 
 // A list that failed to load (no key yet, Ollama not running) tries again
@@ -1115,7 +1664,7 @@ for (const p of PROVIDERS) {
   });
 }
 
-for (const p of ["openai", "openrouter"]) {
+for (const p of ["openai", "openrouter", "jev"]) {
   $(`cfg-${p}-key-toggle`).addEventListener("click", () => {
     const input = $(`cfg-${p}-key`);
     const toggle = $(`cfg-${p}-key-toggle`);
@@ -1138,6 +1687,11 @@ $("settings-save").addEventListener("click", () => {
     setSettingsStatus("Saved", "ok");
     return;
   }
+  // Off Foundry, the cloud runs on CopperOS's own model: no provider, key or model to save.
+  if (backend === "cloud" && !ownKeyAllowed) {
+    setSettingsStatus("Saved", "ok");
+    return;
+  }
   const provider = $("cfg-provider").value;
   const patch = {
     provider,
@@ -1153,6 +1707,8 @@ $("settings-save").addEventListener("click", () => {
       model: $("cfg-openrouter-model").value,
       apiKey: $("cfg-openrouter-key").value.trim(),
     },
+    // Blank keeps the one saved; Remove clears it.
+    jev: { apiKey: $("cfg-jev-key").value.trim() },
   };
   setSettingsStatus("");
   setBusy($("settings-save"), true);
@@ -1167,40 +1723,81 @@ $("settings-save").addEventListener("click", () => {
   }, 15_000);
 });
 
-// ── first run, not connected ─────────────────────────────────────────────
+// ── signing up ───────────────────────────────────────────────────────────
 
-for (const b of document.querySelectorAll("#welcome [data-choice]")) {
-  b.addEventListener("click", () => {
-    welcomeChoice = b.dataset.choice;
-    renderWelcome();
-  });
-}
-$("welcome-continue").addEventListener("click", () => {
-  const choice = welcomeChoice ?? backend;
-  port.postMessage({ type: "choose_backend", backend: choice });
-  welcome = false;
-  renderWelcome();
-});
-
-// Signing in opens Chrome's sign-in window and waits for it; both Sign in
-// buttons spin until it is done one way or the other.
+// Signing in opens Chrome's sign-in window and waits for it; every Sign in
+// button spins until it is done one way or the other.
 let signingIn = false;
+// What was being sent when the popup came up: the words, or undefined for "what is in the box".
+// Sent on its own once there is an account to run it on (or a broker on this computer).
+let signupDraft = null;
 
 function signIn() {
-  $("offline-signin-note").textContent = "";
+  $("signup-note").textContent = "";
   setSigningIn(true);
   port.postMessage({ type: "sign_in" });
 }
 
 function setSigningIn(on) {
   signingIn = on;
-  setBusy($("offline-signin-btn"), on);
+  setBusy($("signup-btn"), on);
   setBusy($("account-btn"), on);
+  setBusy($("plan-signin"), on);
 }
 
-$("offline-signin-btn").addEventListener("click", signIn);
-$("offline-use-local").addEventListener("click", () => {
-  port.postMessage({ type: "set_backend", backend: "local" });
+function openSignup(text) {
+  signupDraft = { text };
+  $("signup-note").textContent = "";
+  $("signup").hidden = false;
+  $("signup-btn").focus();
+}
+
+function closeSignup() {
+  $("signup").hidden = true;
+}
+
+/** An account (or a broker on this computer) has turned up: send what was waiting. */
+function sendWhatWaited() {
+  if (!signupDraft || signedOut()) return;
+  if (!connected) return; // once the connection is up, this is asked again
+  const { text } = signupDraft;
+  signupDraft = null;
+  closeSignup();
+  sendTask(text);
+}
+
+$("signup-btn").addEventListener("click", signIn);
+$("signup-cancel").addEventListener("click", () => {
+  // The words stay in the box: nothing was lost by asking.
+  signupDraft = null;
+  closeSignup();
+  renderLocalOffer();
+});
+$("signup").addEventListener("keydown", (e) => {
+  if (e.key === "Escape") $("signup-cancel").click();
+});
+$("plan-signin").addEventListener("click", signIn);
+// Looking again for a broker on this computer every few seconds while on the cloud, signed in or
+// not: one that starts is offered at once (the popup below), and Settings shows This computer.
+setInterval(() => {
+  if (backend === "cloud") port.postMessage({ type: "probe_local" });
+}, 5000);
+
+/** The offer to switch to a broker running on this computer: up while the service worker says so, and nothing else is in the way. */
+function renderLocalOffer() {
+  const show = localOffer && backend === "cloud" && $("signup").hidden;
+  $("local-pop").hidden = !show;
+}
+
+$("local-pop-yes").addEventListener("click", () => {
+  localOffer = false;
+  renderLocalOffer();
+  port.postMessage({ type: "use_local" });
+});
+$("local-pop-no").addEventListener("click", () => {
+  localOffer = false;
+  renderLocalOffer();
+  port.postMessage({ type: "dismiss_local" });
 });
 $("offline-use-cloud").addEventListener("click", () => {
   port.postMessage({ type: "set_backend", backend: "cloud" });
@@ -1261,7 +1858,7 @@ function openMemories() {
   const list = $("memory-list");
   if (lastMemories) renderMemories(lastMemories);
   if (!connected) {
-    if (!lastMemories) list.innerHTML = '<div id="memory-loading">Not connected — can’t load memories.</div>';
+    if (!lastMemories) list.innerHTML = `<div id="memory-loading">${signedOut() ? "Sign up and CopperOS keeps what it learns about you here." : "Not connected — can’t load memories."}</div>`;
     return;
   }
   if (!lastMemories) list.innerHTML = '<div id="memory-loading"><span class="spinner"></span>Loading…</div>';
@@ -1381,6 +1978,450 @@ $("memory-save").addEventListener("click", () => {
   askMemories({ type: "add_memory", text });
 });
 
+// ── workflows ────────────────────────────────────────────────────────────
+//
+// A task done once, kept as steps: click it and the agent follows them in a
+// fresh chat. They come from this page (typed), or from a chat that went well,
+// which the broker writes up as steps for the person to read and fix.
+
+// A run needs at least this many steps before it is worth offering to keep.
+const WORKFLOWS_TIMEOUT_MS = 10_000;
+const DRAFT_TIMEOUT_MS = 60_000;
+
+function askWorkflows(msg) {
+  port.postMessage(msg);
+  clearTimeout(workflowsTimer);
+  workflowsTimer = setTimeout(() => {
+    workflowsResult({
+      error:
+        backend === "local"
+          ? "No answer from the broker on this computer. It may need updating: git pull in browsercontrol, then restart it."
+          : "No answer from CopperOS. Try again in a moment.",
+    });
+  }, WORKFLOWS_TIMEOUT_MS);
+}
+
+function requestWorkflows() {
+  if (connected && workflows === null) port.postMessage({ type: "list_workflows" });
+}
+
+function setWfStatus(text, tone = "") {
+  const el = $("wf-status");
+  el.textContent = text;
+  el.className = `help${tone ? ` ${tone}` : ""}`;
+}
+
+/** What the agent is told when a mold runs: its steps, to be followed in order. */
+function workflowPrompt(w) {
+  return (
+    `Mold: ${w.name}\n\n` +
+    `Follow these steps, in order. Tell me when it is done, or which step you could not do and why.\n\n${w.steps}`
+  );
+}
+
+function stepCount(steps) {
+  const numbered = steps.split("\n").filter((l) => /^\s*\d+[.)]\s/.test(l)).length;
+  return numbered || steps.split("\n").filter((l) => l.trim()).length;
+}
+
+/** Runs a mold in a fresh chat — this one, if nothing has been said in it yet. It is already saved, so it is never offered to be saved again. */
+function runWorkflow(w) {
+  if (running) {
+    setWfStatus("A task is still running in this chat. Stop it, or wait, then run the mold.", "err");
+    return;
+  }
+  closeHistory();
+  const text = workflowPrompt(w);
+  const go = () => sendTask(text, false, { fromMold: w.id });
+  if ($("empty")) go();
+  else startFreshChat(go);
+}
+
+/** New mold: a fresh chat where CopperOS asks what the mold should do and writes it up, rather than a blank form. */
+function startNewMold() {
+  if (running) {
+    setWfStatus("A task is still running in this chat. Stop it, or wait, then make a mold.", "err");
+    return;
+  }
+  closeHistory();
+  // Nothing is sent yet: the person describes the mold first, in their own words.
+  if ($("empty")) setMoldDraft(true);
+  else startFreshChat(() => setMoldDraft(true));
+}
+
+$("mold-draft-cancel").addEventListener("click", () => setMoldDraft(false));
+
+/** Opens a new chat as the New chat button does, and carries on once the broker has made it. */
+function startFreshChat(then) {
+  clearTimeout(afterReset?.timer);
+  afterReset = { then, from: viewedChatId, timer: setTimeout(() => (afterReset = null), 5000) };
+  $("new-chat").click();
+}
+
+/** The first few workflows on the empty chat, one click from running. */
+function renderWorkflowChips() {
+  const box = $("wf-chips");
+  if (!box) return;
+  box.innerHTML = "";
+  const some = (workflows ?? []).slice(0, 3);
+  box.hidden = some.length === 0;
+  // Someone with workflows of their own does not need the examples.
+  if ($("chips")) $("chips").hidden = some.length > 0;
+  for (const w of some) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "chip wf";
+    chip.dataset.wf = w.id;
+    chip.title = `Run "${w.name}"`;
+    chip.innerHTML = '<i class="i i-flow"></i>';
+    const label = document.createElement("span");
+    label.textContent = w.name;
+    chip.appendChild(label);
+    box.appendChild(chip);
+  }
+}
+
+function openWorkflows() {
+  openHistory("workflows");
+}
+
+/** The Workflows half of the window, as it opens. */
+function loadWorkflowsTab() {
+  setWfStatus("");
+  $("wf-new").disabled = !connected && !signedOut();
+  if (workflows) renderWorkflows();
+  if (!connected) {
+    if (!workflows) $("wf-list").innerHTML = `<div id="wf-loading">${signedOut() ? "Sign up and your molds are kept here." : "Not connected — can’t load molds."}</div>`;
+    return;
+  }
+  if (!workflows) $("wf-list").innerHTML = '<div id="wf-loading"><span class="spinner"></span>Loading…</div>';
+  $("history-refresh").hidden = !workflows;
+  askWorkflows({ type: "list_workflows" });
+}
+
+function renderWorkflows() {
+  const list = $("wf-list");
+  list.innerHTML = "";
+  if (!workflows || workflows.length === 0) {
+    const empty = document.createElement("div");
+    empty.id = "wf-empty";
+    empty.textContent =
+      "No molds yet. Press New mold and describe it in your own words: CopperOS asks about anything missing and writes it up. When a task repeats, it offers to save it as one too.";
+    list.appendChild(empty);
+    return;
+  }
+  for (const w of workflows) list.appendChild(workflowItem(w));
+}
+
+function workflowItem(w) {
+  const item = document.createElement("div");
+  item.className = "mitem wfitem";
+  const title = document.createElement("div");
+  title.className = "t";
+  title.textContent = w.name;
+  const steps = document.createElement("div");
+  steps.className = "steps";
+  steps.textContent = w.steps;
+  steps.title = "Show all";
+  steps.addEventListener("click", () => steps.classList.toggle("open"));
+  const meta = document.createElement("div");
+  meta.className = "mt";
+  const n = stepCount(w.steps);
+  const date = new Date(w.updated);
+  meta.textContent =
+    `${n} step${n === 1 ? "" : "s"}` +
+    (isNaN(date) ? "" : ` · Saved ${date.toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}`);
+
+  const acts = document.createElement("div");
+  acts.className = "acts2";
+  const run = document.createElement("button");
+  run.type = "button";
+  run.className = "btn pr sm";
+  run.textContent = "Run";
+  run.addEventListener("click", () => runWorkflow(w));
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "link";
+  edit.textContent = "Edit";
+  edit.addEventListener("click", () => openEditor({ id: w.id, name: w.name, steps: w.steps }));
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  // Two clicks: "Delete", then "Delete for good?" within a few seconds.
+  const del = document.createElement("button");
+  del.type = "button";
+  del.className = "link danger";
+  del.textContent = "Delete";
+  let armed = null;
+  del.addEventListener("click", () => {
+    if (!armed) {
+      del.textContent = "Delete for good?";
+      armed = setTimeout(() => {
+        armed = null;
+        del.textContent = "Delete";
+      }, 4000);
+      return;
+    }
+    clearTimeout(armed);
+    setBusy(del, true);
+    askWorkflows({ type: "delete_workflow", id: w.id });
+  });
+  acts.append(run, edit, spacer, del);
+  item.append(title, steps, meta, acts);
+  return item;
+}
+
+function workflowsResult(msg) {
+  clearTimeout(workflowsTimer);
+  if (libraryTab === "workflows") $("history-refresh").hidden = true;
+  if (msg.error && moldSaved(msg.error)) return;
+  if (msg.error) {
+    // Written up for the popup and refused (say, 50 saved already): tell them there.
+    if (autoSave === "saving") {
+      autoSave = null;
+      hideWorkflowOffer();
+      showToast(msg.error);
+      return;
+    }
+    // The editor is on top while it is open: the message belongs there.
+    if (editing) editorNote(msg.error, "err");
+    else {
+      if (!workflows) $("wf-list").innerHTML = "";
+      setWfStatus(msg.error, "err");
+      if (workflows && workflowsShown()) renderWorkflows();
+    }
+    setBusy($("wf-save"), false);
+    updateEditorSave();
+    return;
+  }
+  workflows = msg.workflows ?? [];
+  renderWorkflowChips();
+  if (msg.done === "save_workflow" && moldSaving) {
+    moldSaved(null);
+  } else if (msg.done === "save_workflow" && autoSave === "saving") {
+    // The popup's: kept without the editor, with a way to read and change it.
+    autoSave = null;
+    hideWorkflowOffer();
+    const saved = workflows[0];
+    if (saved) showToast(`Saved “${saved.name}” to your molds`, "Edit", () => {
+      openHistory("workflows");
+      openEditor({ id: saved.id, name: saved.name, steps: saved.steps });
+    });
+  } else if (msg.done === "save_workflow") {
+    closeEditor();
+    setWfStatus("Saved.");
+  } else if (msg.done === "delete_workflow") {
+    setWfStatus("Deleted.");
+  }
+  if (workflowsShown()) renderWorkflows();
+}
+
+// ── a mold the model wrote ──
+
+// The card whose Save is waiting on the broker, if any.
+let moldSaving = null;
+
+function showMoldProposal(text) {
+  let mold;
+  try {
+    mold = JSON.parse(text);
+  } catch {
+    return;
+  }
+  if (!mold?.name || !mold?.steps) return;
+  const card = document.createElement("div");
+  card.className = "mold-card";
+  const head = document.createElement("div");
+  head.className = "mold-h";
+  head.innerHTML = '<i class="i i-flow"></i>';
+  head.append("Your mold");
+  const name = document.createElement("div");
+  name.className = "mold-name";
+  name.textContent = mold.name;
+  const steps = document.createElement("pre");
+  steps.className = "mold-steps";
+  steps.textContent = mold.steps;
+  const note = document.createElement("div");
+  note.className = "mold-note";
+  note.setAttribute("role", "status");
+  const acts = document.createElement("div");
+  acts.className = "mold-acts";
+  const save = document.createElement("button");
+  save.type = "button";
+  save.className = "btn pr sm";
+  save.textContent = "Save mold";
+  const edit = document.createElement("button");
+  edit.type = "button";
+  edit.className = "btn sm";
+  edit.textContent = "Edit first";
+  const spacer = document.createElement("span");
+  spacer.className = "spacer";
+  const no = document.createElement("button");
+  no.type = "button";
+  no.className = "link quiet";
+  no.textContent = "Not now";
+  save.addEventListener("click", () => {
+    if (moldSaving || !connected) return;
+    moldSaving = { card, note, acts, name: mold.name };
+    note.className = "mold-note";
+    note.textContent = "";
+    setBusy(save, true);
+    askWorkflows({ type: "save_workflow", name: mold.name, steps: mold.steps });
+  });
+  edit.addEventListener("click", () => openEditor({ name: mold.name, steps: mold.steps }));
+  no.addEventListener("click", () => card.remove());
+  acts.append(save, edit, spacer, no);
+  card.append(head, name, steps, acts, note);
+  place(card);
+  scrollToBottom();
+}
+
+/** What became of a mold card's Save. */
+function moldSaved(error) {
+  const m = moldSaving;
+  moldSaving = null;
+  if (!m) return false;
+  setBusy(m.acts.querySelector(".btn.pr"), false);
+  if (error) {
+    m.note.className = "mold-note err";
+    m.note.textContent = error;
+    return true;
+  }
+  m.acts.remove();
+  m.note.className = "mold-note ok";
+  m.note.textContent = `Saved to your molds. Run it from the Molds tab, or from the start of a new chat.`;
+  return true;
+}
+
+// ── the popup for a task that repeats, and the toast after ──
+
+/** The first task in this chat that repeats until stopped: ask whether to keep it as a mold. */
+function showWorkflowOffer(text, chatId) {
+  if (!connected || editing) return;
+  offer = { chatId: chatId ?? viewedChatId, text };
+  setBusy($("wf-pop-yes"), false);
+  $("wf-pop").hidden = false;
+  scrollToBottom();
+}
+
+function hideWorkflowOffer() {
+  offer = null;
+  $("wf-pop").hidden = true;
+  setBusy($("wf-pop-yes"), false);
+}
+
+$("wf-pop-no").addEventListener("click", hideWorkflowOffer);
+$("wf-pop-yes").addEventListener("click", () => {
+  if (!offer || autoSave) return;
+  autoSave = "drafting";
+  setBusy($("wf-pop-yes"), true);
+  // From what was asked: the saved chat may not hold this task yet.
+  port.postMessage({ type: "workflow_draft", text: offer.text });
+  clearTimeout(draftTimer);
+  draftTimer = setTimeout(
+    () => workflowDraftResult({ error: "It took too long. Try again in a moment." }),
+    DRAFT_TIMEOUT_MS,
+  );
+});
+
+/** A line at the bottom of the chat that goes by itself, with an action if there is one to take. */
+function showToast(text, actionLabel = null, onAction = null) {
+  clearTimeout(toastTimer);
+  $("toast-text").textContent = text;
+  const act = $("toast-act");
+  act.hidden = !actionLabel;
+  act.textContent = actionLabel ?? "";
+  act.onclick = onAction ? () => (hideToast(), onAction()) : null;
+  $("toast").hidden = false;
+  toastTimer = setTimeout(hideToast, 7000);
+}
+
+function hideToast() {
+  clearTimeout(toastTimer);
+  $("toast").hidden = true;
+}
+
+// ── the editor, and drafting from a chat ──
+
+function editorNote(text, tone = "", spinning = false) {
+  const el = $("wf-editor-note");
+  el.className = `help${tone ? ` ${tone}` : ""}`;
+  el.innerHTML = spinning ? '<span class="spinner"></span>' : "";
+  el.append(text);
+}
+
+function updateEditorSave() {
+  $("wf-save").disabled = !editing || editing.drafting || !$("wf-name").value.trim() || !$("wf-steps").value.trim();
+}
+
+function openEditor({ id = null, name = "", steps = "", drafting = false } = {}) {
+  editing = { id, drafting };
+  $("wf-editor-title").textContent = drafting ? "Writing up the mold" : id ? "Edit mold" : "New mold";
+  $("wf-name").value = name;
+  $("wf-steps").value = steps;
+  $("wf-steps").disabled = drafting;
+  $("wf-name").disabled = drafting;
+  editorNote(drafting ? "Writing the steps from this chat…" : "", "", drafting);
+  setBusy($("wf-save"), false);
+  updateEditorSave();
+  $("wf-editor").hidden = false;
+  if (!drafting) $("wf-name").focus();
+}
+
+function closeEditor() {
+  editing = null;
+  clearTimeout(draftTimer);
+  $("wf-editor").hidden = true;
+  setBusy($("wf-save"), false);
+}
+
+function workflowDraftResult(msg) {
+  // The popup's: written up, and saved as written.
+  if (autoSave === "drafting") {
+    clearTimeout(draftTimer);
+    if (msg.error || !msg.steps) {
+      autoSave = null;
+      hideWorkflowOffer();
+      showToast(msg.error || "Could not write it up. Try again in a moment.");
+      return;
+    }
+    autoSave = "saving";
+    askWorkflows({ type: "save_workflow", name: msg.name, steps: msg.steps });
+    return;
+  }
+  // Cancelled while it was being written: nothing is waiting for it.
+  if (!editing?.drafting) return;
+  clearTimeout(draftTimer);
+  editing.drafting = false;
+  $("wf-steps").disabled = false;
+  $("wf-name").disabled = false;
+  if (msg.error) {
+    editorNote(msg.error, "err");
+  } else {
+    $("wf-name").value = msg.name ?? "";
+    $("wf-steps").value = msg.steps ?? "";
+    editorNote("Read it through and fix anything before you save.");
+  }
+  updateEditorSave();
+  $("wf-steps").focus();
+}
+
+$("wf-new").addEventListener("click", startNewMold);
+$("wf-cancel").addEventListener("click", closeEditor);
+$("wf-editor").addEventListener("click", (e) => {
+  if (e.target === $("wf-editor") && !$("wf-save").classList.contains("busy")) closeEditor();
+});
+$("wf-name").addEventListener("input", updateEditorSave);
+$("wf-steps").addEventListener("input", updateEditorSave);
+$("wf-save").addEventListener("click", () => {
+  if (!editing || editing.drafting) return;
+  const name = $("wf-name").value.trim();
+  const steps = $("wf-steps").value.trim();
+  if (!name || !steps) return;
+  editorNote("");
+  setBusy($("wf-save"), true);
+  askWorkflows({ type: "save_workflow", id: editing.id, name, steps });
+});
+
 // ── suggestions ──────────────────────────────────────────────────────────
 
 function openSuggest() {
@@ -1434,16 +2475,33 @@ function suggestResult(msg) {
 port.onMessage.addListener((msg) => {
   switch (msg.type) {
     case "connection":
+      endBoot();
       connected = msg.connected;
       if ("backend" in msg) backend = msg.backend;
-      if ("account" in msg) account = msg.account;
+      if ("account" in msg) {
+        account = msg.account;
+        if (!account) {
+          // Signed out: nothing of the last person's plan or billing stays on screen.
+          usage = null;
+          billing = null;
+          ownKeyAllowed = false;
+          plansArrived();
+          billingArrived();
+          stopWatching();
+          closePlans();
+        }
+      }
       if (signingIn && account) setSigningIn(false);
       renderStatus();
       renderAccount();
+      if (settingsOpen) renderPlan();
       if (settingsOpen) {
         renderSettingsAvailability();
         if (connected && !currentConfig) port.postMessage({ type: "get_config" });
+        requestUsage();
       }
+      requestWorkflows();
+      sendWhatWaited();
       break;
 
     case "tab":
@@ -1460,12 +2518,11 @@ port.onMessage.addListener((msg) => {
 
     case "account_deleted":
       setSettingsStatus("Your account and everything in it were deleted.", "ok");
-      $("offline-signin-note").textContent = "Your account and everything in it were deleted.";
       break;
 
     case "auth_error":
       setSigningIn(false);
-      $("offline-signin-note").textContent = msg.text ?? "";
+      $("signup-note").textContent = msg.text ?? "";
       if (settingsOpen) setSettingsStatus(msg.text ?? "Sign-in failed.", "err");
       break;
 
@@ -1473,21 +2530,40 @@ port.onMessage.addListener((msg) => {
     // side panel usually stays open across tab switches — this still covers
     // the service worker being recycled out from under it.
     case "restore":
+      endBoot();
       connected = msg.connected;
       if ("backend" in msg) {
         // Another broker's chats: its settings are not this one's.
         if (msg.backend !== backend) {
           currentConfig = null;
           lastMemories = null;
+          workflows = null;
         }
         backend = msg.backend;
       }
-      if ("account" in msg) account = msg.account;
+      if ("account" in msg) {
+        account = msg.account;
+        if (!account) {
+          // Signed out: nothing of the last person's plan or billing stays on screen.
+          usage = null;
+          billing = null;
+          ownKeyAllowed = false;
+          plansArrived();
+          billingArrived();
+          stopWatching();
+          closePlans();
+        }
+      }
       if (signingIn && account) setSigningIn(false);
       setBusy($("account-btn"), signingIn);
       if (Array.isArray(msg.chats)) lastChats = msg.chats;
-      welcome = Boolean(msg.welcome);
       approvalDefault = msg.approvalDefault ?? null;
+      localBrokerUp = msg.localBroker === true;
+      localOffer = msg.localOffer === true;
+      renderLocalOffer();
+      if (offer && msg.chatId !== offer.chatId) hideWorkflowOffer();
+      // Another chat on screen: a mold being described was for the one left.
+      if (moldDraft && (msg.chatId ?? null) !== viewedChatId) setMoldDraft(false);
       viewedChatId = msg.chatId ?? null;
       resetLog();
       for (const ev of msg.events ?? []) renderEvent(ev);
@@ -1497,12 +2573,20 @@ port.onMessage.addListener((msg) => {
       setRunning(Boolean(msg.running));
       setApprovalMode(msg.approvalMode ?? "submits");
       setSupervisor(msg.supervisor === true);
-      setAgentOn(msg.agentOn !== false);
       setPendingApprovalChatIds(msg.pendingApprovalChatIds ?? []);
       renderStatus();
       renderAccount();
-      renderWelcome();
       if (settingsOpen) renderSettingsAvailability();
+      requestWorkflows();
+      renderWorkflowChips();
+      sendWhatWaited();
+      // A workflow waited for a fresh chat to run in: it is here.
+      if (afterReset && msg.chatId && msg.chatId !== afterReset.from && !msg.running) {
+        const { then, timer } = afterReset;
+        clearTimeout(timer);
+        afterReset = null;
+        then();
+      }
       break;
 
     case "run_state":
@@ -1511,10 +2595,6 @@ port.onMessage.addListener((msg) => {
         showApproval(null);
         showAsk(null);
       }
-      break;
-
-    case "agent_switch":
-      if (msg.chatId === viewedChatId) setAgentOn(msg.on !== false);
       break;
 
     case "approval_flags":
@@ -1537,14 +2617,69 @@ port.onMessage.addListener((msg) => {
       memoriesResult(msg);
       break;
 
+    case "workflows":
+      workflowsResult(msg);
+      break;
+
+    case "local_broker":
+      localBrokerUp = msg.running === true;
+      localOffer = msg.offer === true;
+      renderStatus();
+      renderAccount();
+      renderLocalOffer();
+      break;
+
+    case "workflow_draft":
+      workflowDraftResult(msg);
+      break;
+
     case "config":
       currentConfig = msg.config;
-      if (settingsOpen) applyConfig(msg.config);
+      if (settingsOpen) applyConfig(msg.config, msg.platformModel, msg.ownKeyAllowed);
+      else {
+        if (msg.platformModel) platformModel = msg.platformModel;
+        if (typeof msg.ownKeyAllowed === "boolean") ownKeyAllowed = msg.ownKeyAllowed;
+      }
+      // A broker on this computer does not say: it has Jev if its .env does, and the supervisor is offered.
+      jevAvailable = msg.jevOn !== false;
+      setSupervisor(supervisor);
       if (awaitingSave) {
         awaitingSave = false;
         setBusy($("settings-save"), false);
         setSettingsStatus("Saved", "ok");
+        requestUsage();
         setTimeout(() => { if ($("settings-status").textContent === "Saved") setSettingsStatus(""); }, 1500);
+      }
+      break;
+
+    case "usage":
+      plansArrived();
+      usage = { usage: msg.usage, ownKey: msg.ownKey === true };
+      setOwnKeyAllowed(msg.usage?.ownKeyAllowed);
+      renderPlan();
+      checkPurchase();
+      break;
+
+    case "billing":
+      billingArrived();
+      billing = msg;
+      if (msg.enabled) setOwnKeyAllowed(msg.ownKeyAllowed);
+      renderPlans();
+      checkPurchase();
+      break;
+
+    case "billing_url":
+      stopBuying();
+      renderPlans();
+      if (msg.error) {
+        plansStatus(msg.error, "err");
+      } else {
+        plansStatus(
+          msg.kind === "portal"
+            ? "Your billing page is open in a new tab."
+            : "Finish paying in the new tab. This page updates when it's done.",
+        );
+        watchPurchase();
       }
       break;
 
@@ -1573,14 +2708,14 @@ port.onMessage.addListener((msg) => {
         // Already shown optimistically when this panel sent the task.
         if (pendingEcho !== null && pendingEcho === (msg.text ?? "")) {
           pendingEcho = null;
-          startRun(Date.now());
+          beginPending(Date.now());
         } else {
           renderEvent({ event: "start", text: msg.text ?? "" }, true);
         }
         setRunning(true);
         break;
       }
-      renderEvent({ event: msg.event, text: msg.text ?? "" }, true);
+      renderEvent({ event: msg.event, text: msg.text ?? "", chatId: msg.chatId }, true);
       if (TERMINAL.includes(msg.event)) {
         showApproval(null);
         showAsk(null);
@@ -1592,20 +2727,33 @@ port.onMessage.addListener((msg) => {
 
 // ── composer ─────────────────────────────────────────────────────────────
 
-function sendTask() {
-  const text = task.value.trim();
-  if (!text || running || !agentOn) return;
+/** Sends `text` as a task; with none given, what is in the box (which it then empties). */
+function sendTask(text, fromBox = text === undefined, extras = {}) {
+  text ??= task.value.trim();
+  if (!text || running) return;
+  // Nothing to run it on yet: ask for an account, and keep what was typed until there is one.
+  if (signedOut()) {
+    openSignup(fromBox ? undefined : text);
+    return;
+  }
+  // The idea for a new mold, in the person's words: the model asks about what it leaves out.
+  if (moldDraft && !extras.fromMold) {
+    extras = { ...extras, makeMold: true };
+    setMoldDraft(false);
+  }
   // The log is not cleared: each task is a turn in one ongoing chat, and the
   // broker keeps the transcript. "New chat" is how you start over.
   pendingEcho = text;
   addMine(text);
   const rules = rulesText();
-  port.postMessage({ type: "task", text, ...(rules ? { rules } : {}) });
+  port.postMessage({ type: "task", text, ...(rules ? { rules } : {}), ...extras });
   // Rules are for one task: the next one starts without them.
   $("rules").value = "";
   resizeRules();
-  task.value = "";
-  autoResize();
+  if (fromBox) {
+    task.value = "";
+    autoResize();
+  }
   renderComposer();
 }
 
@@ -1624,6 +2772,12 @@ task.addEventListener("keydown", (e) => {
 log.addEventListener("click", (e) => {
   const chip = e.target.closest(".chip");
   if (!chip) return;
+  // A saved workflow runs at once; the examples only fill in the box.
+  if (chip.dataset.wf) {
+    const w = (workflows ?? []).find((x) => x.id === chip.dataset.wf);
+    if (w) runWorkflow(w);
+    return;
+  }
   task.value = chip.textContent.trim();
   autoResize();
   renderComposer();
@@ -1665,8 +2819,10 @@ function stopAnswered() {
 $("send").addEventListener("click", () => (running ? cancelRun() : sendTask()));
 
 $("new-chat").addEventListener("click", () => {
+  setMoldDraft(false);
   port.postMessage({ type: "reset" });
   resetLog();
+  hideWorkflowOffer();
   setRunning(false);
   showApproval(null);
   showAsk(null);
@@ -1674,7 +2830,7 @@ $("new-chat").addEventListener("click", () => {
   closeSettings();
 });
 
-$("history").addEventListener("click", openHistory);
+$("history").addEventListener("click", () => openHistory());
 $("history-close").addEventListener("click", closeHistory);
 
 document.addEventListener("keydown", (e) => {

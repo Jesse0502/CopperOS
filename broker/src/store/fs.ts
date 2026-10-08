@@ -4,6 +4,7 @@
 //   sessions/<id>.json            one transcript per chat
 //   current.json                  which chat to resume on startup
 //   memories/<topic>/<slug>.md    one fact each, hand-parsed frontmatter
+//   workflows/<id>.json           one saved workflow each
 //   progress/<chatId>.json        the chat's current task
 //   config.json                   LLM provider, model and keys
 //
@@ -16,7 +17,7 @@ import path from "node:path";
 import type { LLMConfig } from "../config.js";
 import type { TaskState } from "../progress.js";
 import type { Session } from "../session.js";
-import { LOCAL_USER, summarize, type ChatSummary, type MemoryRecord, type Store } from "./store.js";
+import { LOCAL_USER, summarize, type ChatSummary, type MemoryRecord, type Store, type WorkflowRecord } from "./store.js";
 
 export const DEFAULT_STORAGE_DIR =
   process.env.STORAGE_DIR ?? path.resolve(import.meta.dirname, "../../../storage");
@@ -145,6 +146,42 @@ export class FsStore implements Store {
 
   deleteMemory(userId: string, topic: string, slug: string): Promise<void> {
     return rm(path.join(this.root(userId), "memories", topic, `${slug}.md`), { force: true });
+  }
+
+  private workflowFile(userId: string, id: string): string {
+    // Ids are checked before they get here (workflows.ts); this keeps one from naming another folder.
+    return path.join(this.root(userId), "workflows", `${id.replace(/[^\w-]/g, "_")}.json`);
+  }
+
+  async listWorkflows(userId: string): Promise<WorkflowRecord[]> {
+    const dir = path.join(this.root(userId), "workflows");
+    let files: string[];
+    try {
+      files = await readdir(dir);
+    } catch {
+      return [];
+    }
+    const found: WorkflowRecord[] = [];
+    for (const f of files) {
+      if (!f.endsWith(".json")) continue;
+      try {
+        const w = JSON.parse(await readFile(path.join(dir, f), "utf8")) as Partial<WorkflowRecord>;
+        if (typeof w.id === "string" && typeof w.name === "string" && typeof w.steps === "string") {
+          found.push({ id: w.id, name: w.name, steps: w.steps, created: w.created ?? "", updated: w.updated ?? "" });
+        }
+      } catch (err) {
+        console.warn(`[workflows] skipping unreadable file ${f}: ${String(err)}`);
+      }
+    }
+    return found;
+  }
+
+  putWorkflow(userId: string, workflow: WorkflowRecord): Promise<void> {
+    return writeAtomic(this.workflowFile(userId, workflow.id), json(workflow));
+  }
+
+  deleteWorkflow(userId: string, id: string): Promise<void> {
+    return rm(this.workflowFile(userId, id), { force: true });
   }
 
   private taskFile(userId: string, chatId: string): string {

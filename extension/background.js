@@ -25,7 +25,7 @@ import * as screencast from "./screencast.js";
 import * as presence from "./presence.js";
 import * as workspace from "./workspace.js";
 import * as auth from "./auth.js";
-import { LOCAL_URL, cloud, getBackend, setBackend } from "./backend.js";
+import { LOCAL_URL, cloud, getBackend, localBrokerRunning, setBackend } from "./backend.js";
 
 // The UI lives in the side panel, not a popup: it stays open across tab
 // switches within a window instead of closing the moment focus leaves.
@@ -66,8 +66,6 @@ const panelPorts = new Set();
 // Where the broker is, and who is signed in to it when it is the hosted one.
 let backend = "local";
 let signedIn = null; // { email } or null
-// Whether this person has said where CopperOS runs. Until then the panel asks.
-let chosen = true;
 // "Ask before" in Settings: the approval mode new chats start with, or null
 // to leave it to the broker.
 let approvalDefault = null;
@@ -78,20 +76,16 @@ let supervisorDefault = null;
 // — an expired or revoked token. The next one refreshes the token first.
 let refused = 0;
 
-// The person's brakes, enforced here whatever the broker does: an op for a
-// chat under either is refused, and the broker ends that chat's run when it
-// sees the refusal (Halted, in its bridge.ts). So Stop and the agent switch
-// work even if the cancel never reaches the broker.
-//  - agentOff: chats whose agent switch is off, until switched back on.
-//    Kept across browser restarts.
+// The person's brake, enforced here whatever the broker does: an op for a chat
+// they stopped is refused, and the broker ends that chat's run when it sees the
+// refusal (Halted, in its bridge.ts). So Stop works even if the cancel never
+// reaches the broker.
 //  - session.stopped: chats stopped with Stop, until their next task starts.
-let agentOff = {};
 // Stops clicked while the broker was out of reach, sent once it is back.
 const pendingCancels = new Set();
 
 function haltReason(chatId) {
   if (!chatId) return null;
-  if (agentOff[chatId]) return "The user switched the agent off in this chat, so it cannot act in the browser.";
   if (session.stopped[chatId]) return "The user stopped this task.";
   return null;
 }
@@ -169,10 +163,10 @@ const ready = (async () => {
   backend = await getBackend();
   signedIn = await auth.account().catch(() => null);
   const stored = await chrome.storage.local
-    .get(["backend", "approvalDefault", "supervisorDefault", "agentOff"])
+    .get(["backend", "approvalDefault", "supervisorDefault"])
     .catch(() => ({}));
-  if (stored.agentOff && typeof stored.agentOff === "object") agentOff = stored.agentOff;
-  chosen = stored.backend === "local" || stored.backend === "cloud";
+  // There was once a per-chat agent switch. It is gone, and a chat left switched off must not stay blocked.
+  chrome.storage.local.remove("agentOff").catch(() => {});
   approvalDefault = ["all", "submits", "none"].includes(stored.approvalDefault) ? stored.approvalDefault : null;
   supervisorDefault = typeof stored.supervisorDefault === "boolean" ? stored.supervisorDefault : null;
   try {
@@ -782,6 +776,51 @@ function socketAlive() {
   return ws && (ws.readyState === WebSocket.CONNECTING || ws.readyState === WebSocket.OPEN);
 }
 
+// Whether a CopperOS broker is answering on this computer. Asked at most every
+// few seconds while on the cloud. One that is running is offered: the panel asks
+// whether to switch to it, signed in or not, and Settings shows This computer.
+let localBroker = false;
+let probedAt = 0;
+// "Stay in the cloud" was the answer for this broker: not asked again until it stops and starts again.
+let localOfferDismissed = false;
+// On the broker on this computer because the offer was taken, not because it was
+// chosen in Settings: when it stops for good, the panel goes back to the cloud.
+let autoLocal = false;
+let localDownSince = 0;
+// A broker restarting (npm run dev) is gone for a moment; one gone this long has stopped.
+const LOCAL_GONE_MS = 15000;
+
+async function probeLocalBroker(force = false) {
+  if (!force && Date.now() - probedAt < 4000) return localBroker;
+  probedAt = Date.now();
+  const running = await localBrokerRunning();
+  if (running !== localBroker) {
+    localBroker = running;
+    // A broker that stopped and starts again is offered again.
+    if (!running) localOfferDismissed = false;
+    broadcastToPanels({ type: "local_broker", running, offer: localOffer() });
+  }
+  return running;
+}
+
+/** Whether the panel should offer to switch to the broker on this computer: one is running, the panel is on the cloud, and nobody said no to it. */
+function localOffer() {
+  return localBroker && backend === "cloud" && !localOfferDismissed;
+}
+
+/** The broker this panel found on its own has not come back: back to the cloud, where sign-up starts. */
+async function noticeLocalGone() {
+  if (!(backend === "local" && autoLocal)) return false;
+  localDownSince ||= Date.now();
+  if (Date.now() - localDownSince < LOCAL_GONE_MS) return false;
+  if (await probeLocalBroker(true)) {
+    localDownSince = Date.now();
+    return false;
+  }
+  await switchBackend("cloud", { auto: true });
+  return true;
+}
+
 /** Where to connect now, or null when there is nothing to connect to (hosted, signed out). */
 async function socketUrl() {
   if (backend === "local") return LOCAL_URL;
@@ -815,7 +854,9 @@ async function connect() {
     await ready;
     const url = await socketUrl();
     if (!url) {
-      // Signed out of the hosted broker: nothing to do until sign-in.
+      // Signed out of the hosted service: nothing to connect to until sign-up,
+      // unless a broker is running on this computer, which is then used.
+      await probeLocalBroker();
       announce(false);
       return;
     }
@@ -847,6 +888,7 @@ function wire(sock) {
     }
     opened = true;
     refused = 0;
+    localDownSince = 0;
     announce(true);
     void (async () => {
       await ready;
@@ -952,12 +994,53 @@ function wire(sock) {
 
     // LLM settings: sent in answer to get_config/set_config from the Settings page.
     if (msg.type === "config") {
-      broadcastToPanels({ type: "config", config: msg.config });
+      broadcastToPanels({
+        type: "config",
+        config: msg.config,
+        platformModel: msg.platformModel,
+        ownKeyAllowed: msg.ownKeyAllowed === true,
+      });
+      return;
+    }
+    // Plans and credits, in answer to get_billing: what the user is on and what is for sale.
+    if (msg.type === "billing") {
+      const { type: _type, ...billing } = msg;
+      broadcastToPanels({ type: "billing", ...billing });
+      return;
+    }
+    // The page to pay on, or to manage billing on. Only Stripe's own pages are
+    // ever opened from here, whatever the service sends.
+    if (msg.type === "billing_url") {
+      let opened = false;
+      if (isStripePage(msg.url)) {
+        await chrome.tabs.create({ url: msg.url, active: true });
+        opened = true;
+      }
+      broadcastToPanels({
+        type: "billing_url",
+        kind: msg.kind,
+        opened,
+        error: msg.error ?? (msg.url && !opened ? "That payment page could not be opened." : undefined),
+      });
+      return;
+    }
+    // What the hosted service has left of this week's usage, in answer to get_usage.
+    if (msg.type === "usage") {
+      broadcastToPanels({ type: "usage", usage: msg.usage, ownKey: msg.ownKey });
       return;
     }
     // Saved memories, in answer to listing, adding or deleting one.
     if (msg.type === "memories") {
       broadcastToPanels({ type: "memories", memories: msg.memories, error: msg.error, done: msg.done });
+      return;
+    }
+    // Saved workflows, in answer to listing, saving or deleting one; and a chat written up as one.
+    if (msg.type === "workflows") {
+      broadcastToPanels({ type: "workflows", workflows: msg.workflows, error: msg.error, done: msg.done });
+      return;
+    }
+    if (msg.type === "workflow_draft") {
+      broadcastToPanels({ type: "workflow_draft", name: msg.name, steps: msg.steps, error: msg.error });
       return;
     }
     // Model list for one provider, sent in answer to a "list_models" request.
@@ -998,7 +1081,9 @@ function wire(sock) {
     // The hosted socket refuses a bad token before it ever opens.
     if (!opened && backend === "cloud") refused++;
     announce(false);
-    scheduleReconnect();
+    void noticeLocalGone().then((gone) => {
+      if (!gone) scheduleReconnect();
+    });
   };
 
   sock.onerror = () => {
@@ -1040,6 +1125,8 @@ chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
   // connect() is a no-op unless the socket is genuinely gone.
   void connect();
+  // On the cloud, a broker started on this computer is noticed even with no panel open to ask.
+  if (backend === "cloud") void probeLocalBroker();
 });
 
 function send(obj) {
@@ -1069,6 +1156,16 @@ function sendResult(obj) {
 }
 
 // ── side panel wiring ────────────────────────────────────────────────────────
+
+const STRIPE_PAGES = new Set(["checkout.stripe.com", "billing.stripe.com"]);
+function isStripePage(url) {
+  try {
+    const u = new URL(url);
+    return u.protocol === "https:" && STRIPE_PAGES.has(u.hostname);
+  } catch {
+    return false;
+  }
+}
 
 function broadcastToPanels(msg) {
   for (const port of panelPorts) {
@@ -1116,17 +1213,23 @@ chrome.runtime.onConnect.addListener((port) => {
     // A worker just woken by this message has not read back which chat is
     // on screen yet; a Stop sent before that would name no chat at all.
     await ready;
-    if (msg.type === "set_backend" && (msg.backend === "local" || msg.backend === "cloud")) {
-      await switchBackend(msg.backend);
+    if (msg.type === "probe_local") {
+      // Looking again may find a broker to offer.
+      await probeLocalBroker(true);
       return;
     }
-    // The first-run choice, which may be where it already is.
-    if (msg.type === "choose_backend" && (msg.backend === "local" || msg.backend === "cloud")) {
-      await ready;
-      await setBackend(msg.backend);
-      chosen = true;
-      if (msg.backend !== backend) await switchBackend(msg.backend);
-      else broadcastToPanels(restoreMessage());
+    // The offer taken: this computer, for as long as its broker runs (then back to the cloud).
+    if (msg.type === "use_local") {
+      if (localBroker) await switchBackend("local", { auto: true });
+      return;
+    }
+    if (msg.type === "dismiss_local") {
+      localOfferDismissed = true;
+      broadcastToPanels({ type: "local_broker", running: localBroker, offer: false });
+      return;
+    }
+    if (msg.type === "set_backend" && (msg.backend === "local" || msg.backend === "cloud")) {
+      await switchBackend(msg.backend);
       return;
     }
     if (msg.type === "set_approval_default" && ["all", "submits", "none"].includes(msg.mode)) {
@@ -1171,15 +1274,6 @@ chrome.runtime.onConnect.addListener((port) => {
       return;
     }
     if (msg.type === "delete_account" && backend === "cloud") send({ type: "delete_account" });
-    if (msg.type === "task" && agentOff[session.chatId]) {
-      recordEvent({
-        type: "agent_event",
-        event: "error",
-        chatId: session.chatId,
-        text: "The agent is switched off in this chat. Switch it on to send it a task.",
-      });
-      return;
-    }
     if (msg.type === "task") {
       // The tab it starts on, so "this page" means something to the agent,
       // and any rules the person set for its supervisor.
@@ -1190,34 +1284,40 @@ chrome.runtime.onConnect.addListener((port) => {
         chatId: session.chatId,
         tab: tab && { url: tab.url, title: tab.title },
         ...(typeof msg.rules === "string" && msg.rules.trim() ? { rules: msg.rules.trim() } : {}),
+        // A saved mold being run (never offered to be saved again), or New mold.
+        ...(typeof msg.fromMold === "string" ? { fromMold: msg.fromMold } : {}),
+        ...(msg.makeMold === true ? { makeMold: true } : {}),
       });
     }
     if (msg.type === "cancel") stopChat(typeof msg.chatId === "string" ? msg.chatId : session.chatId);
-    // The chat's agent switch. Off stops whatever it is doing — a run, or a
-    // question or approval it waits on — and refuses its ops until it is on.
-    if (msg.type === "set_agent" && typeof msg.chatId === "string") {
-      const id = msg.chatId;
-      if (msg.on === false) {
-        agentOff[id] = true;
-        const busy =
-          id === session.chatId
-            ? session.running || Boolean(session.approval || session.ask)
-            : Boolean(session.pendingApprovals[id] || session.pendingAsks[id] || session.chats?.find((c) => c.id === id)?.running);
-        if (busy) stopChat(id);
-        runChanged(id, false);
-      } else {
-        delete agentOff[id];
-      }
-      await chrome.storage.local.set({ agentOff }).catch(() => {});
-      broadcastToPanels({ type: "agent_switch", chatId: id, on: msg.on !== false });
-    }
     if (msg.type === "reset") send({ type: "reset" });
     if (msg.type === "chats") send({ type: "list_chats" });
     if (msg.type === "list_memories") send({ type: "list_memories" });
     if (msg.type === "add_memory" && typeof msg.text === "string") send({ type: "add_memory", text: msg.text });
     if (msg.type === "delete_memory" && typeof msg.key === "string") send({ type: "delete_memory", key: msg.key });
+    if (msg.type === "list_workflows") send({ type: "list_workflows" });
+    if (msg.type === "save_workflow") {
+      send({ type: "save_workflow", id: msg.id, name: msg.name, steps: msg.steps });
+    }
+    if (msg.type === "delete_workflow" && typeof msg.id === "string") send({ type: "delete_workflow", id: msg.id });
+    // The chat on screen, as the service worker knows it.
+    if (msg.type === "workflow_draft") {
+      send({
+        type: "workflow_draft",
+        chatId: session.chatId,
+        ...(typeof msg.text === "string" ? { text: msg.text.slice(0, 4000) } : {}),
+      });
+    }
     if (msg.type === "switch_chat" && msg.id) send({ type: "switch_chat", id: msg.id });
     if (msg.type === "get_config") send({ type: "get_config" });
+    if (msg.type === "get_usage") send({ type: "get_usage" });
+    if (msg.type === "get_billing") send({ type: "get_billing" });
+    if (msg.type === "billing_portal") send({ type: "billing_portal" });
+    // A plan by name, or a credit pack by the price the service listed: never an amount.
+    if (msg.type === "billing_checkout") {
+      if (typeof msg.plan === "string") send({ type: "billing_checkout", plan: msg.plan });
+      else if (typeof msg.priceId === "string") send({ type: "billing_checkout", priceId: msg.priceId });
+    }
     if (msg.type === "set_config" && msg.patch) send({ type: "set_config", patch: msg.patch });
     if (msg.type === "list_models" && msg.provider) send({ type: "list_models", provider: msg.provider });
     if (msg.type === "set_approval_mode" && msg.mode) {
@@ -1284,7 +1384,6 @@ chrome.runtime.onInstalled.addListener(({ reason, previousVersion }) => {
     const { backend: stored } = await chrome.storage.local.get("backend").catch(() => ({}));
     if (stored) return;
     await setBackend("local");
-    chosen = true;
     await switchBackend("local");
   })();
 });
@@ -1325,9 +1424,9 @@ function restoreMessage() {
     watching: session.watching,
     approvalMode: session.approvalMode,
     supervisor: session.supervisor,
-    agentOn: !agentOff[session.chatId],
     pendingApprovalChatIds: waitingChatIds(),
-    welcome: !chosen,
+    localBroker,
+    localOffer: localOffer(),
     approvalDefault,
   };
 }
@@ -1387,15 +1486,26 @@ async function clearSession() {
  * Move to the other broker. Its chats and panel state are its own: this
  * backend's are put away as they are, and the other's come back.
  */
-async function switchBackend(next) {
+async function switchBackend(next, { auto = false } = {}) {
   await ready;
-  if (next === backend) return;
+  // Cloud chosen in Settings with a broker running here is an answer to the offer, like "Stay in the cloud".
+  if (!auto && next === "cloud" && localBroker) localOfferDismissed = true;
+  if (next === backend) {
+    // Already here because it was found, and now chosen as well: remember the choice.
+    if (!auto) {
+      autoLocal = false;
+      await setBackend(next);
+    }
+    return;
+  }
   persist();
   disconnect();
   void screencast.stop();
   backend = next;
-  await setBackend(next);
-  chosen = true;
+  // Only a choice made in Settings is remembered; where the panel went by itself is not.
+  autoLocal = auto && next === "local";
+  localDownSince = 0;
+  if (!auto) await setBackend(next);
   refused = 0;
   signedIn = await auth.account().catch(() => null);
   const { [sessionKey()]: saved } = await chrome.storage.session.get(sessionKey()).catch(() => ({}));

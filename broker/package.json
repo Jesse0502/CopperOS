@@ -11,7 +11,9 @@
     "task": "tsx src/index.ts --task",
     "typecheck": "tsc --noEmit",
     "copper": "tsx src/client/cli.ts",
-    "mcp": "tsx src/client/mcp.ts"
+    "mcp": "tsx src/client/mcp.ts",
+    "admin": "tsx src/cloud/admin.ts",
+    "stripe:setup": "tsx --env-file=.env src/cloud/stripe-setup.ts"
   },
   "dependencies": {
     "@aws-sdk/client-apigatewaymanagementapi": "^3.1141.0",
@@ -20,6 +22,7 @@
     "@aws-sdk/client-lambda": "^3.1141.0",
     "@aws-sdk/client-s3": "^3.1141.0",
     "@aws-sdk/client-sesv2": "^3.1142.0",
+    "@aws-sdk/client-sns": "^3.1147.0",
     "@aws-sdk/client-ssm": "^3.1141.0",
     "@aws-sdk/lib-dynamodb": "^3.1141.0",
     "@modelcontextprotocol/sdk": "^1.31.0",
@@ -27,6 +30,7 @@
     "aws-jwt-verify": "^5.2.1",
     "dotenv": "^16.4.5",
     "openai": "^7.15.0",
+    "stripe": "^23.0.0",
     "ws": "^8.18.0",
     "zod": "^4.6.5"
   },

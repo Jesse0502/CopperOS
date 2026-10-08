@@ -13,6 +13,7 @@
 import type { MemoryView } from "./memory.js";
 import type { LLMConfig, Provider } from "./config.js";
 import type { TaskExtras } from "./task-extras.js";
+import type { Workflow } from "./workflows.js";
 
 /**
  * Full status of one chat, sent whenever the extension needs to (re)draw it.
@@ -53,6 +54,12 @@ export type BridgeHandlers = {
   onListMemories: () => Promise<MemoryView[]>;
   onAddMemory: (text: string) => Promise<MemoryView[]>;
   onDeleteMemory: (key: string) => Promise<MemoryView[]>;
+  /** The Workflows page: every saved workflow, and saving, deleting or drafting one. The first three answer with the list as it now is. */
+  onListWorkflows: () => Promise<Workflow[]>;
+  onSaveWorkflow: (input: { id?: unknown; name: unknown; steps: unknown }) => Promise<Workflow[]>;
+  onDeleteWorkflow: (id: unknown) => Promise<Workflow[]>;
+  /** A chat — or a task just asked for, when `request` is given — written up as steps. */
+  onDraftWorkflow: (chatId: string | undefined, request: string | undefined) => Promise<{ name: string; steps: string }>;
   /** The Settings page wants the current LLM provider/model/key config. */
   onGetConfig: () => LLMConfig | Promise<LLMConfig>;
   /** The Settings page changed something — merge and persist it. */

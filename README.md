@@ -50,10 +50,23 @@ Then load the extension: `chrome://extensions` → enable **Developer mode** →
 **Load unpacked** → select `extension/`. Keep only one copy of CopperOS enabled —
 the broker serves one client at a time (see [Troubleshooting](#troubleshooting)).
 
-Click the CopperOS toolbar icon to open the side panel. The first time, it asks
-where CopperOS runs: pick **This computer**. The dot turns green when it finds
-the broker; until then the panel shows how to start it. Choose a provider, key
-and model under **Settings**, then type a task.
+Click the CopperOS toolbar icon to open the side panel. It opens on the chat,
+whoever you are. On the hosted service (see [The hosted service](#the-hosted-service))
+nobody has to sign up before they have seen it: the first message they send
+brings up a popup asking them to **Continue with Google**, and the message goes
+as soon as they are in. If a broker is running on this computer, the extension
+notices (a plain HTTP request to port 7331, every few seconds while the panel is
+on the cloud; a WebSocket would knock out the broker's live client) and asks,
+signed in or not: a popup says CopperOS is running on this computer and offers
+**Switch to this computer** or **Stay in the cloud**. Switching lasts as long as
+that broker runs: if it stays gone for 15 seconds, the panel goes back to the
+cloud, where a sign-in is kept. Staying, or choosing Cloud in Settings, is not
+asked again until the broker stops and starts again. While a broker is running
+(or the panel is on it), Settings shows **Cloud** / **This computer** at the
+top; a choice made there is remembered. The dot in the panel's header is green
+when connected, grey when nobody is signed in, red when the broker or the cloud
+cannot be reached; a broker chosen in Settings that is not running shows how to
+start it. Choose a provider, key and model under **Settings**, then type a task.
 
 ### Using Ollama
 
@@ -485,6 +498,301 @@ A `chrome.alarms` heartbeat wakes the worker and reconnects if the socket died
 while the browser was in the background, since `setTimeout` does not survive
 worker termination.
 
+## The hosted service
+
+Someone who installs CopperOS from the Chrome Web Store signs in with Google
+and can start at once: nothing to install, no key to find. Their tasks run in
+AWS (`infra/`) on CopperOS's own model and key, and every call is metered.
+Running on a key of their own is a paid plan, **Foundry**, priced for the
+hosting, storage and convenience and not for the model.
+
+| | CopperOS's model | Their own API key (Foundry) |
+|---|---|---|
+| Model | `deepseek/deepseek-v4.1-flash`, fixed (`PLATFORM_MODEL`) | any model on OpenRouter or OpenAI that can use tools, picked from the list in Settings |
+| Paid by | the allowance, then credits | them, to their provider |
+| Limit | dollars of model use: a week on Ore, the billing month on Ingot and Facet | none from CopperOS |
+| Task length | by plan: 15 minutes on Ore, 5 hours on Ingot, 24 hours on Facet | no limit on a task; 8 hours a week of working time (Foundry) |
+| Jev (supervisor, safety checks) | CopperOS's | their own Jev key, optional; never CopperOS's |
+
+Own key is gated on the plan, on the server: `usesPlatformKey` in `config.ts`
+is true unless the plan allows it (`allowsOwnKey`, registered at startup by
+`installBilling()`) **and** a key is saved for the chosen provider; a failed
+lookup is a no, which is the metered side. There is no switch: on Foundry,
+Settings shows the provider, key and model, a saved key is used at once, and
+**Remove my saved API key** goes back to CopperOS's model on credits. Anyone
+else sees a line pointing at the Foundry plan, and `set_config` drops their
+model settings. Someone
+whose Foundry lapses is back on CopperOS's model, metered, with nobody doing
+anything. Foundry has no allowance of CopperOS's model: credits can still
+pay for it.
+
+**Whose Jev.** Each run picks its Jev client (`jevFor` in `config.ts`, applied
+by `withJev` in `jev.ts`, which holds it in an `AsyncLocalStorage` so runs going
+at once never borrow each other's). On the hosted service, Ore, Ingot and Facet
+use CopperOS's key; Foundry uses a Jev key the person saved in Settings, or
+none. With none, a Foundry run has no supervisor, no sorting of messages and
+none of Jev's checks, and the panel turns the Supervisor button off and says
+why. On a broker of your own, a key saved in Settings wins over
+`JEV_AI_API_KEY`. Like the model keys, the saved Jev key is sealed when hosted
+and never sent back to the panel.
+
+**One key, many people.** Everyone on Ore, Ingot and Facet runs on CopperOS's
+one OpenRouter key, many at once, and shares nothing through it: a model call
+is stateless, and each carries only its own chat's messages, built from that
+chat's session. Each call also names its account to OpenRouter as `user`, a
+hash of the account id (never the email), so OpenRouter can tell them apart.
+The broker's own short-lived caches (the last snapshot, the last job-fit
+verdict, the labels of page elements) are keyed by account and chat.
+
+**What is metered.** OpenRouter reports what each call cost as `usage.cost`,
+so the meter (`broker/src/meter.ts`) charges real dollars, not a price table
+that goes stale; a response without it is estimated, never free. Before every
+model call the agent asks the meter whether anything is left, and a task that
+has run out stops with a message saying when it starts over and pointing at
+plans and credits. Jev's calls are not metered (they follow the model's steps,
+which are).
+
+**Plans and credits** (`broker/src/cloud/billing.ts`). A plan gives an allowance
+in dollars of model use for a period: Ore a week, Monday 00:00 UTC to Monday;
+Ingot and Facet their billing month, from the day the subscription renews
+(Stripe's `current_period_start`, kept on the account) to the next. What goes
+past it comes out of the user's credits, which never expire. People only ever
+see credits: every dollar paid buys 100 (`CREDITS_PER_DOLLAR`), and behind
+each is $0.0055 of model use (`MODEL_USE_PER_DOLLAR` 0.55 a dollar); the ledger
+keeps the balance in micro-dollars of model use and `creditsOf` counts it out. With neither left,
+a task stops and says so: buy credits, or wait for the renewal. Settings shows
+what is left of the period as a percentage, the tokens used and when it renews. The plans are named for
+copper's way from the ground to the mark on the logo: **Ore** is the trial,
+**Ingot** is refined, **Facet** is cut and polished, and **Foundry** is where
+it is cast, with your own key. A paid plan lapses back to Ore when its end date
+passes (three days after the month it paid for, in case a payment is late). Usage is kept one row per user per period in the
+`Usage` table (expiring after four months); plan, lapse date and credits are on
+the user's `Accounts` item. Amounts are whole micro-dollars so DynamoDB can add
+them atomically, and a failed write is carried to the next charge rather than
+lost. Payments (below) set a plan and add credits through `setPlan()` and
+`grantCredits()` (`broker/src/cloud/ledger.ts`); to give a plan or credits
+without a payment, or to correct one, by hand:
+
+```bash
+cd broker
+AWS_PROFILE=jassydev npm run admin -- show   someone@gmail.com
+AWS_PROFILE=jassydev npm run admin -- grant  someone@gmail.com 500     # 500 credits (a $5 pack)
+AWS_PROFILE=jassydev npm run admin -- plan   someone@gmail.com ingot 30 # 30 days (ore|ingot|facet|foundry)
+AWS_PROFILE=jassydev npm run admin -- report                           # this week's spend, and the free pool
+```
+
+**The free pool.** Ore is $2 a week per account, and all of Ore together is
+capped at $50 a calendar month. Each Ore call's cost, plus 10% for Jev and AWS
+(`POOL_OVERHEAD`), is added to the month's row. When the pool is spent, Ore
+stops for everyone until the month turns, with a message that says so; paid
+plans, people with credits (who then spend those, never the pool) and people on
+their own key carry on. The owner gets an email at 80% and again at 100%
+(`ALERTS_TOPIC_ARN`, once a month each). The pool is a hard stop, not a
+forecast: at most a few in-flight calls run past it.
+
+**Setting the limits.** The free numbers start from `freeWeeklyUsd` and
+`freePoolMonthlyUsd` in `infra/cdk.json`, and every one of them can be changed
+live, with no deploy, in a Parameter Store parameter (each Lambda picks it up
+within a minute):
+
+```bash
+aws ssm put-parameter --name /copperos/prod/limits --type String --overwrite \
+  --value '{"ore":1.5,"ingot":8,"facet":20,"foundry":0,"freePool":40}' --profile jassydev
+```
+
+`ore` there is dollars a week; `ingot` and `facet` are dollars a billing month.
+
+**Taking payments** (`broker/src/cloud/stripe*.ts`). Stripe is the source of
+truth for what is for sale, and does the parts that have to be Stripe's: the
+card form (Checkout), receipts and invoices, and changing or cancelling a
+subscription (the customer portal). CopperOS never sees a card.
+
+| | Price | What it is |
+|---|---|---|
+| Ingot | $10 a month | regular use of CopperOS's model: $8.55 of it a month |
+| Facet | $25 a month | heavy use of it: $21.79 a month |
+| Foundry | $5 a month | your own API key and model, and Jev key if you like: hosting, storage, convenience |
+| Credits | $5, $10, $25, $50 | 100 credits a dollar (500 to 5,000); they never expire |
+
+Those numbers live in `stripe-setup.ts` and nowhere else on the server, in US
+dollars. The allowance each plan includes follows from its price
+(`allowanceForPrice` in `billing.ts`): the price less Stripe's card fee (2.9% +
+30¢), divided by `POOL_OVERHEAD` for Jev and AWS, so $10 gives $8.55 of model
+use a month and $25 gives $21.79. With Managed Payments on, Stripe takes a
+further fee that this does not count, and that comes out of the margin. The
+`limits` parameter above overrides it: set the two together, because a plan
+whose allowance costs more than it earns loses money on every heavy user. The website's pricing page
+is typed by hand: change it with `stripe-setup.ts` (and the task lengths with
+`runtime.ts`, whose numbers the plan descriptions in `stripe-setup.ts` repeat).
+
+```bash
+cd broker
+npm run stripe:setup                               # the sandbox: products, prices, credit packs, the customer portal (STRIPE_SECRET_KEY in .env)
+npm run stripe:setup -- --live                     # the same for real customers (LIVE_STRIPE_SECRET_KEY in .env)
+npm run stripe:setup -- --stage dev                # and keeps the key in Parameter Store: /copperos/dev/stripe-secret-key
+cd ../infra && npx cdk deploy -c stage=dev         # prints StripeWebhookUrl
+cd ../broker
+npm run stripe:setup -- --stage dev --webhook <StripeWebhookUrl>   # registers the webhook, keeps its signing secret
+```
+
+It can be run again at any time: it finds what it made (by metadata and price
+lookup keys) and changes only what differs. **To change a price,** edit it in
+`stripe-setup.ts` and run it again: a new Stripe price takes the lookup key and
+the old one is archived, and people already subscribed keep the price they
+signed up at. Without `--live` it works only with a test key (Stripe's sandbox,
+where nothing is real), and `--live` works only with a live one, so neither can
+be done by mistake; a restricted key (`rk_`) works if it may write products,
+prices, the customer portal and webhook endpoints. The live catalog was made on
+8 October 2026. Production then needs `--live --stage prod --webhook <url>` once
+the stack is deployed, which stores the live key and the webhook's secret in
+Parameter Store. Each Stripe account also needs its customer emails turned on,
+and decides in the Dashboard whether Managed Payments (Stripe as the seller of
+record) is on; the products carry a tax code (`TAX_CODE`, SaaS for personal use)
+so it works either way.
+
+How a payment reaches an account: the extension asks the relay for a payment
+page (`billing_checkout`, by plan name or by the price id the relay listed,
+never an amount), the relay makes a Stripe Checkout session naming the user,
+and the service worker opens it in a new tab (only on `checkout.stripe.com` or
+`billing.stripe.com`). Stripe then calls the webhook Lambda, which checks the
+signature and applies the event (`stripe-events.ts`): a plan is set from the
+subscription as it stands, never from "one more month"; credits are granted
+once, by a conditional write that claims the purchase and adds the credits in
+one transaction, so Stripe sending an event twice, or two at once, changes
+nothing the second time; and the end of an old subscription cannot take a new
+plan away. Someone who already has a plan is sent to the portal instead of a
+second checkout.
+
+A webhook that never arrives (none registered yet, an outage) or is still on
+its way is caught up with: the relay notes each payment page it opens on the
+account (`pendingCheckouts`), and whenever the Plans page asks for billing
+(every few seconds while a payment page is open, at most every 10 seconds per
+account) `syncFromStripe` applies what Stripe holds the same way the webhook
+would: those pages directly, then the newest live subscription naming the user,
+then credit payments of the last 30 days (the purchase claims last 45). It all
+goes through the same idempotent handlers, so it is safe beside the webhook. Deleting an account cancels its subscription first. Receipts
+and invoices come from Stripe (turn on its customer emails under Settings →
+Emails in the Dashboard); the billing page it hosts lists them.
+
+Not handled: refunds and disputes (those events are not subscribed, so
+refunding a credit pack in Stripe does not take the credits back: use `admin
+grant <user> -1000` for a $10 pack), and currencies other than USD.
+
+**How long a task runs** (`broker/src/cloud/runtime.ts`). Each plan sets two
+numbers: how long one task may run, in minutes of working time (waiting on the
+person never counts), and how much working time all of an account's tasks share
+in a week. Ore is 15 minutes a task, Ingot 5 hours, Facet 24 hours, Foundry has
+no limit on a task and 8 hours a week. Plans on CopperOS's model have no weekly
+hours: they pay for every step in dollars, so the allowance and credits are
+their real ceiling. Foundry runs on its own key, so time is all that bounds what
+it costs CopperOS; the arithmetic is at the top of `runtime.ts` (about $0.085 an
+hour all in, so 8 hours a week is at most $3 of a $5 plan). Both numbers can be
+changed live, with `null` for no limit:
+
+```bash
+aws ssm put-parameter --name /copperos/prod/runtime --type String --overwrite \
+  --value '{"foundry":{"weeklyHours":10},"ingot":{"taskMinutes":300}}' --profile jassydev
+```
+
+A Lambda stops after 15 minutes, so a longer task is handed from one to the
+next (`cloud/agent-run.ts`). The agent's clock knows two ends: the task's own
+limit, and its Lambda's. At the Lambda's, it stops at a step boundary and saves
+where the loop stands (`session.slice`); the run keeps the chat claimed
+(`extendRun`, which also renews the lease); and the agent invokes itself with a
+`continue` job, which joins the same socket with a new one-time pass and carries
+on (`Agent.continueSlice`): a tracked task from its brief, as a later round of a
+long task always does, anything else from the chat. The person sees one task and
+one timer; nothing is added to the chat. Cancel during the gap marks the run
+(`markCancelled`), so the next Lambda finds it and stops. The working time is
+counted per week in the `Usage` table (`activeMs`). A task that would outgrow
+Lambda would move to Fargate behind the same two numbers.
+
+**Encryption.** What a person writes is encrypted before it is stored
+(`broker/src/store/sealing.ts`): transcripts in S3, the titles and pending
+questions in the chat list, tracked tasks, memories and molds. AES-256-GCM
+with a key per account, derived (HKDF) from the `/copperos/<stage>/user-keys-secret`
+SecureString, which is never stored beside the data; each record also binds in
+its account and its place, so it opens nowhere else. Ids, dates, a memory's
+topic and slug, plans and usage stay readable, because the tables find and order
+by them. It is encryption at rest, not end to end: the service holds the key,
+because it reads a chat to run a task. Records saved before this existed are
+read as they are; to encrypt them:
+
+```bash
+cd broker
+export TRANSCRIPTS_BUCKET=$(aws cloudformation describe-stacks --stack-name CopperOS-prod \
+  --query "Stacks[0].Outputs[?OutputKey=='TranscriptsBucket'].OutputValue" --output text --profile jassydev)
+AWS_PROFILE=jassydev STAGE=prod npm run admin -- encrypt all
+```
+
+**Setting up a stage.** The model key is a SecureString that only the agent
+Lambda can read. Give that OpenRouter key a credit limit on OpenRouter's side
+too: it is the one ceiling this stack cannot move.
+
+```bash
+aws ssm put-parameter --name /copperos/prod/openrouter-key --type SecureString --value sk-or-… --profile jassydev
+cd infra && npx cdk deploy -c stage=prod --profile jassydev
+```
+
+
+
+## Molds
+
+A task you have done once, saved as steps, so you never explain it twice or dig
+the old chat out of the history. CopperOS calls them **molds** (cast once, run
+again: the foundry once more), partly because "workflow" turns up in people's
+own tasks and must not be mistaken for one. In the code they are still
+workflows (`workflows.ts`, the `Workflows` table, `list_workflows`). The
+**Molds** tab, beside Chats in one window, lists them; the first few also sit
+on the empty chat as one-click chips, and **Run** sends the steps to the agent
+in a fresh chat as a task (`fromMold`), so approvals, the supervisor and
+everything else apply as to any task. A chat started from a mold is never
+offered to be saved as one again, and saving the same steps or name twice is
+refused.
+
+They are made two ways:
+
+- **Asking for one.** **New mold** opens a fresh chat and asks the person to
+  describe it in their own words first (a strip above the composer; nothing is
+  sent until they do). That message goes as the idea (`makeMold`); saying "help
+  me make a workflow" anywhere does the same, because Jev's `classifyIntent` has
+  a `mold` verdict (taken above 0.6), and with no idea in it the model first
+  asks for one. The model is told it is making a mold, not doing the task
+  (`MOLD_NOTICE`), and is offered only `ask_user`, `search_memory` and
+  `propose_mold` (`MOLD_TOOL_DEFS`; anything else is refused with a reason),
+  with the open tab left out of its message: a mold comes from what the person
+  says, not from whatever page is open. From the idea it asks, in one
+  `ask_user`, only about what the idea leaves unclear or missing, plus one
+  multiple choice of 2 to 4 additions that would make it hold up better;
+  `search_memory` only for something the person mentions that it does not know
+  ("my resume"). Then it writes the mold (specific steps, what to do when
+  something goes wrong, a clear stop, rules) and calls `propose_mold`, which
+  shows a card with the name and steps: **Save mold**, **Edit first** or **Not
+  now**. The chat stays in mold-making (`session.molding`) across messages and
+  across answered questions until a proposal is made.
+- **A task that repeats.** The first task in a chat that repeats until you stop
+  it (Jev's `loop` verdict) opens a popup asking whether to keep it; **Save as
+  mold** has the model write it up from what you asked (`Agent.draftWorkflow`)
+  and saves it at once, with a toast and an **Edit** link (`offer_workflow`,
+  once per chat, remembered with the chat).
+
+Any mold can be edited by hand. `<angle brackets>` in a step mark what changes
+from run to run. A mold is a name and plain text; up to 50 a user. Saved under
+`storage/workflows/` locally, in the `Workflows` table when hosted (sealed, like
+chats). Drafting is one model call, metered like any other, and on the hosted
+service it runs in the agent Lambda, which alone has the model's key.
+
+## What is a task and what is a chat
+
+A message that only asks for an answer in words (a question about what it just
+did, small talk) is not a task: it gets no run card, with no step counter and no
+timer, just the reply. The broker already knows which
+it is, because Jev classifies every message (`classifyIntent`), so it says so
+(`intent: reply | task`) and the panel waits on that: the message shows three
+dots, and a task's card (steps, timer, Stop) appears the moment the verdict is
+"task", counting from when the message was sent. Without Jev there is no
+verdict, and the first step brings the card.
+
 ## Layout
 
 | File | Role |
@@ -496,8 +804,9 @@ worker termination.
 | `extension/som.js` | Badge compositing onto captured frames. |
 | `extension/nav.js` | Navigation, `networkAlmostIdle` waiting, AX-based text extraction. |
 | `extension/screencast.js` | Live view frames for the side panel only. |
-| `extension/background.js` | WebSocket bridge, op router, and the after-action settle-and-report step. Splits big results into pieces for the hosted broker. |
+| `extension/background.js` | WebSocket bridge, op router, and the after-action settle-and-report step. Splits big results into pieces for the hosted broker, and tells the panel whether a broker is running on this computer. |
 | `extension/backend.js` | Which broker the extension talks to — this computer's or the hosted one — and the hosted one's addresses. |
+| `extension/assets/fonts/` | Geist and Martian Mono, bundled so the panel fetches nothing (both SIL OFL; licenses alongside). |
 | `extension/auth.js` | Signing in to the hosted broker: Cognito's page, OAuth code flow with PKCE, token refresh. |
 | `extension/workspace.js` | The one CopperOS tab group; which tabs are the agent's; closing them. |
 | `extension/presence.js` | Which tab carries the overlay; hiding it for screenshots. |
@@ -512,10 +821,15 @@ worker termination.
 | `broker/src/memory.ts` | Durable cross-chat facts: save, search. |
 | `broker/src/store/store.ts` | The `Store` interface: where chats, memories, task progress and settings are kept, per user. |
 | `broker/src/store/fs.ts` | The local broker's store: files under `storage/`, one user. |
-| `broker/src/store/cloud.ts` | The hosted store: DynamoDB, S3 transcripts, and users' API keys sealed (AES-256-GCM) under a key kept in Parameter Store. |
+| `broker/src/store/cloud.ts` | The hosted store: DynamoDB and S3 transcripts, with everything a person writes, and their API keys, sealed (`sealing.ts`: AES-256-GCM, a key per account) under a secret kept in Parameter Store. |
+| `broker/src/meter.ts` | What a run on CopperOS's own model costs and when it must stop: the `Meter` the agent checks before each model call and charges after. |
+| `broker/src/workflows.ts` | Saved molds (workflows, in the code): what may be saved, duplicates refused, and the prompt that turns a request into steps and the parser for the model's answer. |
+| `broker/src/cloud/runtime.ts` | How long a task may run on each plan, and the week's working time on Foundry, with the cost arithmetic behind them. |
+| `broker/src/cloud/stripe.ts`, `stripe-events.ts`, `stripe-webhook.ts`, `stripe-setup.ts` | Taking money: what is for sale (read from Stripe), the checkout and billing-portal sessions, what each Stripe event does to an account, the webhook Lambda, and the script that makes Stripe match what CopperOS sells. |
+| `broker/src/cloud/billing.ts`, `ledger.ts`, `admin.ts` | Plans, their allowances, credits, the free pool and the usage ledger (rules in `billing.ts`, DynamoDB, the live limits and the pool alerts in `ledger.ts`), and the command line for looking at and changing a user's plan and credits. |
 | `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect (users and task workers), the relay (the hosted `index.ts`), the agent, and `feedback.ts`, which emails "Send a suggestion" from Settings to the team. `testing/` holds a scripted model deployed to dev stacks only. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
-| `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB, S3, alarms. Secrets live in Parameter Store (free). `-c stage=guard` deploys the account's spending guard: a budget that brakes every CopperOS Lambda when the month's bill passes `spendCap` in cdk.json, plus cost anomaly emails (see `infra/lib/guard-stack.ts`, which also has the release command). |
+| `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB (including the usage ledger), S3, alarms. Secrets live in Parameter Store (free). `-c stage=guard` deploys the account's spending guard: a budget that brakes every CopperOS Lambda when the month's bill passes `spendCap` in cdk.json, plus cost anomaly emails (see `infra/lib/guard-stack.ts`, which also has the release command). |
 
 ## Testing without Chrome
 

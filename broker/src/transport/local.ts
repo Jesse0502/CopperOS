@@ -184,6 +184,42 @@ export class LocalServer implements Transport {
       })();
       return;
     }
+    if (msg.type === "list_workflows" || msg.type === "save_workflow" || msg.type === "delete_workflow") {
+      void (async () => {
+        let reply: Record<string, unknown>;
+        try {
+          const workflows =
+            msg.type === "save_workflow"
+              ? await handlers.onSaveWorkflow({ id: msg.id, name: msg.name, steps: msg.steps })
+              : msg.type === "delete_workflow"
+                ? await handlers.onDeleteWorkflow(msg.id)
+                : await handlers.onListWorkflows();
+          reply = { type: "workflows", workflows, ...(msg.type !== "list_workflows" ? { done: msg.type } : {}) };
+        } catch (err) {
+          reply = { type: "workflows", error: String((err as Error)?.message ?? err) };
+        }
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(reply));
+      })();
+      return;
+    }
+    if (msg.type === "workflow_draft") {
+      void (async () => {
+        let reply: Record<string, unknown>;
+        try {
+          reply = {
+            type: "workflow_draft",
+            ...(await handlers.onDraftWorkflow(
+              typeof msg.chatId === "string" ? msg.chatId : undefined,
+              typeof msg.text === "string" ? msg.text : undefined,
+            )),
+          };
+        } catch (err) {
+          reply = { type: "workflow_draft", error: String((err as Error)?.message ?? err) };
+        }
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(reply));
+      })();
+      return;
+    }
     if (msg.type === "get_config") {
       void (async () => {
         const config = await handlers.onGetConfig();

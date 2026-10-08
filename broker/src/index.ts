@@ -15,7 +15,9 @@ import {
 import { Agent, activeModelLabel, formatUsage, listChats, type RunResult } from "./agent.js";
 import { listSessions, setCurrent, type ApprovalMode } from "./session.js";
 import { addUserMemory, deleteMemoryByKey, memoriesForPage } from "./memory.js";
-import { initConfig, getConfig, setConfig, listModels, type Provider } from "./config.js";
+import { deleteWorkflow, listWorkflows, saveWorkflow } from "./workflows.js";
+import { initConfig, getConfig, jevFor, setConfig, listModels, type Provider } from "./config.js";
+import { withJev } from "./jev.js";
 import { LOCAL_USER, useStore } from "./store/store.js";
 import { FsStore } from "./store/fs.js";
 import { LocalServer } from "./transport/local.js";
@@ -97,7 +99,9 @@ async function runTask(agent: Agent, text: string, extras: TaskExtras, limitMs: 
  * ended. Pausing is not an end: the chat stays busy (to the panel it is still
  * running, waiting on you) and its request is shown until it is answered.
  */
-async function drive(agent: Agent, work: () => Promise<RunResult>): Promise<Outcome> {
+async function drive(agent: Agent, job: () => Promise<RunResult>): Promise<Outcome> {
+  // A Jev key saved in Settings, if there is one, else the broker's own (see jevFor).
+  const work = () => withJev(jevFor(USER), job);
   const id = agent.info().id;
   const run = runOf(id);
   let paused = false;
@@ -267,8 +271,15 @@ server.start(PORT, {
   onApproval: (requestId, approved) => answer(requestId, approved ? "approved" : "denied"),
   onAnswers: (requestId, outcome) => answer(requestId, outcome),
   onListMemories: () => memoriesForPage(USER),
-  onAddMemory: async (text) => (await addUserMemory(USER, text), memoriesForPage(USER)),
+  onAddMemory: async (text) => (await withJev(jevFor(USER), () => addUserMemory(USER, text)), memoriesForPage(USER)),
   onDeleteMemory: async (key) => (await deleteMemoryByKey(USER, key), memoriesForPage(USER)),
+  onListWorkflows: () => listWorkflows(USER),
+  onSaveWorkflow: (input) => saveWorkflow(USER, input),
+  onDeleteWorkflow: (id) => deleteWorkflow(USER, id),
+  onDraftWorkflow: async (chatId, request) => {
+    if (!chatId) throw new Error("Open the chat you want to save first.");
+    return (await getAgent(chatId)).draftWorkflow(request);
+  },
   onGetConfig: () => getConfig(USER),
   onSetConfig: (patch) => setConfig(USER, patch as Parameters<typeof setConfig>[1]),
   onListModels: (provider) => listModels(USER, provider),

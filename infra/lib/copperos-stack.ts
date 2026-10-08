@@ -8,6 +8,10 @@
 //                            ▼                 ▼
 //                  DynamoDB tables · S3 transcripts · Parameter Store keys
 //
+// A user with no API key of their own runs on CopperOS's model, on a key kept
+// in Parameter Store, and what each call costs is charged to their weekly
+// allowance and credits (Usage and Accounts tables; broker/src/cloud/billing.ts).
+
 // Sign-in is Cognito's hosted page: email one-time codes sent through SES
 // from the verified domain, and Google once `google` is switched on. The
 // Lambda code lives in broker/src/cloud/ and shares the agent core with the
@@ -66,6 +70,14 @@ export type CopperStackProps = StackProps & {
   alertEmail: string;
   /** Where "Send a suggestion" from the extension goes. */
   feedbackEmail: string;
+  /**
+   * Dollars of CopperOS's model an Ore (free) account may use per week, and
+   * the most the free plan may cost everyone together per calendar month.
+   * They start the stage on these numbers; changing either later needs no
+   * deploy (see ledger.ts).
+   */
+  freeWeeklyUsd: number;
+  freePoolMonthlyUsd: number;
   /** Deploy the scripted test model (broker/src/cloud/testing/) — never in prod. */
   testModel: boolean;
 };
@@ -180,19 +192,27 @@ export class CopperStack extends Stack {
     });
 
     // ── storage ──────────────────────────────────────────────────────────
-    const table = (id: string, sortKey?: string) =>
+    const table = (id: string, sortKey?: string, timeToLive?: string) =>
       new dynamodb.TableV2(this, id, {
         tableName: name(id.toLowerCase()),
         partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING },
         ...(sortKey ? { sortKey: { name: sortKey, type: dynamodb.AttributeType.STRING } } : {}),
+        ...(timeToLive ? { timeToLiveAttribute: timeToLive } : {}),
         billing: dynamodb.Billing.onDemand(),
         pointInTimeRecoverySpecification: { pointInTimeRecoveryEnabled: prod },
         removalPolicy,
       });
-    // Settings, plan and usage, one item per user.
-    const usersTable = table("Accounts");
+    // Settings, plan and credits, one item per user. It also holds two kinds of
+    // item for payments: the link from a Stripe customer back to a user, and a
+    // claim on each credit purchase so one is never granted twice. Claims carry
+    // an expiry, which is what the time-to-live is for.
+    const usersTable = table("Accounts", undefined, "expiresAt");
+    // What each user spent of CopperOS's model, one item per week; old weeks expire.
+    const usage = table("Usage", "week", "expiresAt");
     // One item per fact: sort key is "<topic>/<slug>".
     const memories = table("Memories", "key");
+    // One item per saved workflow: a name and the steps to run it again.
+    const workflows = table("Workflows", "id");
     // One item per chat: its summary, and a paused task's request. The
     // transcript itself is in the bucket.
     const chats = table("Chats", "chatId");
@@ -224,6 +244,25 @@ export class CopperStack extends Stack {
     // The second seals the LLM API keys users bring (broker/src/store/cloud.ts).
     const jevParam = `/copperos/${stage}/jev-api-key`;
     const userKeysParam = `/copperos/${stage}/user-keys-secret`;
+    // The OpenRouter key every user on CopperOS's own model runs on. Give it a
+    // credit limit on OpenRouter's side too: that, not this stack, is the hard
+    // ceiling on what the model can cost.
+    //   aws ssm put-parameter --name /copperos/<stage>/openrouter-key --type SecureString --value sk-or-…
+    const platformKeyParam = `/copperos/${stage}/openrouter-key`;
+    // Optional, plain text: the weekly allowance of each plan, changed without a deploy.
+    //   aws ssm put-parameter --name /copperos/<stage>/limits --type String --overwrite \
+    //     --value '{"ore":1.5,"ingot":4,"facet":10,"freePool":40}'
+    const limitsParam = `/copperos/${stage}/limits`;
+    // Optional, plain text: how long a task may run on each plan, and how much working time a
+    // week holds (broker/src/cloud/runtime.ts). null means no limit.
+    //   aws ssm put-parameter --name /copperos/<stage>/runtime --type String --overwrite \
+    //     --value '{"ingot":{"taskMinutes":300},"foundry":{"weeklyHours":8}}'
+    const runtimeParam = `/copperos/${stage}/runtime`;
+    // Stripe. Both are put there by `npm run stripe:setup -- --stage <stage>` (see
+    // the README): the secret key by every run, the webhook's signing secret when
+    // the webhook is registered. Neither is ever sent to the extension.
+    const stripeKeyParam = `/copperos/${stage}/stripe-secret-key`;
+    const stripeWebhookParam = `/copperos/${stage}/stripe-webhook-secret`;
 
     // ── functions ────────────────────────────────────────────────────────
     const fn = (id: string, entry: string, opts: Partial<nodejs.NodejsFunctionProps>) =>
@@ -267,20 +306,31 @@ export class CopperStack extends Stack {
       MEMORIES_TABLE: memories.tableName,
       CHATS_TABLE: chats.tableName,
       TASKS_TABLE: tasks.tableName,
+      USAGE_TABLE: usage.tableName,
+      WORKFLOWS_TABLE: workflows.tableName,
       CONNECTIONS_TABLE: connections.tableName,
       TRANSCRIPTS_BUCKET: transcripts.bucketName,
       USER_KEYS_PARAM: userKeysParam,
       JEV_PARAM: jevParam,
+      PLATFORM_KEY_PARAM: platformKeyParam,
+      LIMITS_PARAM: limitsParam,
+      RUNTIME_PARAM: runtimeParam,
+      FREE_WEEKLY_USD: String(props.freeWeeklyUsd),
+      FREE_POOL_MONTHLY_USD: String(props.freePoolMonthlyUsd),
       // Nobody's Ollama is reachable from here.
       LLM_PROVIDER: "openrouter",
       // A task's active time on the free plan.
       TASK_LIMIT_MS: String(15 * 60_000),
     };
 
+    // A task longer than one Lambda's 15 minutes is handed to a new one by the agent itself
+    // (agent-run.ts), so the agent needs to know its own name. The name is built here, not
+    // read from the function, because a function cannot depend on a policy that names it.
+    const agentName = name("agent");
     const agentFn = fn("Agent", "agent-handler.ts", {
       memorySize: 512,
       timeout: Duration.minutes(15),
-      environment: shared,
+      environment: { ...shared, AGENT_FUNCTION_NAME: agentName },
       // Never run a task twice by itself: a retry would repeat what the
       // first attempt already did in the user's browser.
       retryAttempts: 0,
@@ -289,7 +339,12 @@ export class CopperStack extends Stack {
     const relayFn = fn("Relay", "relay.ts", {
       memorySize: 256,
       timeout: Duration.seconds(30),
-      environment: { ...shared, AGENT_FUNCTION: agentFn.functionName, USER_POOL_ID: users.userPoolId },
+      environment: {
+        ...shared,
+        AGENT_FUNCTION: agentFn.functionName,
+        USER_POOL_ID: users.userPoolId,
+        STRIPE_SECRET_PARAM: stripeKeyParam,
+      },
     });
     // "Delete my account" removes the sign-in too.
     relayFn.addToRolePolicy(
@@ -299,19 +354,56 @@ export class CopperStack extends Stack {
       }),
     );
 
+    const parameterArn = (p: string) => `arn:aws:ssm:${this.region}:${this.account}:parameter${p}`;
     for (const f of [relayFn, agentFn]) {
-      for (const t of [usersTable, memories, chats, tasks, connections]) t.grantReadWriteData(f);
+      for (const t of [usersTable, memories, workflows, chats, tasks, usage, connections]) t.grantReadWriteData(f);
       transcripts.grantReadWrite(f);
+      // The model key stays out of the relay, which never calls the model.
+      // Only the relay talks to Stripe (to open the payment page); the agent never does.
+      const params = [
+        jevParam,
+        userKeysParam,
+        limitsParam,
+        runtimeParam,
+        ...(f === agentFn ? [platformKeyParam] : [stripeKeyParam]),
+      ];
       f.addToRolePolicy(
-        new iam.PolicyStatement({
-          actions: ["ssm:GetParameter"],
-          resources: [jevParam, userKeysParam].map(
-            (p) => `arn:aws:ssm:${this.region}:${this.account}:parameter${p}`,
-          ),
-        }),
+        new iam.PolicyStatement({ actions: ["ssm:GetParameter"], resources: params.map(parameterArn) }),
       );
     }
     agentFn.grantInvoke(relayFn);
+    agentFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["lambda:InvokeFunction"],
+        resources: [`arn:aws:lambda:${this.region}:${this.account}:function:${agentName}`],
+      }),
+    );
+
+    // Stripe calls this when money moves: a subscription began or ended, a month
+    // was paid, a credit pack was bought. It is public because Stripe is the
+    // caller, and it trusts nothing it is not able to verify: every request has
+    // to carry a signature made with the secret only Stripe and this function
+    // know (broker/src/cloud/stripe-webhook.ts). Until that secret is stored it
+    // answers 503, and Stripe retries.
+    const stripeWebhookFn = fn("StripeWebhook", "stripe-webhook.ts", {
+      memorySize: 256,
+      timeout: Duration.seconds(30),
+      environment: {
+        STAGE: stage,
+        ACCOUNTS_TABLE: usersTable.tableName,
+        STRIPE_SECRET_PARAM: stripeKeyParam,
+        STRIPE_WEBHOOK_PARAM: stripeWebhookParam,
+      },
+    });
+    // It changes plans and credits, which live in the Accounts table and nowhere else.
+    usersTable.grantReadWriteData(stripeWebhookFn);
+    stripeWebhookFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [stripeKeyParam, stripeWebhookParam].map(parameterArn),
+      }),
+    );
+    const stripeWebhookUrl = stripeWebhookFn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
 
     // "Send a suggestion": a public URL, since people running CopperOS on
     // their own computer have no sign-in. It rate-limits itself.
@@ -370,6 +462,9 @@ export class CopperStack extends Stack {
     // ── alarms ───────────────────────────────────────────────────────────
     const alerts = new sns.Topic(this, "Alerts", { topicName: name("alerts") });
     alerts.addSubscription(new EmailSubscription(props.alertEmail));
+    // The agent emails the owner as the free pool fills (billing.ts).
+    agentFn.addEnvironment("ALERTS_TOPIC_ARN", alerts.topicArn);
+    alerts.grantPublish(agentFn);
     // SES's own review points: above 5% bounces or 0.1% complaints puts the
     // account at risk, so these warn well before AWS would act.
     const ses = (metricName: string, threshold: number, id: string) =>
@@ -390,7 +485,7 @@ export class CopperStack extends Stack {
     ses("Reputation.ComplaintRate", 0.0008, "EmailComplaints");
     // Any function failing outright — not a task's own error, which the
     // agent reports to the user, but a crash or a timeout.
-    for (const [id, f] of [["Authorize", authorizerFn], ["Relay", relayFn], ["Agent", agentFn], ["Feedback", feedbackFn]] as const) {
+    for (const [id, f] of [["Authorize", authorizerFn], ["Relay", relayFn], ["Agent", agentFn], ["Feedback", feedbackFn], ["StripeWebhook", stripeWebhookFn]] as const) {
       new cloudwatch.Alarm(this, `${id}Errors`, {
         alarmName: name(`${id.toLowerCase()}-errors`),
         metric: f.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
@@ -402,11 +497,15 @@ export class CopperStack extends Stack {
     }
 
     // ── what the extension needs to know ─────────────────────────────────
+    // For `npm run admin -- encrypt`, which reads the chats already stored.
+    new CfnOutput(this, "TranscriptsBucket", { value: transcripts.bucketName });
     new CfnOutput(this, "SocketUrl", { value: socketStage.url });
     new CfnOutput(this, "UserPoolId", { value: users.userPoolId });
     new CfnOutput(this, "ClientId", { value: client.userPoolClientId });
     new CfnOutput(this, "SignInUrl", { value: signIn.baseUrl() });
     new CfnOutput(this, "FeedbackUrl", { value: feedbackUrl.url });
+    // Register this in Stripe: npm run stripe:setup -- --stage <stage> --webhook <this url>
+    new CfnOutput(this, "StripeWebhookUrl", { value: stripeWebhookUrl.url });
 
     // ── dev only: the scripted test model ───────────────────────────────
     if (props.testModel && !prod) {

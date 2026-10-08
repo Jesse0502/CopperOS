@@ -3,7 +3,7 @@
 //
 // Only raw reads and writes live behind this interface. What the data means
 // — sanitizing a transcript, ranking memories, briefing a fresh round — stays
-// in session.ts, memory.ts, progress.ts and config.ts, which both the local
+// in session.ts, memory.ts, progress.ts, workflows.ts and config.ts, which both the local
 // broker and the cloud share. The local broker uses files and one user,
 // LOCAL_USER (store/fs.ts); the cloud will use DynamoDB and S3.
 
@@ -23,6 +23,15 @@ export type MemoryRecord = {
   created: string;
   updated: string;
   content: string;
+};
+
+/** One saved workflow: a name and the steps to run it again (see workflows.ts). */
+export type WorkflowRecord = {
+  id: string;
+  name: string;
+  steps: string;
+  created: string;
+  updated: string;
 };
 
 /** What the chat list shows for one chat, without loading its transcript. */
@@ -67,6 +76,12 @@ export interface Store {
   putMemory(userId: string, memory: MemoryRecord): Promise<void>;
   /** Removes one memory; one that is already gone is not an error. */
   deleteMemory(userId: string, topic: string, slug: string): Promise<void>;
+
+  /** Every saved workflow, in no particular order, skipping any that cannot be read. */
+  listWorkflows(userId: string): Promise<WorkflowRecord[]>;
+  putWorkflow(userId: string, workflow: WorkflowRecord): Promise<void>;
+  /** Removes one workflow; one that is already gone is not an error. */
+  deleteWorkflow(userId: string, id: string): Promise<void>;
 
   loadTask(userId: string, chatId: string): Promise<TaskState | null>;
   saveTask(userId: string, chatId: string, task: TaskState): Promise<void>;

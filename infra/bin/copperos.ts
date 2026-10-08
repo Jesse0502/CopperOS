@@ -46,5 +46,7 @@ if (stage === "guard") {
   emailSignIn: context("emailSignIn").split(",").map((s) => s.trim()).includes(stage),
   alertEmail: context("alertEmail"),
   feedbackEmail: context("feedbackEmail"),
+  freeWeeklyUsd: Number(app.node.tryGetContext("freeWeeklyUsd") ?? 2),
+  freePoolMonthlyUsd: Number(app.node.tryGetContext("freePoolMonthlyUsd") ?? 50),
   testModel: context("testModel") === "true",
 });

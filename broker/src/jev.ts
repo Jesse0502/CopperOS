@@ -22,18 +22,68 @@
 // unconfigured client, and each caller turns that null into its own safe
 // default — for checkGrounded that means blocking the entry.
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { choice, noul, TypeSafeClient } from "@typesafe-ai/sdk";
 
-const apiKey = process.env.JEV_AI_API_KEY;
-const client = apiKey ? new TypeSafeClient({ apiKey }) : null;
+// Whose Jev a judgment runs on. By default the broker's own (JEV_AI_API_KEY);
+// but a run can name another for everything it calls (withJev): the key a
+// user brought, or none at all. On the hosted service that is how a Foundry
+// account runs on its own Jev key, or without Jev, and never on CopperOS's.
+const ownKey = process.env.JEV_AI_API_KEY;
+const brokerClient = ownKey ? new TypeSafeClient({ apiKey: ownKey }) : null;
+const clients = new Map<string, TypeSafeClient>();
+const scope = new AsyncLocalStorage<{ client: TypeSafeClient | null }>();
 
-/** Whether a key is configured at all — agent.ts only tracks tasks when it is. */
-export const jevEnabled = client !== null;
+/** "default" for the broker's own Jev, a user's key for theirs, null for none. */
+export type JevChoice = "default" | string | null;
+
+function clientFor(choice: JevChoice): TypeSafeClient | null {
+  if (choice === "default") return brokerClient;
+  if (!choice) return null;
+  let made = clients.get(choice);
+  if (!made) {
+    made = new TypeSafeClient({ apiKey: choice });
+    clients.set(choice, made);
+  }
+  return made;
+}
+
+/** Runs `fn` with every Jev judgment it makes on `choice`'s Jev. */
+export function withJev<T>(choice: JevChoice, fn: () => T): T {
+  return scope.run({ client: clientFor(choice) }, fn);
+}
+
+/** The Jev this run's judgments go to, or null for none. */
+function current(): TypeSafeClient | null {
+  const set = scope.getStore();
+  return set ? set.client : brokerClient;
+}
+
+/** Whether this run has Jev at all — agent.ts only tracks tasks (and the supervisor only checks in) when it has. */
+export function jevOn(): boolean {
+  return current() !== null;
+}
+
+/** One message of the chat, as Jev reads it: the user's, or a reply the assistant gave. */
+export type Turn = { from: "user" | "assistant"; text: string };
+
+/**
+ * What every judgment about the user's wishes has to read alongside their own
+ * words. A reply like "yes", "go ahead" or "ok I like the draft" only means
+ * something next to what the assistant had just proposed or written, and Jev
+ * sees nothing but what it is handed — judged on the user's messages alone, a
+ * draft the user had approved was refused as "not in your messages".
+ */
+const CONVERSATION_NOTE =
+  "`conversation` is the chat so far, oldest first: the user's messages and the assistant's replies between them. " +
+  'A short reply from the user — "yes", "go ahead", "use that one", "I like the draft" — approves what the assistant had just proposed or written.';
 
 /** What the user has asked for and told us — the backdrop Jev judges an action or a fact against. */
 export type UserContext = {
   /** The user's messages in this chat, first to last, and answers they gave to ask_user. */
   instructions: string[];
+  /** The chat in order, with the assistant's replies — what a short answer from the user is an answer to. */
+  conversation: Turn[];
   /** Saved memories, as "title: content". */
   memories: string[];
 };
@@ -60,6 +110,8 @@ export async function judgeAction(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<ActionVerdict | null> {
+  const client = current();
+
   if (!client) return null;
   const started = Date.now();
   try {
@@ -67,15 +119,16 @@ export async function judgeAction(
       {
         state: {
           task: context.instructions,
+          conversation: context.conversation,
           saved_memories: context.memories,
           action: what,
         },
         questions: {
           verdict: choice(
-            "The agent is about to perform `action` on the user's behalf while carrying out `task`. Judged against the user's instructions and saved memories, which is it?",
+            `The agent is about to perform \`action\` on the user's behalf while carrying out \`task\`. ${CONVERSATION_NOTE} Judged against the user's instructions, the conversation and saved memories, which is it?`,
             {
               expected:
-                "Something the user asked for or has authorized — e.g. submitting an application when the task is to apply to jobs, or ticking a consent box the user said to tick.",
+                "Something the user asked for or has authorized — e.g. submitting an application when the task is to apply to jobs, ticking a consent box the user said to tick, or doing what the assistant proposed and the user said yes to.",
               harmless:
                 "Easily undone or no lasting effect — navigating, opening, searching, filtering, moving to the next step.",
               unsanctioned:
@@ -142,6 +195,8 @@ export async function judgeJobFit(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<JobFit | null> {
+  const client = current();
+
   if (!client) return null;
   const started = Date.now();
   try {
@@ -149,12 +204,13 @@ export async function judgeJobFit(
       {
         state: {
           user_instructions: context.instructions,
+          conversation: context.conversation,
           saved_memories: context.memories,
           job: { which: job.which, page_text: job.page },
         },
         questions: {
           decision: choice(
-            "Judged against the user's instructions and saved memories, should the agent apply to the job named in `job.which` — its details are on `job.page_text` — for the user?",
+            `${CONVERSATION_NOTE} Judged against the user's instructions, the conversation and saved memories, should the agent apply to the job named in \`job.which\` — its details are on \`job.page_text\` — for the user?`,
             {
               apply:
                 "Yes — it is the kind of role the user wants (their preferred titles count, graduate and junior roles included), it does not ask for more experience or seniority than they have (having more is fine), they are eligible for it (work rights, clearance, licences), and their skills cover most of it.",
@@ -208,6 +264,8 @@ export function judgeOutcome(
   result: unknown,
   chatId: string,
 ): void {
+  const client = current();
+
   if (!client) return;
   void (async () => {
     const started = Date.now();
@@ -257,6 +315,8 @@ export async function judgeMemoryWorth(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<{ worth: boolean; p: number } | null> {
+  const client = current();
+
   if (!client) return null;
   const started = Date.now();
   try {
@@ -330,6 +390,8 @@ export async function rankSources(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<Array<Array<{ id: string; p: number }>> | null> {
+  const client = current();
+
   if (!client || asks.length === 0 || sources.length === 0) return null;
   const started = Date.now();
   const rankOne = async (ask: string) => {
@@ -424,6 +486,12 @@ export type Intent = {
    * not answer, which leaves a loop as it was.
    */
   ends: boolean;
+  /**
+   * The message asks for help making a mold — a saved, reusable task to run
+   * again later (what many call a workflow) — rather than for the work to be
+   * done now. Only on a confident verdict; false whenever Jev could not answer.
+   */
+  mold: boolean;
 };
 
 // Below this, a "greeting" verdict is treated as a task anyway. A bare
@@ -453,6 +521,8 @@ const LOOP_MIN_P = 0.6;
 // turned back into a task that finishes ("ok make 100 more replies and then
 // stop" kept looping, since nothing said after a loop could end it).
 const ENDS_MIN_P = 0.6;
+// "Help me make a mold for applying to jobs" is a request to write one, not to apply.
+const MOLD_MIN_P = 0.6;
 
 /**
  * Real, blocking: ask Jev whether `text` is a browser task to carry out or
@@ -473,7 +543,9 @@ export async function classifyIntent(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<Intent> {
-  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true, loop: false, ends: false };
+  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true, loop: false, ends: false, mold: false };
+  const client = current();
+
   if (!client) return fallback;
   const started = Date.now();
   try {
@@ -506,6 +578,9 @@ export async function classifyIntent(
     const ends = noul(
       'Does the latest message set a point where the agent should finish the work on its own — a number of items (in all, or more), a time, or a condition, like "do 100 more and then stop", "stop after this page" or "until you have 20" — rather than leaving the stopping to the user ("until I tell you to stop") or saying nothing about when to stop?',
     );
+    const mold = noul(
+      'Does the latest message ask for help making a saved, reusable task to run again later — what CopperOS calls a mold, and many call a workflow, template, routine or macro — like "help me create a workflow for applying to jobs" or "make me a mold for replying to threads", rather than asking for the work itself to be done now?',
+    );
     const { answers } = await client.systemOne(
       {
         state: {
@@ -513,7 +588,7 @@ export async function classifyIntent(
           ...(onRecord && { task_on_record: onRecord }),
           latest_message: text,
         },
-        questions: onRecord ? { intent, scope, jobs, loop, ends } : { intent, jobs, loop, ends },
+        questions: onRecord ? { intent, scope, jobs, loop, ends, mold } : { intent, jobs, loop, ends, mold },
       },
       { signal },
     );
@@ -524,7 +599,8 @@ export async function classifyIntent(
     const j = answers.jobs;
     const l = answers.loop;
     const e = answers.ends;
-    if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul" || l.type !== "noul" || e.type !== "noul") {
+    const m = answers.mold;
+    if (i.type !== "choice" || (s && s.type !== "choice") || j.type !== "noul" || l.type !== "noul" || e.type !== "noul" || m.type !== "noul") {
       throw new Error("unexpected answer shape");
     }
     const pReply = (i.probabilities.answer ?? 0) + (i.probabilities.greeting ?? 0);
@@ -535,7 +611,7 @@ export async function classifyIntent(
         `p(reply)=${pReply.toFixed(2)} ` +
         (s ? `p(resume)=${pResume.toFixed(2)} ` : "") +
         (s ? `scope=${s.choice} confidence=${s.confidence.toFixed(2)} ` : "") +
-        `jobs=${j.noul.toFixed(2)} loop=${l.noul.toFixed(2)} ends=${e.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
+        `jobs=${j.noul.toFixed(2)} loop=${l.noul.toFixed(2)} ends=${e.noul.toFixed(2)} mold=${m.noul.toFixed(2)} earlier_turns=${earlier.length} (${Date.now() - started}ms)`,
     );
     const onTask =
       s && s.confidence >= SCOPE_MIN_CONFIDENCE
@@ -548,6 +624,7 @@ export async function classifyIntent(
       jobs: j.noul >= JOBS_MIN_P,
       loop: l.noul >= LOOP_MIN_P,
       ends: e.noul >= ENDS_MIN_P,
+      mold: m.noul >= MOLD_MIN_P,
     };
   } catch (err) {
     console.warn(
@@ -561,6 +638,8 @@ export async function classifyIntent(
 export type RoundOutcome = {
   instructions: string;
   later_instructions: string[];
+  /** The chat in order — a later instruction like "yes" is read against the reply before it. */
+  conversation: Turn[];
   done_count: number;
   done: string[];
   skipped: string[];
@@ -583,6 +662,8 @@ export async function judgeCompletion(
   verdict: "done" | "keep_going" | "needs_user";
   confidence: number;
 } | null> {
+  const client = current();
+
   if (!client) return null;
   const started = Date.now();
   try {
@@ -591,7 +672,7 @@ export async function judgeCompletion(
         state: outcome,
         questions: {
           status: choice(
-            "Compare the task's instructions with the progress recorded so far and the agent's last report. Is the task finished, should the agent keep going on its own, or does it need the user before it can go on?",
+            `Compare the task's instructions with the progress recorded so far and the agent's last report. ${CONVERSATION_NOTE} Is the task finished, should the agent keep going on its own, or does it need the user before it can go on?`,
             {
               done: "Everything the instructions ask for is done — e.g. the requested number of items is reached — or the agent has established there is nothing more it can do.",
               keep_going:
@@ -622,6 +703,8 @@ export async function judgeCompletion(
 export type Checkpoint = {
   /** The user's messages about the task, first to last — later ones add to or change earlier ones. */
   user_instructions: string[];
+  /** The chat in order, with the agent's earlier replies — what a short instruction like "yes" refers to. */
+  conversation: Turn[];
   progress_recorded: { done: string[]; skipped: string[]; note: string };
   /** The model's own answer to the check-in: what it is doing, how, and what is next. */
   agent_report: string;
@@ -659,6 +742,8 @@ export async function superviseTask(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<{ onCourse: boolean; p: number; overclaims: number; drift: Drift | null } | null> {
+  const client = current();
+
   if (!client) return null;
   const started = Date.now();
   try {
@@ -667,10 +752,10 @@ export async function superviseTask(
         state: checkpoint,
         questions: {
           course: choice(
-            "A browser agent is partway through a task for the user. `user_instructions` are the user's messages about it, first to last — later ones add to or change earlier ones. `recent_actions` is what the agent actually did most recently, oldest first, each with how the page responded; `agent_report` is its own account of what it is doing. Is it on course?",
+            `A browser agent is partway through a task for the user. \`user_instructions\` are the user's messages about it, first to last — later ones add to or change earlier ones. ${CONVERSATION_NOTE} \`recent_actions\` is what the agent actually did most recently, oldest first, each with how the page responded; \`agent_report\` is its own account of what it is doing. Is it on course?`,
             {
               on_course:
-                "Its recent actions carry out what the user asked, the way they asked it, and are getting the task further. Checking or verifying earlier work, and trying another control or route when one does not work to reach the same result, are fine.",
+                "Its recent actions carry out what the user asked — or what the agent proposed and the user agreed to — the way they asked it, and are getting the task further. Checking or verifying earlier work, and trying another control or route when one does not work to reach the same result, are fine.",
               off_course:
                 "It is doing something the user did not ask for, or doing the task a different way than they asked — another site, another feature, another result.",
               stuck:
@@ -738,6 +823,8 @@ export type FieldEntry = { field: string; value: string };
 /** What a form entry about the user has to be backed by. */
 export type Grounding = {
   user_messages: string[];
+  /** The chat in order, with the assistant's replies, so approving a draft counts as backing its text. */
+  conversation: Turn[];
   saved_memories: string[];
 };
 
@@ -761,6 +848,8 @@ export async function checkGrounded(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; verdict: string; unsupported: number } | null> {
+  const client = current();
+
   if (!client) return null;
   const started = Date.now();
   try {
@@ -769,14 +858,14 @@ export async function checkGrounded(
         state: { ...grounding, field: entry.field, value: entry.value },
         questions: {
           grounded: choice(
-            "A browser agent is about to enter `value` into the form field shown in `field` (the page lines leading up to it) on the user's behalf. Is what this entry says about the user backed by the user's own messages or saved memories?",
+            `A browser agent is about to enter \`value\` into the form field shown in \`field\` (the page lines leading up to it) on the user's behalf. ${CONVERSATION_NOTE} Is what this entry says backed by the user's own messages, the conversation, or saved memories?`,
             {
               supported:
-                "Backed: the user's messages or memories say it, or it follows necessarily from what they say. Rewording, reformatting, and picking the option that means the same thing as what the user said all count.",
+                "Backed: the user's messages or memories say it, or it follows necessarily from what they say. Rewording, reformatting, and picking the option that means the same thing as what the user said all count. So does text the assistant wrote in `conversation` — a draft, a post, a message, a summary — that the user then accepted: said they liked it, answered yes to using it, or told the assistant to use, save, send or post it.",
               not_about_user:
                 "It says nothing about the user: a search term, a filter, or other navigation input.",
               unsupported:
-                "Not backed: it says something about the user — an address, contact detail, date, age, qualification, experience, or screening answer — that the user's messages and memories do not say. A plausible guess does not count, and neither does a detail taken from the page or the job ad.",
+                "Not backed: it says something about the user — an address, contact detail, date, age, qualification, experience, or screening answer — that the user's messages and memories do not say. A plausible guess does not count, neither does a detail taken from the page or the job ad, and neither does something the assistant wrote that the user never accepted.",
             },
           ),
         },

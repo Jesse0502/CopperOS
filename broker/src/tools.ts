@@ -17,7 +17,7 @@ import {
 } from "./bridge.js";
 import {
   checkGrounded,
-  jevEnabled,
+  jevOn,
   judgeAction,
   judgeJobFit,
   judgeMemoryWorth,
@@ -26,6 +26,7 @@ import {
   LIKELY_AT,
   rankSources,
   type Source,
+  type Turn,
   type UserContext,
 } from "./jev.js";
 import {
@@ -76,6 +77,8 @@ export type ToolCtx = {
   signal: AbortSignal;
   userMessages: string[];
   answers: string[];
+  /** The chat in order, with the assistant's replies — see agent.ts's conversationOf. */
+  conversation: Turn[];
   chatStartedAt: string;
   /** Whether the model can take images. When it cannot, no screenshot is taken for it. */
   seesImages: boolean;
@@ -116,6 +119,7 @@ async function userContext(ctx: ToolCtx): Promise<UserContext> {
   const memories = await allMemories(ctx.userId);
   return {
     instructions: userSaid(ctx),
+    conversation: ctx.conversation,
     memories: memories.map((m) => `${m.title}: ${m.content}`),
   };
 }
@@ -142,7 +146,7 @@ const AUTO_APPROVE_BELOW = 0.2;
 async function gate(kind: "click" | "submit", what: string, ctx: ToolCtx): Promise<void> {
   if (ctx.preApproved) return;
   // Judged on every gated action; logged even when nothing waits on it.
-  const verdict = jevEnabled
+  const verdict = jevOn()
     ? judgeAction(kind, what, await userContext(ctx), ctx.chatId, ctx.signal)
     : null;
 
@@ -201,7 +205,7 @@ async function assessJob(
   );
   const fit = await judgeJobFit({ which, page: page.text }, await userContext(ctx), ctx.chatId, ctx.signal);
   if (!fit) return null;
-  lastJobFit.set(ctx.chatId, { url: snapshotUrl(ctx.chatId), at: Date.now(), fit });
+  lastJobFit.set(chatKey(ctx), { url: snapshotUrl(chatKey(ctx)), at: Date.now(), fit });
   emit(
     "job-fit",
     ctx.chatId,
@@ -244,11 +248,11 @@ function jobAbove(chatId: string, ref: string): string | null {
 
 /** Null when the application may start; otherwise why not, as the tool result. */
 async function jobFitGate(ref: string, label: string, why: string, ctx: ToolCtx): Promise<string | null> {
-  if (!jevEnabled || !ctx.jobTask) return null;
-  const last = lastJobFit.get(ctx.chatId);
+  if (!jevOn() || !ctx.jobTask) return null;
+  const last = lastJobFit.get(chatKey(ctx));
   const fresh =
-    last && Date.now() - last.at < JOB_FIT_FRESH_MS && last.url === snapshotUrl(ctx.chatId);
-  const which = jobAbove(ctx.chatId, ref) ?? (why || label);
+    last && Date.now() - last.at < JOB_FIT_FRESH_MS && last.url === snapshotUrl(chatKey(ctx));
+  const which = jobAbove(chatKey(ctx), ref) ?? (why || label);
   const fit = fresh ? last.fit : (await assessJob(which, ctx))?.fit;
   // No verdict (the check failed): the decision stays with the model.
   if (!fit || fit.apply) return null;
@@ -270,8 +274,14 @@ async function jobFitGate(ref: string, label: string, why: string, ctx: ToolCtx)
 // check blocks rather than lets the entry through.
 
 // The latest snapshot per chat, so a ref can be traced back to its field's
-// label and the question above it.
+// label and the question above it. Keyed by user and chat (chatKey), so one
+// account's page can never be read as another's, whatever the chat ids.
 const lastSnapshot = new Map<string, string>();
+
+/** The key the per-chat caches here use: the user and the chat, not the chat alone. */
+function chatKey(ctx: Pick<ToolCtx, "userId" | "chatId">): string {
+  return `${ctx.userId}\n${ctx.chatId}`;
+}
 
 // Clicking one of these picks an answer, the same as typing one.
 const CHOICE_ROLES = new Set([
@@ -307,8 +317,8 @@ function refLine(chatId: string, ref: string): RefLine | null {
 }
 
 /** How a ref reads in the latest snapshot — `button "Apply now"` — or null when it is not in it. */
-export function refLabel(chatId: string, ref: string): string | null {
-  const line = refLine(chatId, ref);
+export function refLabel(userId: string, chatId: string, ref: string): string | null {
+  const line = refLine(chatKey({ userId, chatId }), ref);
   if (!line) return null;
   return line.label ? `${line.role} "${line.label}"` : line.role;
 }
@@ -326,7 +336,7 @@ function saidVerbatim(value: string, texts: string[]): boolean {
 function groundingGate(ref: string | undefined, value: string, ctx: ToolCtx): Promise<string | null> {
   const field = !ref
     ? "(the element that has keyboard focus — no ref was given)"
-    : refLine(ctx.chatId, ref)?.field ?? `(${ref} is not in the latest snapshot)`;
+    : refLine(chatKey(ctx), ref)?.field ?? `(${ref} is not in the latest snapshot)`;
   return checkEntry(field, value, ref ?? "focused element", ctx);
 }
 
@@ -336,12 +346,12 @@ function groundingGate(ref: string | undefined, value: string, ctx: ToolCtx): Pr
  * letters or digits say nothing and are not checked.
  */
 async function checkEntry(field: string, value: string, where: string, ctx: ToolCtx): Promise<string | null> {
-  if (!jevEnabled || !/[\p{L}\p{N}]/u.test(value)) return null;
+  if (!jevOn() || !/[\p{L}\p{N}]/u.test(value)) return null;
   const said = userSaid(ctx);
   const memories = (await memoriesBefore(ctx.userId, ctx.chatStartedAt)).map((m) => `${m.title}: ${m.content}`);
   const verdict = await checkGrounded(
     { field, value },
-    { user_messages: said, saved_memories: memories },
+    { user_messages: said, conversation: ctx.conversation, saved_memories: memories },
     ctx.chatId,
     ctx.signal,
   );
@@ -404,7 +414,7 @@ async function pageReport(page: PageReport | undefined, ctx: ToolCtx): Promise<C
   if (page.error) {
     return [{ type: "text", text: `(The page could not be read afterwards: ${page.error} Take a snapshot.)` }];
   }
-  if (page.snapshot) lastSnapshot.set(ctx.chatId, page.snapshot);
+  if (page.snapshot) lastSnapshot.set(chatKey(ctx), page.snapshot);
   if (!page.full) {
     return [{
       type: "text",
@@ -560,7 +570,7 @@ const snapshot: BrowserTool = {
       text: string; weak: string | null; interactiveCount: number;
     }>("snapshot", ctx.chatId, {}, undefined, ctx.signal);
     emit("snapshot", ctx.chatId, `${snap.interactiveCount} interactive elements`);
-    lastSnapshot.set(ctx.chatId, snap.text);
+    lastSnapshot.set(chatKey(ctx), snap.text);
     return withVision([{ type: "text", text: snap.text }], snap.weak, ctx);
   },
 };
@@ -642,7 +652,7 @@ const click: BrowserTool = {
     const what = `Click ${ref} — ${why}`;
     // Ticking a box or picking an option answers a question as much as
     // typing does. Unticking one takes an answer back, so it is not checked.
-    const target = refLine(ctx.chatId, ref);
+    const target = refLine(chatKey(ctx), ref);
     if (startsApplication(target?.label ?? "", String(why ?? ""))) {
       const skip = await jobFitGate(ref, target?.label ?? "", String(why ?? ""), ctx);
       if (skip) return skip;
@@ -1501,7 +1511,7 @@ export async function askResult(input: any, outcome: AskOutcome, ctx: ToolCtx): 
       const answer = outcome.answers[i] ?? null;
       if (answer === null) return `${i + 1}. ${q.question} → (skipped)`;
       ctx.answers.push(`${q.question} — ${answer}`);
-      if (!jevEnabled) return `${i + 1}. ${q.question} → ${answer}`;
+      if (!jevOn()) return `${i + 1}. ${q.question} → ${answer}`;
       const verdict = await judgeMemoryWorth({ question: q.question, answer }, context, ctx.chatId, ctx.signal);
       if (!verdict) {
         return `${i + 1}. ${q.question} → ${answer}  (not saved: the check failed — remember it yourself if it is a lasting fact)`;
@@ -1545,7 +1555,7 @@ const checkJobFit: BrowserTool = {
     },
   },
   async run({ job }, ctx) {
-    if (!jevEnabled) {
+    if (!jevOn()) {
       return "Job checks need Jev, which is not configured — judge the fit yourself against the user's instructions.";
     }
     if (!ctx.jobTask) {
@@ -1619,6 +1629,46 @@ const updateProgress: BrowserTool = {
   },
 };
 
+// A mold is a saved task the person can run again with one click (what many
+// call a workflow). When they ask for help making one, the model asks what it
+// needs (ask_user) and then shows them the mold with this: the panel puts it
+// on a card to save, edit or dismiss. Nothing is saved until they say so.
+const MOLD_NAME_CAP = 80;
+const MOLD_STEPS_CAP = 6000;
+
+const proposeMold: BrowserTool = {
+  def: {
+    name: "propose_mold",
+    description:
+      "Only when the user asked for help making a mold (a saved task they can run again " +
+      "with one click; some call it a workflow): show them the mold, ready to save. Call it " +
+      "once you know enough, and again with a new version if they ask for changes. It saves " +
+      "nothing: they save it, edit it, or dismiss it from the card it is shown on.",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: str('A short name for it, e.g. "Apply to remote design jobs on Indeed"'),
+        steps: str(
+          "Numbered steps, one per line, in the user's own terms, each specific enough to follow " +
+            "without asking again. Put <angle brackets> around what changes from run to run, e.g. " +
+            '"2. Search for <job title>", and end with when to stop.',
+        ),
+      },
+      required: ["name", "steps"],
+    },
+  },
+  async run({ name, steps }, ctx) {
+    const n = String(name ?? "").replace(/\s+/g, " ").trim().slice(0, MOLD_NAME_CAP);
+    const s = String(steps ?? "").replace(/\r\n/g, "\n").trim().slice(0, MOLD_STEPS_CAP);
+    if (!n || !s) return "Pass both a name and the steps.";
+    emit("mold_proposal", ctx.chatId, JSON.stringify({ name: n, steps: s }));
+    return (
+      "Shown to the user on a card they can save, edit or dismiss. Say in one short line that " +
+      "it is ready to save there (do not repeat the steps), and stop."
+    );
+  },
+};
+
 export const TOOLS: BrowserTool[] = [
   snapshot, screenshot, readPage,
   click, type, paste, hover, selectOption, pressKey, scroll,
@@ -1627,19 +1677,30 @@ export const TOOLS: BrowserTool[] = [
   navigate, goBack, waitForIdle,
   listTabs, openTab, activateTab, closeTab,
   remember, searchMemory, findAnswers, askUser,
-  checkJobFit, updateProgress,
+  checkJobFit, updateProgress, proposeMold,
 ];
 
-export const TOOL_DEFS: OpenAI.Chat.Completions.ChatCompletionTool[] = TOOLS.map(
-  (t) => ({
+/**
+ * What the model may use while it helps make a mold: asking the person, their
+ * saved memories (only for something they mention that it does not know), and
+ * showing the mold. Nothing that looks at the browser or acts in it: a mold
+ * comes from what the person says, not from whatever tab is open.
+ */
+export const MOLD_TOOLS = new Set(["ask_user", "search_memory", "propose_mold"]);
+
+const defsOf = (tools: BrowserTool[]): OpenAI.Chat.Completions.ChatCompletionTool[] =>
+  tools.map((t) => ({
     type: "function",
     function: {
       name: t.def.name,
       description: t.def.description,
       parameters: t.def.input_schema,
     },
-  }),
-);
+  }));
+
+export const TOOL_DEFS = defsOf(TOOLS);
+/** The only tools offered while making a mold, so the model is not tempted (or charged) by the rest. */
+export const MOLD_TOOL_DEFS = defsOf(TOOLS.filter((t) => MOLD_TOOLS.has(t.def.name)));
 export const TOOL_BY_NAME = new Map(TOOLS.map((t) => [t.def.name, t]));
 
 /**

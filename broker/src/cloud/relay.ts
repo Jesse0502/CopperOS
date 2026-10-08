@@ -15,10 +15,22 @@ import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import type { APIGatewayProxyResultV2, APIGatewayProxyWebsocketEventV2 } from "aws-lambda";
 import { Agent, listChats } from "../agent.js";
 import { requestChatId, requestMessage, type AskOutcome } from "../bridge.js";
-import { getConfig, initConfig, listModels, setConfig, type LLMConfig, type Provider } from "../config.js";
+import {
+  getStoredConfig,
+  initConfig,
+  jevFor,
+  listModels,
+  ownKeyAllowed,
+  PLATFORM_MODEL,
+  setConfig,
+  usesPlatformKey,
+  type LLMConfig,
+  type Provider,
+} from "../config.js";
 import { setCurrent, type ApprovalMode } from "../session.js";
 import { addUserMemory, deleteMemoryByKey, memoriesForPage } from "../memory.js";
 import { taskExtras } from "../task-extras.js";
+import { withJev } from "../jev.js";
 import { busy, CloudStore, deleteUserData, type ChatItem } from "../store/cloud.js";
 import { useStore } from "../store/store.js";
 import {
@@ -31,10 +43,27 @@ import {
   workersOf,
   type Kind,
 } from "./connections.js";
-import type { AgentJob, AgentRequest } from "./jobs.js";
+import { deleteWorkflow, listWorkflows, saveWorkflow } from "../workflows.js";
+import { usageSummary } from "./billing.js";
+import type { AgentJob, AgentRequest, DraftJob } from "./jobs.js";
+import { dynamoLedger, installBilling, loadLimits, loadRuntime } from "./ledger.js";
+import {
+  BillingError,
+  billingState,
+  cancelSubscription,
+  openPortal,
+  startCheckout,
+  stripeClient,
+  type BillingDeps,
+  type Purchase,
+} from "./stripe.js";
+import { syncFromStripe } from "./stripe-events.js";
 
 const store = new CloudStore();
 useStore(store);
+// The rule that only Foundry runs on its own key needs to be known here too:
+// the relay answers Settings, and refuses what a plan does not allow.
+installBilling();
 const lambda = new LambdaClient({});
 const cognito = new CognitoIdentityProviderClient({});
 
@@ -100,6 +129,11 @@ export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
 
 async function handle(userId: string, from: string, msg: any): Promise<void> {
   await initConfig(userId);
+  // Whatever Jev this message's work calls on (a memory being saved, say) is the user's: see jevFor.
+  return withJev(jevFor(userId), () => handleAs(userId, from, msg));
+}
+
+async function handleAs(userId: string, from: string, msg: any): Promise<void> {
   const reply = (message: unknown) => post(from, message);
   const say = (event: string, chatId: string | null, text: string) =>
     postToExtensions(userId, { type: "agent_event", event, chatId, text });
@@ -183,6 +217,8 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
         await (await Agent.forChat(userId, msg.chatId)).cancelPause();
         return;
       }
+      // A long task between two Lambdas has no worker to hear this: the mark tells the next one.
+      await store.markCancelled(userId, msg.chatId);
       for (const w of await workersOf(userId, msg.chatId)) await post(w.connectionId, { type: "cancel" });
       return;
     }
@@ -234,8 +270,111 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
       return;
     }
 
+    case "get_billing": {
+      const stripe = await stripeClient();
+      // No key stored on this stage: nothing is for sale yet, and Settings says so.
+      if (!stripe) {
+        await reply({ type: "billing", enabled: false });
+        return;
+      }
+      try {
+        // What Stripe holds is applied first, in case its webhook was missed or is still on its way.
+        const caughtUp = await catchUp(userId, billingDeps(stripe));
+        await reply({ type: "billing", enabled: true, ...(await billingState(userId, billingDeps(stripe))) });
+        if (caughtUp) {
+          await reply({
+            type: "usage",
+            ownKey: !usesPlatformKey(userId),
+            usage: await usageSummary(userId, dynamoLedger, loadLimits, Date.now(), loadRuntime),
+          });
+        }
+      } catch (err) {
+        console.error(`[billing] could not read the billing state: ${String((err as Error)?.stack ?? err)}`);
+        await reply({ type: "billing", enabled: false, error: "Could not load plans right now. Try again in a moment." });
+      }
+      return;
+    }
+
+    case "billing_checkout":
+    case "billing_portal": {
+      const stripe = await stripeClient();
+      if (!stripe) {
+        await reply({ type: "billing_url", error: "Payments are not set up yet." });
+        return;
+      }
+      try {
+        const deps = billingDeps(stripe);
+        if (msg.type === "billing_portal") {
+          await reply({ type: "billing_url", kind: "portal", url: await openPortal(userId, deps) });
+          return;
+        }
+        // What the page names is looked up among what is on sale, never trusted as a price.
+        const purchase: Purchase =
+          typeof msg.priceId === "string" ? { kind: "credits", priceId: msg.priceId } : { kind: "plan", plan: String(msg.plan ?? "") };
+        const done = await startCheckout(userId, await emailOf(userId), purchase, deps);
+        await reply({ type: "billing_url", ...done });
+      } catch (err) {
+        if (!(err instanceof BillingError)) console.error(`[billing] ${msg.type} failed: ${String((err as Error)?.stack ?? err)}`);
+        await reply({
+          type: "billing_url",
+          error: err instanceof BillingError ? err.message : "Something went wrong with payments. Try again in a moment.",
+        });
+      }
+      return;
+    }
+
+    case "list_workflows":
+    case "save_workflow":
+    case "delete_workflow": {
+      try {
+        const workflows =
+          msg.type === "save_workflow"
+            ? await saveWorkflow(userId, { id: msg.id, name: msg.name, steps: msg.steps })
+            : msg.type === "delete_workflow"
+              ? await deleteWorkflow(userId, msg.id)
+              : await listWorkflows(userId);
+        await reply({ type: "workflows", workflows, ...(msg.type !== "list_workflows" ? { done: msg.type } : {}) });
+      } catch (err) {
+        await reply({ type: "workflows", error: String((err as Error)?.message ?? err) });
+      }
+      return;
+    }
+
+    case "workflow_draft": {
+      // Writing a chat up as steps is a model call, and the model's key is the
+      // agent's alone: it answers the browser itself.
+      if (typeof msg.chatId !== "string") {
+        await reply({ type: "workflow_draft", error: "Open the chat you want to save first." });
+        return;
+      }
+      const job: DraftJob = {
+        kind: "draft",
+        userId,
+        chatId: msg.chatId,
+        ...(typeof msg.text === "string" && msg.text.trim() ? { request: msg.text.slice(0, 4000) } : {}),
+      };
+      await lambda.send(
+        new InvokeCommand({
+          FunctionName: process.env.AGENT_FUNCTION,
+          InvocationType: "Event",
+          Payload: Buffer.from(JSON.stringify(job)),
+        }),
+      );
+      return;
+    }
+
     case "get_config": {
-      await reply({ type: "config", config: withoutKeys(getConfig(userId)) });
+      await reply(configMessage(userId));
+      return;
+    }
+
+    case "get_usage": {
+      await reply({
+        type: "usage",
+        // On a key of their own nothing is metered; the plan is still theirs.
+        ownKey: !usesPlatformKey(userId),
+        usage: await usageSummary(userId, dynamoLedger, loadLimits, Date.now(), loadRuntime),
+      });
       return;
     }
 
@@ -248,16 +387,29 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
           chatId: null,
           text: "Ollama runs on your own computer, so the hosted CopperOS cannot reach it. Choose OpenRouter or OpenAI.",
         });
-        await reply({ type: "config", config: withoutKeys(getConfig(userId)) });
+        await reply(configMessage(userId));
         return;
       }
       delete patch.ollama;
       // Keys are never sent to the page, so it sends them back blank: blank
       // means "keep the one saved".
-      for (const p of ["openai", "openrouter"] as const) {
+      for (const p of ["openai", "openrouter", "jev"] as const) {
         if (patch[p] && !patch[p].apiKey) delete patch[p].apiKey;
       }
-      await reply({ type: "config", config: withoutKeys(await setConfig(userId, patch)) });
+      // Removing a saved key is said outright ({ clear: true }), since blank means "keep it".
+      for (const p of ["openai", "openrouter", "jev"] as const) {
+        if (patch[p]?.clear === true) patch[p] = { ...patch[p], apiKey: "" };
+        if (patch[p] && p !== "jev") delete patch[p].clear;
+      }
+      // A panel from when there was an own-key switch may still send it.
+      delete (patch as Record<string, unknown>).useOwnKey;
+      // A model and key of the user's own are only theirs to set on Foundry, which
+      // runs on them as soon as a key is saved; everyone else runs on CopperOS's.
+      if (!ownKeyAllowed(userId)) {
+        for (const k of ["provider", "openai", "openrouter", "jev"] as const) delete patch[k];
+      }
+      await setConfig(userId, patch);
+      await reply(configMessage(userId));
       return;
     }
 
@@ -267,6 +419,21 @@ async function handle(userId: string, from: string, msg: any): Promise<void> {
       for (const w of await workersOf(userId)) await post(w.connectionId, { type: "cancel" });
       for (let waited = 0; waited < 20_000 && (await workersOf(userId)).length > 0; waited += 1000) {
         await new Promise((r) => setTimeout(r, 1000));
+      }
+      // A subscription that outlived its account would go on being charged for
+      // nothing: it stops first, and if it cannot be stopped nothing is deleted.
+      try {
+        const stripe = await stripeClient();
+        if (stripe && (await cancelSubscription(userId, billingDeps(stripe)))) console.log("[relay] cancelled an account's subscription");
+      } catch (err) {
+        console.error(`[billing] could not cancel a subscription: ${String((err as Error)?.stack ?? err)}`);
+        await reply({
+          type: "agent_event",
+          event: "error",
+          chatId: null,
+          text: "Your account was not deleted: your subscription could not be cancelled just now. Try again in a minute, or cancel it from Manage billing first.",
+        });
+        return;
       }
       const removed = await deleteUserData(userId);
       await deleteSignIn(userId);
@@ -310,13 +477,69 @@ function askOutcome(msg: any): AskOutcome {
   };
 }
 
+/** The Settings page's view of an account: what it saved, and the model everyone else runs on. */
+function configMessage(userId: string) {
+  return {
+    type: "config",
+    config: withoutKeys(getStoredConfig(userId)),
+    platformModel: PLATFORM_MODEL,
+    // Only a plan that allows it (Foundry) runs on the person's own key.
+    ownKeyAllowed: ownKeyAllowed(userId),
+    // Whether this user's runs have Jev, which the supervisor needs: a Foundry account only with its own key.
+    jevOn: jevFor(userId) !== null,
+  };
+}
+
 /** Settings as the page may see them: which keys are saved, never the keys. */
 function withoutKeys(config: LLMConfig) {
   return {
     ...config,
     openai: { model: config.openai.model, apiKey: "", hasKey: Boolean(config.openai.apiKey) },
     openrouter: { model: config.openrouter.model, apiKey: "", hasKey: Boolean(config.openrouter.apiKey) },
+    jev: { apiKey: "", hasKey: Boolean(config.jev.apiKey) },
   };
+}
+
+// When each account last caught up with Stripe in this Lambda: the panel asks
+// every few seconds while a payment page is open, and Stripe need not be asked as often.
+const caughtUpAt = new Map<string, number>();
+const CATCH_UP_EVERY_MS = 10_000;
+
+/** Applies what Stripe holds for the account; true when that changed its plan or credits. Never throws. */
+async function catchUp(userId: string, deps: BillingDeps): Promise<boolean> {
+  const now = Date.now();
+  if (now - (caughtUpAt.get(userId) ?? 0) < CATCH_UP_EVERY_MS) return false;
+  caughtUpAt.set(userId, now);
+  if (caughtUpAt.size > 1000) caughtUpAt.delete(caughtUpAt.keys().next().value!);
+  try {
+    const before = await deps.ledger.account(userId);
+    const notes = await syncFromStripe(userId, deps, now);
+    const after = await deps.ledger.account(userId);
+    const changed = before.plan !== after.plan || before.planUntil !== after.planUntil || before.credits !== after.credits;
+    if (changed) console.log(`[billing] caught up with Stripe for ${userId}: ${notes.join("; ")}`);
+    if (changed) await initConfig(userId);
+    return changed;
+  } catch (err) {
+    // The plan as last stored is still a plan to show.
+    console.error(`[billing] could not catch up with Stripe: ${String((err as Error)?.message ?? err)}`);
+    return false;
+  }
+}
+
+function billingDeps(stripe: NonNullable<Awaited<ReturnType<typeof stripeClient>>>): BillingDeps {
+  return { stripe, ledger: dynamoLedger, returnUrl: process.env.BILLING_RETURN_URL ?? "https://copper.jassydev.com/billing/" };
+}
+
+/** The email on the user's sign-in, so the payment page can open with it filled in; null if there is none to find. */
+async function emailOf(userId: string): Promise<string | null> {
+  try {
+    const found = await cognito.send(
+      new ListUsersCommand({ UserPoolId: process.env.USER_POOL_ID, Filter: `sub = "${userId.replace(/"/g, "")}"`, Limit: 1 }),
+    );
+    return found.Users?.[0]?.Attributes?.find((a) => a.Name === "email")?.Value ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /** The user's Cognito sign-in, found by the id the token carries (for Google users it differs from their username). */

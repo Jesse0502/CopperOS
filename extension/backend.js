@@ -1,7 +1,9 @@
 // Which broker the extension talks to: the one on this computer ("local"),
 // or the hosted CopperOS ("cloud"). Each keeps its own chats and state, and
-// nothing crosses between them. The choice is remembered across browser
-// restarts in chrome.storage.local.
+// nothing crosses between them. What the person chose, with the switch in
+// Settings, is remembered across browser restarts in chrome.storage.local.
+// Without a choice it is the cloud, unless a broker is running on this
+// computer and nobody is signed in, when it is that one (background.js).
 
 export const LOCAL_URL = "ws://127.0.0.1:7331";
 
@@ -35,18 +37,37 @@ export async function cloud() {
   return (await isDevelopmentCopy()) ? STAGES.dev : STAGES.prod;
 }
 
-export async function getBackend() {
+/** What the person chose with the switch in Settings, or null if they never did. */
+export async function chosenBackend() {
   try {
     const { backend } = await chrome.storage.local.get("backend");
     if (backend === "local" || backend === "cloud") return backend;
   } catch {
-    // Storage unavailable: fall through to the default.
+    // Storage unavailable: no choice that can be read.
   }
-  // A developer's unpacked copy starts on the broker beside it; a store
-  // install starts on the hosted one.
-  return (await isDevelopmentCopy()) ? "local" : "cloud";
+  return null;
+}
+
+/** Where to start: the choice, or the cloud. A broker on this computer is noticed after, and used if nobody is signed in. */
+export async function getBackend() {
+  return (await chosenBackend()) ?? "cloud";
 }
 
 export async function setBackend(backend) {
   await chrome.storage.local.set({ backend });
+}
+
+/**
+ * Whether a CopperOS broker is running on this computer. Asked over HTTP, not
+ * by opening a WebSocket: the broker keeps one extension at a time, so a
+ * socket opened just to look would displace the one already talking to it.
+ * Its WebSocket server answers a plain request with 426 Upgrade Required.
+ */
+export async function localBrokerRunning() {
+  try {
+    const res = await fetch(LOCAL_URL.replace(/^ws/, "http"), { signal: AbortSignal.timeout(1000) });
+    return res.status === 426;
+  } catch {
+    return false;
+  }
 }

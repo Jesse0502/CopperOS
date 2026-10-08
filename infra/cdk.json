@@ -9,6 +9,8 @@
     "alertEmail": "hello@jassydev.com",
     "spendCap": "10",
     "feedbackEmail": "hello@jassydev.com",
+    "freeWeeklyUsd": "2",
+    "freePoolMonthlyUsd": "50",
     "@aws-cdk/aws-lambda-nodejs:useLatestRuntimeVersion": false,
     "testModel": true,
     "devExtensionIds": "ejckjligpgelpgjompeglfjinckfbkai"

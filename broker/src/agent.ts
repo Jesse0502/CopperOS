@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 // The agent loop.
 //
 // Talks to whichever provider Settings currently points at (Ollama, OpenAI or
@@ -26,6 +27,8 @@ import {
   PauseForUser,
   refLabel,
   TOOL_DEFS,
+  MOLD_TOOLS,
+  MOLD_TOOL_DEFS,
   TOOL_BY_NAME,
   type ToolCtx,
   type ToolResult,
@@ -35,17 +38,21 @@ import {
 import {
   acceptsImages,
   getConfig,
+  HOSTED,
   OPENROUTER_BASE,
   openrouterContextTokens,
+  usesPlatformKey,
   type LLMConfig,
 } from "./config.js";
+import { meterFor, UsageLimitError, type Meter } from "./meter.js";
 import {
   classifyIntent,
-  jevEnabled,
+  jevOn,
   judgeCompletion,
   superviseTask,
   type EarlierTurn,
   type Intent,
+  type Turn,
 } from "./jev.js";
 import {
   brief,
@@ -67,6 +74,7 @@ import {
   TRAIL_LENGTH,
 } from "./supervisor.js";
 import { splitTaskMessage, taskMessage, type TaskExtras } from "./task-extras.js";
+import { draftPrompt, parseDraft } from "./workflows.js";
 import {
   blank,
   ChatNotFound,
@@ -76,6 +84,7 @@ import {
   save,
   stripImages,
   type ApprovalMode,
+  type Paused,
   type Session,
   type SessionSummary,
 } from "./session.js";
@@ -136,10 +145,6 @@ function activeLabel(cfg: LLMConfig): string {
 }
 
 /** Provider + model + a ready OpenAI-compatible client, resolved from the current settings. */
-// Running as the hosted CopperOS (its Lambdas set STAGE), where users have
-// no .env and no Ollama of their own.
-const HOSTED = Boolean(process.env.STAGE);
-
 function resolveActive(cfg: LLMConfig) {
   if (cfg.provider === "openai") {
     if (!cfg.openai.apiKey) {
@@ -162,9 +167,9 @@ function resolveActive(cfg: LLMConfig) {
   if (cfg.provider === "openrouter") {
     if (!cfg.openrouter.apiKey) {
       throw new Error(
-        HOSTED
-          ? "No OpenRouter API key set. Add yours in Settings."
-          : "No OpenRouter API key set. Add one in Settings or as OPENROUTER_API_KEY in broker/.env.",
+        !HOSTED
+          ? "No OpenRouter API key set. Add one in Settings or as OPENROUTER_API_KEY in broker/.env."
+          : "CopperOS's own model is not available right now. Try again in a minute.",
       );
     }
     return {
@@ -317,6 +322,40 @@ const CANCEL_NOTICE =
   "to continue, pick it back up from where it stopped — take a fresh " +
   "snapshot first, since the page may have moved on.]";
 
+// Pushed after the person's message when they want help making a mold (a
+// saved task to run again; some call it a workflow): Jev said so, or they
+// pressed New mold. Hidden from the chat like the other notices.
+const MOLD_NOTICE =
+  "[The user wants help making a mold: a saved task they can run again later with one " +
+  "click (some call it a workflow). Their message above is their idea for it, in their own " +
+  "words. Do not do the task now, and do not guess beyond what they wrote: the open tab and " +
+  "their past chats are not the brief.\n" +
+  "1. If their message does not say what the mold is for yet (just \"help me make a " +
+  "workflow\", say), ask them to describe it in their own words: one free-text ask_user " +
+  "question, nothing else. Carry on from their answer.\n" +
+  "2. Read their idea closely. In ONE ask_user call, ask follow-up questions only about what " +
+  "it leaves unclear or missing for the mold to run on its own (what changes from one run " +
+  "to the next, when it is done, what to do in a case it does not cover), never about " +
+  "anything they already said. In the same call, add one multiple-choice question offering " +
+  "2 to 4 additions that would make it hold up better, with an option for none. If their " +
+  "idea is complete, that one question is all you ask.\n" +
+  "3. If they mention something of theirs you have not been told (\"my resume\", \"my usual " +
+  "list\"), search_memory once for that thing and for nothing else.\n" +
+  "4. Write the mold from their idea, their answers and the additions they picked: specific " +
+  "numbered steps, what to do when something goes wrong (a login, no results, a question it " +
+  "has no answer for, something it has already done), a clear point at which it stops, and " +
+  "rules that keep it to the task. Call propose_mold with a short name and the steps, with " +
+  "<angle brackets> around what changes from run to run. If they ask for changes, call " +
+  "propose_mold again with the new version.]";
+
+// Pushed, for a run with no tracked task to brief from, when a long task is
+// carried on in a new Lambda (Agent.continueSlice). The person never typed
+// it, so it is hidden from the chat like the other notices.
+const CONTINUE_NOTICE =
+  "[The task above was split to keep within one stretch of work, not because " +
+  "anything went wrong. Carry on from where it stopped without asking the " +
+  "user — take a fresh snapshot first, since the page may have moved on.]";
+
 // Pushed when a task stops at its time limit, for the same reason as
 // CANCEL_NOTICE, and filtered out of replay() the same way.
 const TIME_UP_NOTICE =
@@ -389,6 +428,11 @@ class Clock {
   private readonly hardAt: number | null;
   private readonly margin: number = 0;
   timedOut = false;
+  /**
+   * What this run ends at: the task's own time limit, or the run's slice (a
+   * Lambda's deadline, after which the task is carried on, not stopped).
+   */
+  readonly endsBy: "limit" | "slice" | null;
 
   constructor(
     private readonly usedBefore: number,
@@ -399,6 +443,7 @@ class Clock {
     const byLimit = limitMs === null ? null : this.start + limitMs - usedBefore;
     this.hardAt =
       byLimit === null ? endBy : endBy === null ? byLimit : Math.min(byLimit, endBy);
+    this.endsBy = this.hardAt === null ? null : endBy !== null && (byLimit === null || endBy < byLimit) ? "slice" : "limit";
     if (this.hardAt === null) return;
     this.margin = Math.min(FINISH_MS, (limitMs ?? this.hardAt - this.start) / 4);
     this.timer = setTimeout(() => {
@@ -433,7 +478,12 @@ function rulesLine(task: TaskState): string[] {
 }
 
 /** A run's time limit, and for a new task, what comes with it (task-extras.ts). */
-export type RunOptions = { limitMs?: number | null; endBy?: number | null } & TaskExtras;
+export type RunOptions = {
+  limitMs?: number | null;
+  endBy?: number | null;
+  /** What to tell the person when the task stops at its own limit, given the ms it worked. */
+  limitMessage?: (usedMs: number) => string;
+} & TaskExtras;
 
 // How much of the chat classifyIntent sees: enough to read a short
 // follow-up in context, not the whole transcript.
@@ -455,6 +505,131 @@ function answersCheckIn(messages: Msg[], i: number): boolean {
     typeof prev.content === "string" &&
     isCheckIn(prev.content)
   );
+}
+
+// How much of the chat Jev's judgments of the user's wishes get to read
+// alongside their messages (see conversationOf): the last two replies, each
+// whole enough to hold a draft the user was shown and approved (the longest
+// reply in the user's saved chats is ~9k characters; the median is 700).
+// Jev bills by the input token, and a form entry is checked on every field.
+const CONVERSATION_REPLIES = 2;
+const CONVERSATION_REPLY_CAP = 10_000;
+const CONVERSATION_USER_CAP = 2_000;
+
+/**
+ * The chat as the user saw it, for Jev's judgments: their messages, with the
+ * reply the assistant ended each earlier turn on. "ok I like the draft" and
+ * "yes" mean nothing without the draft and the question they answer, and a
+ * judge that read only the user's side refused text the user had approved.
+ *
+ * Only a turn's last reply counts, and only once the user has answered it:
+ * the model's running commentary, and anything it wrote this turn, is not
+ * something the user has seen and agreed to. Notes the broker added to the
+ * transcript, and the model's answers to check-ins, are not part of the chat.
+ */
+export function conversationOf(messages: Msg[]): Turn[] {
+  const turns: Turn[] = [];
+  let reply: string | null = null;
+  for (const [i, m] of messages.entries()) {
+    if (m.role === "assistant") {
+      if (typeof m.content === "string" && m.content.trim() && !m.tool_calls?.length && !answersCheckIn(messages, i)) {
+        reply = m.content;
+      }
+      continue;
+    }
+    if (m.role !== "user" || typeof m.content !== "string") continue;
+    if (isBrokerNote(m.content)) continue;
+    if (reply !== null) turns.push({ from: "assistant", text: clipTo(reply, CONVERSATION_REPLY_CAP) });
+    reply = null;
+    turns.push({ from: "user", text: clipTo(splitTaskMessage(m.content).text, CONVERSATION_USER_CAP) });
+  }
+  // The newest replies, each with the message it answered, and the user's words after.
+  const replies = turns.flatMap((t, i) => (t.from === "assistant" ? [i] : [])).slice(-CONVERSATION_REPLIES);
+  return turns.slice(replies.length ? Math.max(0, replies[0] - 1) : 0);
+}
+
+/** A user-role message the broker put in the transcript — a notice, a brief, a check-in — rather than something the person typed. */
+function isBrokerNote(text: string): boolean {
+  return (
+    text === RESUME_NOTICE ||
+    text === CANCEL_NOTICE ||
+    text === TIME_UP_NOTICE ||
+    text === CONTINUE_NOTICE ||
+    text === MOLD_NOTICE ||
+    isLoopNote(text) ||
+    isBrief(text) ||
+    isSupervisorNote(text)
+  );
+}
+
+// What a chat's digest keeps of each action, and how much of the chat: enough
+// for the model to see what was done and how, not every page it read.
+const DIGEST_CAP = 24_000;
+const DIGEST_ACTIONS = 90;
+const DIGEST_ARG_CAP = 140;
+// Looking is not doing: a saved workflow says what to do.
+const LOOKING = new Set(["snapshot", "screenshot", "read_page", "list_tabs", "wait_for_idle", "sheet_read", "search_memory", "find_answers", "update_progress", "check_job_fit"]);
+
+/**
+ * A chat as a plain account of what happened, for the model to write a
+ * workflow from: what the user asked, each thing the agent did (with where
+ * and why), and what it said at the end of each turn. Null when nothing was
+ * done in it. Long chats keep their first and last actions.
+ */
+export function chatDigest(messages: Msg[]): string | null {
+  const lines: string[] = [];
+  let actions = 0;
+  const arg = (v: unknown) => clipTo(typeof v === "string" ? v : JSON.stringify(v), DIGEST_ARG_CAP);
+  for (const [i, m] of messages.entries()) {
+    if (m.role === "user" && typeof m.content === "string") {
+      if (isBrokerNote(m.content)) continue;
+      lines.push(`USER: ${clipTo(splitTaskMessage(m.content).text, 1500)}`);
+    } else if (m.role === "assistant") {
+      if (m.tool_calls?.length) {
+        for (const call of m.tool_calls) {
+          if (call.type !== "function" || LOOKING.has(call.function.name)) continue;
+          let input: Record<string, unknown> = {};
+          try {
+            input = JSON.parse(call.function.arguments || "{}");
+          } catch {
+            // Unreadable arguments: the name alone still says what was done.
+          }
+          const shown = Object.entries(input)
+            .filter(([k]) => k !== "why" && k !== "ref" && k !== "destructive")
+            .map(([k, v]) => `${k}=${arg(v)}`);
+          const why = typeof input.why === "string" && input.why.trim() ? ` — ${arg(input.why)}` : "";
+          lines.push(`ACTION: ${[call.function.name, ...shown].join(" ")}${why}`);
+          actions++;
+        }
+      } else if (typeof m.content === "string" && m.content.trim() && !answersCheckIn(messages, i)) {
+        lines.push(`AGENT: ${clipTo(m.content, 1200)}`);
+      }
+    }
+  }
+  if (actions === 0) return null;
+  // Over the size: keep the first and last actions, where a task's way in and its result are.
+  let kept = lines;
+  if (actions > DIGEST_ACTIONS) {
+    const head = Math.floor(DIGEST_ACTIONS / 2);
+    const tail = DIGEST_ACTIONS - head;
+    let seen = 0;
+    kept = [];
+    for (const line of lines) {
+      if (!line.startsWith("ACTION:")) {
+        kept.push(line);
+        continue;
+      }
+      seen++;
+      if (seen <= head || seen > actions - tail) kept.push(line);
+      else if (seen === head + 1) kept.push(`(${actions - DIGEST_ACTIONS} actions in the middle left out)`);
+    }
+  }
+  const out = kept.join("\n");
+  return out.length > DIGEST_CAP ? `${out.slice(0, DIGEST_CAP / 2)}\n(…)\n${out.slice(-DIGEST_CAP / 2)}` : out;
+}
+
+function clipTo(text: string, cap: number): string {
+  return text.length > cap ? `${text.slice(0, cap)}…` : text;
 }
 
 /** The last few turns of a transcript as classifyIntent's context: what was asked, the last reply, and whether it was cancelled. */
@@ -479,6 +654,7 @@ function earlierTurns(messages: Msg[]): EarlierTurn[] {
         if (last) last.outcome = "stopped at its time limit before it finished";
         continue;
       }
+      if (m.content === CONTINUE_NOTICE || m.content === MOLD_NOTICE) continue;
       turns.push({ user: clip(splitTaskMessage(m.content).text) });
     } else if (
       m.role === "assistant" &&
@@ -504,11 +680,37 @@ export type RunResult = {
   paused?: PendingRequest;
   /** Set when the task stopped at its time limit. */
   timeUp?: boolean;
+  /**
+   * With `timeUp`: it was only the end of this Lambda's stretch, and the task
+   * is saved to be carried on (continueSlice), not stopped.
+   */
+  slice?: boolean;
   /** Active time spent on the task so far, across its pauses. */
   timeUsedMs?: number;
 };
 
-type Active = ReturnType<typeof resolveActive>;
+/**
+ * The model a run talks to, and — on CopperOS's own model — the meter its
+ * calls are charged to and who it is to OpenRouter (`endUser`).
+ *
+ * Many people share CopperOS's one key, and nothing about one of them reaches
+ * another's call: a model API keeps nothing between calls, and every call
+ * carries only the messages of the chat it is for, from that agent's own
+ * session (one Agent per user and chat). `endUser` is a one-way hash of the
+ * account, sent as OpenRouter's `user` field, so each account is its own user
+ * there too (its abuse checks and routing), and the account id itself never
+ * leaves CopperOS.
+ */
+type Active = ReturnType<typeof resolveActive> & { meter: Meter | null; endUser?: string };
+
+/** The model a user's run talks to; on CopperOS's own model (a meter), named to OpenRouter by a hash of the account. */
+function activeFor(userId: string, config: LLMConfig, meter: Meter | null): Active {
+  return {
+    ...resolveActive(config),
+    meter,
+    ...(meter ? { endUser: createHash("sha256").update(`copperos:${userId}`).digest("hex").slice(0, 32) } : {}),
+  };
+}
 
 /** A tracked task's check-ins across one run. */
 type Watch = {
@@ -543,6 +745,8 @@ type Loop = {
   finalText: string;
   /** The message needs an answer, not browser work: one request, tools off, nothing run. */
   wordsOnly?: boolean;
+  /** Helping the person make a mold: only asking, their memories and propose_mold (MOLD_TOOLS) are offered or may run. */
+  molding?: boolean;
 };
 
 type ToolCall = OpenAI.Chat.Completions.ChatCompletionMessageToolCall;
@@ -614,14 +818,18 @@ const EMPTY_RETRIES = 2;
  * still sent, so the request keeps the prefix the provider has cached.
  */
 async function createCompletion(
-  active: ReturnType<typeof resolveActive>,
+  active: Active,
   messages: Msg[],
   signal: AbortSignal,
   reasoningEffort: Effort = "none",
   toolChoice?: "none",
+  tools: OpenAI.Chat.Completions.ChatCompletionTool[] = TOOL_DEFS,
 ) {
+  // Stops the run, before anything more is spent, once nothing is left.
+  await active.meter?.check();
   for (let attempt = 0; ; attempt++) {
-    const res = await requestCompletion(active, messages, signal, reasoningEffort, toolChoice);
+    const res = await requestCompletion(active, messages, signal, reasoningEffort, toolChoice, tools);
+    await chargeFor(active, res);
     if (res.choices?.length) return res;
 
     const error = (res as { error?: { message?: string; code?: number | string } })
@@ -639,21 +847,36 @@ async function createCompletion(
   }
 }
 
+/** What OpenRouter says a response cost, in dollars: it reports it on every one, as `usage.cost`. */
+async function chargeFor(active: Active, res: OpenAI.Chat.Completions.ChatCompletion): Promise<void> {
+  if (!active.meter || !res.usage) return;
+  const cost = (res.usage as { cost?: unknown }).cost;
+  await active.meter.charge({
+    cost: typeof cost === "number" ? cost : null,
+    input: res.usage.prompt_tokens ?? 0,
+    output: res.usage.completion_tokens ?? 0,
+    cached: res.usage.prompt_tokens_details?.cached_tokens ?? 0,
+    model: active.model,
+  });
+}
+
 async function requestCompletion(
-  active: ReturnType<typeof resolveActive>,
+  active: Active,
   messages: Msg[],
   signal: AbortSignal,
   reasoningEffort: Effort,
   toolChoice?: "none",
+  tools: OpenAI.Chat.Completions.ChatCompletionTool[] = TOOL_DEFS,
 ) {
   const body = (effort: Effort) =>
     ({
       model: active.model,
-      tools: TOOL_DEFS,
+      tools,
       ...(toolChoice && { tool_choice: toolChoice }),
       messages: noImages.has(active.label)
         ? stripImages(messages, IMAGE_LEFT_OUT)
         : messages,
+      ...(active.endUser ? { user: active.endUser } : {}),
       ...active.knobs(effort),
     }) as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming;
 
@@ -841,6 +1064,8 @@ export class Agent {
   private abort: AbortController | null = null;
   // The running run's time limit, if it has one.
   private clock: Clock | null = null;
+  /** What to tell the person when the task stops at its own limit; none: the local broker's words. */
+  private limitMessage: ((usedMs: number) => string) | null = null;
   private readonly userId: string;
   private session: Session;
   // Whether the model a run started with takes images — see acceptsImages.
@@ -937,6 +1162,8 @@ export class Agent {
           m.content === RESUME_NOTICE ||
           m.content === CANCEL_NOTICE ||
           m.content === TIME_UP_NOTICE ||
+          m.content === CONTINUE_NOTICE ||
+          m.content === MOLD_NOTICE ||
           isLoopNote(m.content) ||
           isBrief(m.content) ||
           isSupervisorNote(m.content)
@@ -960,6 +1187,9 @@ export class Agent {
   async run(task: string, options: RunOptions = {}): Promise<RunResult> {
     const { abort, active, budget } = await this.begin();
     this.clock = new Clock(0, options.limitMs ?? null, abort, options.endBy ?? null);
+    this.limitMessage = options.limitMessage ?? null;
+    // Something the person says now takes the place of a stretch left to carry on.
+    this.session.slice = undefined;
 
     if (this.resumeNoticePending) {
       this.session.messages.push({ role: "user", content: RESUME_NOTICE });
@@ -968,9 +1198,10 @@ export class Agent {
 
     // Taken before this task is pushed, so it is only the turns before it.
     const earlier = earlierTurns(this.session.messages);
-    const recorded = jevEnabled ? await loadTask(this.userId, this.session.id) : null;
+    const recorded = jevOn() ? await loadTask(this.userId, this.session.id) : null;
 
     // A task is a turn, not a new conversation.
+    const asked = this.session.messages.length;
     this.session.messages.push({ role: "user", content: taskMessage(task, options) });
     this.session.tasks.push(task);
 
@@ -997,13 +1228,30 @@ export class Agent {
         abort.signal,
       );
       this.jobTask = intent.jobs;
+      // A saved mold being run is never offered to be saved again.
+      if (options.fromMold) this.session.workflowOffered = true;
+      // Making a mold: by asking, not by doing. It goes on across messages until one is shown.
+      const molding = Boolean(options.makeMold) || intent.mold || Boolean(this.session.molding);
+      if (molding) {
+        this.session.molding = true;
+        // The open tab is not what the mold is about: the person says what it is.
+        if (options.tab) this.session.messages[asked] = { role: "user", content: taskMessage(task, { ...options, tab: undefined }) };
+        this.session.messages.push({ role: "user", content: MOLD_NOTICE });
+      }
       // Rules are for the supervisor, so sending some turns it on.
       if (options.rules) this.session.settings.supervisor = true;
-      const tracked = await this.track(task, intent, recorded, options.rules ?? null);
+      const tracked = molding ? null : await this.track(task, intent, recorded, options.rules ?? null);
       this.rules = tracked?.rules ?? options.rules ?? null;
       if (tracked?.loop) {
         this.session.messages.push({ role: "user", content: LOOP_NOTICE });
         emit("loop", this.session.id, "repeats until you stop it; anything that needs you is skipped and listed");
+        // A job that repeats is the kind worth keeping: the first one in a chat
+        // asks whether to save it as a workflow (the panel decides, and the
+        // model writes it up from what was asked). Once a chat, not every time.
+        if (!this.session.workflowOffered) {
+          this.session.workflowOffered = true;
+          emit("offer_workflow", this.session.id, task);
+        }
       } else if (endsLoop(intent, recorded)) {
         this.session.messages.push({ role: "user", content: LOOP_END_NOTICE });
         emit("loop", this.session.id, "no longer repeats: it stops once what you just asked for is done");
@@ -1025,9 +1273,15 @@ export class Agent {
         from: null,
         finalText: "",
         // Rules mean the user wants work done and watched.
-        wordsOnly: intent.reply && !options.rules && !tracked?.loop,
+        wordsOnly: !molding && intent.reply && !options.rules && !tracked?.loop,
+        molding,
       };
       if (loop.wordsOnly) console.log(`[agent] chat=${this.session.id} answering in words, tools off`);
+      // Tells the panel what this message is, so it shows a task's card (steps,
+      // timer, Stop) only for work, and answers in words as plain chat. With no
+      // Jev there is no intent to tell: the panel finds out from the first step.
+      // Making a mold is a conversation, not a task with a timer.
+      if (jevOn() || molding) emit("intent", this.session.id, loop.wordsOnly || molding ? "reply" : "task");
       return await this.drive(
         active,
         budget,
@@ -1090,6 +1344,7 @@ export class Agent {
       abort,
       options.endBy ?? null,
     );
+    this.limitMessage = options.limitMessage ?? null;
     const usage: Usage = { input: 0, output: 0, cached: 0 };
     this.jobTask = paused.loop.jobTask;
     // The task file may be gone (deleted by hand); carry on untracked then.
@@ -1102,6 +1357,8 @@ export class Agent {
       // A fresh round's context starts at its brief — the latest one, since
       // briefs are only ever pushed at the start of a round.
       from: paused.loop.round > 1 ? this.lastBrief() : null,
+      // An answer to a question asked while making a mold is still making the mold.
+      molding: Boolean(this.session.molding),
     };
 
     try {
@@ -1118,6 +1375,76 @@ export class Agent {
         };
       }
       return await this.drive(active, budget, usage, abort.signal, loop, "high", rest);
+    } catch (err) {
+      if (this.clock.timedOut) return await this.timeUp(loop, usage, active, true);
+      if (abort.signal.aborted) {
+        this.session.messages.push({ role: "user", content: CANCEL_NOTICE });
+      }
+      throw err;
+    } finally {
+      this.clock.stop();
+      await this.persist();
+    }
+  }
+
+  /** Whether this chat has a long task whose last stretch ended only because the Lambda's did. */
+  hasSlice(): boolean {
+    return Boolean(this.session.slice);
+  }
+
+  /** Ms the chat's task has already worked, if it is paused or between stretches: what a limit counts from. */
+  workedMs(): number {
+    return this.session.paused?.loop.timeUsedMs ?? this.session.slice?.loop.timeUsedMs ?? 0;
+  }
+
+  /**
+   * Carry on a long task in a new stretch of work: a Lambda that is about to
+   * be cut off ends its run at a step boundary (timeUp, with a slice saved),
+   * and the next one picks the task up here. The person typed nothing, so
+   * nothing is shown: a tracked task starts a fresh round from its brief, as
+   * any later round of a long task does; an untracked one carries on from the
+   * chat. `limitMs` counts the whole task, so the time already worked is
+   * carried over from the slice.
+   */
+  async continueSlice(options: RunOptions = {}): Promise<RunResult> {
+    const slice = this.session.slice;
+    if (!slice) throw new Error(`chat ${this.session.id} has no task to carry on`);
+    // Claimed before anything is awaited, as a pause's answer is.
+    this.session.slice = undefined;
+    let setup: Awaited<ReturnType<Agent["begin"]>>;
+    try {
+      setup = await this.begin();
+    } catch (err) {
+      this.session.slice = slice;
+      throw err;
+    }
+    const { abort, active, budget } = setup;
+    this.clock = new Clock(slice.loop.timeUsedMs ?? 0, options.limitMs ?? null, abort, options.endBy ?? null);
+    this.limitMessage = options.limitMessage ?? null;
+    const usage: Usage = { input: 0, output: 0, cached: 0 };
+    this.jobTask = slice.loop.jobTask;
+    // The task file may be gone (deleted by hand); carry on untracked then.
+    const tracked = slice.loop.tracked ? await loadTask(this.userId, this.session.id) : null;
+    this.rules = tracked?.rules ?? null;
+    let from: Msg | null = null;
+    if (tracked) {
+      from = { role: "user", content: brief(tracked) };
+      this.session.messages.push(from);
+    } else {
+      this.session.messages.push({ role: "user", content: CONTINUE_NOTICE });
+    }
+    const loop: Loop = {
+      ...slice.loop,
+      round: slice.loop.round + 1,
+      step: 0,
+      stalls: 0,
+      tracked,
+      watch: tracked ? slice.loop.watch : null,
+      from,
+      molding: Boolean(this.session.molding),
+    };
+    try {
+      return await this.drive(active, budget, usage, abort.signal, loop, "high");
     } catch (err) {
       if (this.clock.timedOut) return await this.timeUp(loop, usage, active, true);
       if (abort.signal.aborted) {
@@ -1152,6 +1479,36 @@ export class Agent {
     return paused.request;
   }
 
+  /**
+   * The chat — or, given `request`, a task just asked for — written up as a
+   * workflow: a name and the steps to do it again (workflows.ts). One model call, in
+   * words, on whatever model the user runs on (metered, on CopperOS's own).
+   * It touches nothing of a run in progress.
+   */
+  async draftWorkflow(request?: string): Promise<{ name: string; steps: string }> {
+    // Written from a request when there is one (a task just given, which the
+    // saved chat may not hold yet), else from what the chat did.
+    const asked = request?.trim();
+    const digest = asked ? `USER: ${clipTo(asked, 3000)}` : chatDigest(this.session.messages);
+    if (!digest) throw new Error("There is nothing in this chat to turn into a mold yet.");
+    const config = getConfig(this.userId);
+    const meter = usesPlatformKey(this.userId) ? meterFor(this.userId) : null;
+    if (usesPlatformKey(this.userId) && !meter) throw new Error("Usage limits are not set up on this server.");
+    const active = activeFor(this.userId, config, meter);
+    const res = await createCompletion(
+      active,
+      [
+        { role: "system", content: "You turn a finished browser task into steps a browser agent can follow again." },
+        { role: "user", content: draftPrompt(digest, asked ? "request" : "chat") },
+      ],
+      AbortSignal.timeout(60_000),
+      "none",
+      "none",
+    );
+    const first = asked ?? this.session.tasks[0] ?? "Saved mold";
+    return parseDraft(res.choices[0]?.message.content ?? "", clipTo(first.split("\n")[0], 60));
+  }
+
   /** Per-run setup: a fresh abort signal, and the model resolved once for the whole run. */
   private async begin() {
     const abort = new AbortController();
@@ -1160,7 +1517,11 @@ export class Agent {
     // Resolved once per run: the model a task started with sees it through,
     // even if Settings is changed while it is still working.
     const config = getConfig(this.userId);
-    const active = resolveActive(config);
+    // CopperOS's own model is metered; a user's own key, and any broker on
+    // their computer, is not.
+    const meter = usesPlatformKey(this.userId) ? meterFor(this.userId) : null;
+    if (usesPlatformKey(this.userId) && !meter) throw new Error("Usage limits are not set up on this server.");
+    const active = activeFor(this.userId, config, meter);
     this.session.model = active.label;
     const budget = await historyBudgetChars(config);
     this.images = await acceptsImages(config);
@@ -1271,20 +1632,25 @@ export class Agent {
       request,
       callId: waiting.callId,
       at: new Date().toISOString(),
-      loop: {
-        round: loop.round,
-        step: loop.step,
-        steps: loop.steps,
-        stalls: loop.stalls,
-        markBefore: loop.markBefore,
-        tracked: loop.tracked !== null,
-        watch: loop.watch,
-        jobTask: this.jobTask,
-        finalText: loop.finalText,
-        timeUsedMs: this.clock?.used() ?? 0,
-      },
+      loop: this.snapshot(loop),
     };
     return request;
+  }
+
+  /** Where the loop stands, to be carried on from: a pause's, or a slice's. */
+  private snapshot(loop: Loop): Paused["loop"] {
+    return {
+      round: loop.round,
+      step: loop.step,
+      steps: loop.steps,
+      stalls: loop.stalls,
+      markBefore: loop.markBefore,
+      tracked: loop.tracked !== null,
+      watch: loop.watch,
+      jobTask: this.jobTask,
+      finalText: loop.finalText,
+      timeUsedMs: this.clock?.used() ?? 0,
+    };
   }
 
   /**
@@ -1310,17 +1676,27 @@ export class Agent {
       task.lastCheck = `Round ${task.rounds}: stopped: time limit`;
       await saveTask(this.userId, this.session.id, task);
     }
-    const minutes = Math.round((this.clock?.used() ?? 0) / 60_000);
+    const used = this.clock?.used() ?? 0;
+    // Only the end of this Lambda's stretch: the task is saved where it stands, and the
+    // next stretch picks it up. A run that never got as far as a loop has nothing to save.
+    const slice = this.clock?.endsBy === "slice" && loop !== null;
+    if (slice) this.session.slice = { loop: this.snapshot(loop) };
+    const minutes = Math.round(used / 60_000);
+    const done = task ? ` — ${task.done.length} done, ${task.skipped.length} skipped so far` : "";
     return {
-      text:
-        `Stopped after ${minutes ? `${minutes} minutes` : "less than a minute"} of work, the most one run can take` +
-        (task ? ` — ${task.done.length} done, ${task.skipped.length} skipped so far` : "") +
-        `. Say "continue" and it picks up where it left off.`,
+      text: slice
+        ? "Carrying on in a new stretch of work."
+        : this.limitMessage
+          ? this.limitMessage(used) + done
+          : `Stopped after ${minutes ? `${minutes} minutes` : "less than a minute"} of work, the most one run can take` +
+            done +
+            `. Say "continue" and it picks up where it left off.`,
       steps: loop?.steps ?? 0,
       usage,
       model: active.label,
       timeUp: true,
-      timeUsedMs: this.clock?.used() ?? 0,
+      ...(slice ? { slice: true } : {}),
+      timeUsedMs: used,
     };
   }
 
@@ -1413,6 +1789,7 @@ export class Agent {
         ? [...this.session.tasks, `Rules I set for this task: ${this.rules}`]
         : this.session.tasks,
       answers: this.session.answers,
+      conversation: conversationOf(this.session.messages),
       chatStartedAt: this.session.createdAt,
       seesImages: this.images !== false && !noImages.has(active.label),
       jobTask: this.jobTask,
@@ -1437,7 +1814,7 @@ export class Agent {
     recorded: TaskState | null,
     rules: string | null,
   ): Promise<TaskState | null> {
-    if (!jevEnabled) return null;
+    if (!jevOn()) return null;
     // Small talk or a question answered in words leaves the task on record
     // alone. Rules for the supervisor mean the user wants this watched,
     // whatever the message looks like.
@@ -1496,6 +1873,7 @@ export class Agent {
       {
         instructions: task.instructions,
         later_instructions: [...task.followUps, ...rulesLine(task)],
+        conversation: conversationOf(this.session.messages),
         done_count: task.done.length,
         done: task.done,
         skipped: task.skipped,
@@ -1576,7 +1954,7 @@ export class Agent {
       usage.cached += res.usage?.prompt_tokens_details?.cached_tokens ?? 0;
       report = res.choices[0]!.message.content?.trim() || "(no answer)";
     } catch (err) {
-      if (signal.aborted) throw err;
+      if (signal.aborted || err instanceof UsageLimitError) throw err;
       // A check-in that fails costs the check, not the task.
       console.warn(`[agent] check-in failed: ${String(err)}`);
       return null;
@@ -1589,6 +1967,7 @@ export class Agent {
     const verdict = await superviseTask(
       {
         user_instructions: [task.instructions, ...task.followUps, ...rulesLine(task)],
+        conversation: conversationOf(this.session.messages),
         progress_recorded: { done: task.done, skipped: task.skipped, note: task.note },
         agent_report: report.slice(0, CHECK_IN_REPORT_CAP),
         recent_actions: watch.trail,
@@ -1776,6 +2155,7 @@ export class Agent {
           signal,
           loop.step === 1 ? firstEffort : "high",
           wordsOnly ? "none" : undefined,
+          loop.molding ? MOLD_TOOL_DEFS : TOOL_DEFS,
         );
 
         usage.input += res.usage?.prompt_tokens ?? 0;
@@ -1868,6 +2248,17 @@ export class Agent {
         });
         continue;
       }
+      if (loop.molding && !MOLD_TOOLS.has(c.function.name)) {
+        this.session.messages.push({
+          role: "tool",
+          tool_call_id: c.id,
+          content:
+            "Not now: you are helping the user make a mold, not doing the task or looking at " +
+            "the browser. Ask what you need with ask_user, then show it with propose_mold.",
+        });
+        continue;
+      }
+      if (c.function.name === "propose_mold") this.session.molding = undefined;
       const tool = TOOL_BY_NAME.get(c.function.name);
       if (!tool) {
         this.session.messages.push({
@@ -1896,7 +2287,7 @@ export class Agent {
         if (missing) throw new Error(missing);
         // Named now: the call's result replaces the snapshot it names from.
         const ref = (input as { ref?: unknown }).ref;
-        if (typeof ref === "string") label = refLabel(this.session.id, ref);
+        if (typeof ref === "string") label = refLabel(this.userId, this.session.id, ref);
         const out: ToolResult = await tool.run(input, this.toolCtx(active, signal, preApproved));
         this.session.messages.push({
           role: "tool",
