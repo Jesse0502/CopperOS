@@ -2,8 +2,8 @@
 // transcript, so a task can be carried across rounds that each start from a
 // fresh context. The model writes to it with update_progress (tools.ts); the
 // agent loop (agent.ts) reads it to brief each fresh round and to ask Jev
-// whether the task is finished. Only kept when Jev is configured, since
-// nothing reads it otherwise. One per chat, kept by the store
+// whether the task is finished. Kept when Jev is configured, and for a loop
+// without it (a loop needs no judge). One per chat, kept by the store
 // (store/store.ts); a new task replaces it.
 
 import { store } from "./store/store.js";

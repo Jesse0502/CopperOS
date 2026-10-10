@@ -59,7 +59,7 @@ function current(): TypeSafeClient | null {
   return set ? set.client : brokerClient;
 }
 
-/** Whether this run has Jev at all — agent.ts only tracks tasks (and the supervisor only checks in) when it has. */
+/** Whether this run has Jev at all — without it agent.ts tracks only loops, and the supervisor never checks in. */
 export function jevOn(): boolean {
   return current() !== null;
 }
@@ -464,7 +464,8 @@ export type Intent = {
   /**
    * How the message relates to the task on record — null when there is none,
    * or when Jev did not answer confidently. Callers must treat null as
-   * "leave the task on record alone."
+   * "leave the task on record alone." When Jev could not answer at all,
+   * "resume" if the message plainly carries on (see loopFromWords).
    */
   scope: "resume" | "new_task" | "other" | null;
   /**
@@ -475,15 +476,15 @@ export type Intent = {
   jobs: boolean;
   /**
    * The work repeats with no set end: keep going until the user stops it
-   * ("keep applying until I say stop"). Only on a confident verdict; false
-   * whenever Jev could not answer.
+   * ("keep applying until I say stop"). Only on a confident verdict; when
+   * Jev could not answer, only on plain words for it (see loopFromWords).
    */
   loop: boolean;
   /**
    * The message says when the agent should finish on its own — "100 more and
    * then stop", "stop after this page" — so a loop on record turns back into
-   * a task that ends. Only on a confident verdict; false whenever Jev could
-   * not answer, which leaves a loop as it was.
+   * a task that ends. Only on a confident verdict; when Jev could not answer,
+   * only on plain words for it (see loopFromWords).
    */
   ends: boolean;
   /**
@@ -524,17 +525,48 @@ const ENDS_MIN_P = 0.6;
 // "Help me make a mold for applying to jobs" is a request to write one, not to apply.
 const MOLD_MIN_P = 0.6;
 
+// When Jev cannot answer (no key, or one of its timeout spells), the
+// message's own words decide what a loop hangs on: whether it asks for one,
+// says when to finish, or carries on the task on record. Only plain wording
+// counts; anything subtler is an ordinary task, as it was before.
+const LOOP_WORDS =
+  /\b(?:loop(?:ing)?|non-?stop|forever|indefinitely|endless(?:ly)?|on repeat|without stopping|never stop|(?:do not|don'?t) stop|(?:until|till) i (?:say|tell|stop))\b/i;
+// Phrases with "stop" in them that ask to keep going, so a stop is not read into them.
+const KEEP_GOING_STOPS =
+  /\b(?:non-?stop|without stopping|never stop|(?:do not|don'?t) stop|(?:until|till) i (?:say|tell)(?: you)?(?: to)? stop|(?:until|till) i stop (?:you|it))\b/gi;
+const END_WORDS =
+  /\b(?:then stop|stop (?:after|at|when|once|by)|(?:until|till) (?:you(?:'ve| have)?|there (?:are|is)|it(?:'s| is)) |(?:\d+|ten|twenty|thirty|fifty|a hundred) (?:more|in total|total)\b|for (?:the next |another )?(?:\d+|an?|one|two|a few) (?:min(?:ute)?s?|hours?)\b)/gi;
+const STOP_WORDS = /\b(?:stop|pause|halt|cancel|quit|enough|no more)\b/i;
+const HALT_CONTINUE = /\b(?:do not|don'?t|no|never) (?:continue|keep going|go on|carry on|resume|proceed)\b/i;
+const CONTINUE_WORDS = /\b(?:continue|keep (?:going|at it)|go on|carry on|resume|proceed|go ahead)\b/i;
+// "What does the loop do?" asks about one; it does not ask for one.
+const WH_QUESTION = /^\s*(?:what|how|why|where|which|who|when)\b/i;
+
+/**
+ * What a message's own words say about looping, for when Jev cannot answer:
+ * "keep going and don't stop, loop" asks for a loop, "50 more then stop" sets
+ * an end, and either of those or a plain "continue" carries on the task on
+ * record. "Stop the loop" or "don't continue" does none of it.
+ */
+export function loopFromWords(text: string, hasRecord: boolean): Pick<Intent, "scope" | "loop" | "ends"> {
+  const ends = new RegExp(END_WORDS.source, "i").test(text);
+  const halts = STOP_WORDS.test(text.replace(KEEP_GOING_STOPS, " ").replace(END_WORDS, " ")) || HALT_CONTINUE.test(text);
+  const loop = !halts && !ends && !WH_QUESTION.test(text) && LOOP_WORDS.test(text);
+  const carriesOn = !halts && (loop || ends || CONTINUE_WORDS.test(text));
+  return { scope: hasRecord && carriesOn ? "resume" : null, loop, ends };
+}
+
 /**
  * Real, blocking: ask Jev whether `text` is a browser task to carry out or
  * just a greeting/thanks/aside with nothing to do, and — when the chat has a
  * task on record — whether `text` resumes that task, starts a different one,
  * or neither — and whether the work is about jobs at all. `earlier` is the
  * last few turns of the chat: without it, a follow-up like "continue" after
- * a cancelled task is ambiguous. A low-confidence answer, any error, a
- * timeout, a cancel, or no configured client all fall back to
- * { greeting: false, reply: false, scope: null, jobs: true, loop: false, ends: false } —
- * "treat this as a task, leave the task on record alone, keep job checks on,
- * and stop when the work looks done," the safe default.
+ * a cancelled task is ambiguous. Any error, a timeout, a cancel, or no
+ * configured client all fall back to "treat this as a task, keep job checks
+ * on," with scope, loop and ends read from the message's plain words
+ * (loopFromWords) — so "keep going, don't stop" still loops while Jev is
+ * down or switched off, and anything less plain is an ordinary task.
  */
 export async function classifyIntent(
   text: string,
@@ -543,7 +575,13 @@ export async function classifyIntent(
   chatId: string,
   signal?: AbortSignal,
 ): Promise<Intent> {
-  const fallback: Intent = { greeting: false, reply: false, scope: null, jobs: true, loop: false, ends: false, mold: false };
+  const fallback: Intent = {
+    greeting: false,
+    reply: false,
+    jobs: true,
+    mold: false,
+    ...loopFromWords(text, Boolean(onRecord)),
+  };
   const client = current();
 
   if (!client) return fallback;

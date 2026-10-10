@@ -405,6 +405,19 @@ function endsLoop(intent: Intent, recorded: TaskState | null): boolean {
   return Boolean(recorded?.loop) && intent.ends && !intent.reply && intent.scope !== "new_task";
 }
 
+// How many of the user's earlier messages a loop started without Jev carries, and how much of each.
+const EARLIER_ASKS = 5;
+const EARLIER_ASK_CAP = 500;
+
+/** A loop's instructions when nothing was on record: `text`, and what the user asked before it. */
+function withEarlierAsks(text: string, earlier: string[]): string {
+  const asks = earlier
+    .slice(-EARLIER_ASKS)
+    .map((a) => (a.length > EARLIER_ASK_CAP ? `${a.slice(0, EARLIER_ASK_CAP)}…` : a));
+  if (!asks.length) return text;
+  return `${text}\n\n(What the user asked before this in the chat, oldest first:\n${asks.map((a) => `- ${a}`).join("\n")})`;
+}
+
 // The reply when a words-only request came back with no words: a model that
 // ignores tool_choice (Ollama) and only called tools, which are never run.
 const NO_REPLY =
@@ -1198,7 +1211,7 @@ export class Agent {
 
     // Taken before this task is pushed, so it is only the turns before it.
     const earlier = earlierTurns(this.session.messages);
-    const recorded = jevOn() ? await loadTask(this.userId, this.session.id) : null;
+    const recorded = await loadTask(this.userId, this.session.id);
 
     // A task is a turn, not a new conversation.
     const asked = this.session.messages.length;
@@ -1814,7 +1827,16 @@ export class Agent {
     recorded: TaskState | null,
     rules: string | null,
   ): Promise<TaskState | null> {
-    if (!jevOn()) return null;
+    // Without Jev nothing can tell when an ordinary task is finished, so only
+    // a loop is tracked: it needs no judge, since only the user ends one.
+    // A message saying when to finish turns the loop on record back.
+    if (!jevOn() && !intent.loop && !(intent.scope === "resume" && recorded?.loop && !intent.ends)) {
+      if (endsLoop(intent, recorded)) {
+        const { loop: _was, ...rest } = recorded!;
+        await saveTask(this.userId, this.session.id, rest);
+      }
+      return null;
+    }
     // Small talk or a question answered in words leaves the task on record
     // alone. Rules for the supervisor mean the user wants this watched,
     // whatever the message looks like.
@@ -1839,7 +1861,11 @@ export class Agent {
         ...(loop ? { loop: true } : {}),
       };
     } else if (!recorded || intent.scope === "new_task" || rules) {
-      task = { ...newTask(text), ...(rules ? { rules } : {}), ...(intent.loop && !intent.ends ? { loop: true } : {}) };
+      // Without Jev a loop is often asked for after the work it repeats
+      // ("keep going, don't stop"), and that work was never put on record:
+      // the user's earlier messages go with it into every fresh round's brief.
+      const instructions = jevOn() ? text : withEarlierAsks(text, this.session.tasks.slice(0, -1));
+      task = { ...newTask(instructions), ...(rules ? { rules } : {}), ...(intent.loop && !intent.ends ? { loop: true } : {}) };
     } else {
       // "other" (a question about how it went, say), or Jev could not tell:
       // either way the progress on record must survive for a later "continue"
