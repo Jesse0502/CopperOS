@@ -66,7 +66,10 @@ export type MemoryView = { key: string; topic: string; title: string; content: s
 
 // Where the facts people type on the Memories page go.
 const ADDED_TOPIC = "user/notes";
-const ADDED_MAX = 1000;
+// Room for a short bio or a block of standard answers. Not unlimited: every
+// grounding check and memory search sends Jev all of a person's memories.
+// The panel's textarea has the same maxlength.
+const ADDED_MAX = 4000;
 const TITLE_MAX = 60;
 
 /** Every saved memory, newest first. */
@@ -83,10 +86,18 @@ export async function memoriesForPage(userId: string): Promise<MemoryView[]> {
  * is taken, so a new fact never overwrites an old one.
  */
 export async function addUserMemory(userId: string, text: string): Promise<MemoryMeta> {
-  const content = text.trim().replace(/\s+/g, " ");
+  // Line breaks are kept, so a pasted list or a few paragraphs stay readable;
+  // runs of spaces and blank lines are tidied.
+  const content = text
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) => line.replace(/[^\S\n]+/g, " ").trim())
+    .join("\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
   if (!content) throw new Error("Type something to remember first.");
-  if (content.length > ADDED_MAX) throw new Error(`Keep it under ${ADDED_MAX} characters.`);
-  const opening = content.split(/(?<=[.!?])\s/)[0];
+  if (content.length > ADDED_MAX) throw new Error(`Keep it under ${ADDED_MAX.toLocaleString("en-US")} characters.`);
+  const opening = content.split("\n")[0].split(/(?<=[.!?])\s/)[0];
   const base =
     opening.length <= TITLE_MAX
       ? opening.replace(/[.!?]$/, "")

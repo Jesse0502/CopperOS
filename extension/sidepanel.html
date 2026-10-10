@@ -1590,6 +1590,8 @@
       #memory-text {
         width: 100%;
         min-height: 60px;
+        /* It grows with what is typed (sidepanel.js), then scrolls. */
+        max-height: 240px;
         padding: 8px 10px;
         border-radius: 8px;
         border: 1px solid var(--border);
@@ -1651,6 +1653,7 @@
         font-size: 12.5px;
         color: var(--text-muted);
         overflow-wrap: anywhere;
+        white-space: pre-line;
         cursor: pointer;
       }
       .mitem .c.open {
@@ -2113,6 +2116,13 @@
       }
       .plan-opt .btn {
         align-self: flex-start;
+      }
+      /* Darker than the blurb above it, so the renewal terms stand out. */
+      .plan-opt-renews {
+        font-size: 12px;
+        line-height: 1.4;
+        font-weight: 500;
+        color: var(--text);
       }
       .plan-opt-here {
         font-size: 11.5px;
@@ -3486,7 +3496,7 @@
             target="_blank"
             rel="noopener"
             >Privacy Policy</a
-          >.
+          >, and confirm you're 13 or older.
         </p>
       </div>
     </div>
@@ -3583,7 +3593,7 @@
           <label for="memory-text">Add a memory</label>
           <textarea
             id="memory-text"
-            maxlength="1000"
+            maxlength="4000"
             placeholder="e.g. I prefer remote roles. My notice period is 4 weeks."
           ></textarea>
           <div class="memory-add">

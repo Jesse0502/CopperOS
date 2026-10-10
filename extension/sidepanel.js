@@ -1451,7 +1451,14 @@ function renderPlans() {
       btn.textContent = b.plan === "ore" ? "Choose" : "Switch to " + p.name;
       btn.disabled = buying !== null;
       btn.addEventListener("click", () => buy({ type: "billing_checkout", plan: p.id }, p.id));
-      card.appendChild(btn);
+      // The renewal terms sit beside the button that starts the subscription, as
+      // California's auto-renewal law asks.
+      const renews = document.createElement("div");
+      renews.className = "plan-opt-renews";
+      renews.textContent =
+        `${money(p.amount, p.currency)} every month until you cancel. ` +
+        "Cancel any time on this page, from Manage billing & invoices.";
+      card.append(btn, renews);
     }
     list.appendChild(card);
   }
@@ -1956,6 +1963,7 @@ function memoriesResult(msg) {
   lastMemories = msg.memories ?? [];
   if (msg.done === "add_memory") {
     $("memory-text").value = "";
+    resizeMemoryText();
     setMemoryStatus("Saved.");
   } else if (msg.done === "delete_memory") {
     setMemoryStatus("Deleted.");
@@ -1966,9 +1974,22 @@ function memoriesResult(msg) {
 
 $("memories").addEventListener("click", openMemories);
 $("memories-close").addEventListener("click", closeMemories);
+/** Grows the box with what is typed, up to its CSS max-height; then it scrolls. */
+function resizeMemoryText() {
+  const box = $("memory-text");
+  box.style.height = "auto";
+  // scrollHeight leaves out the border, which border-box counts in the height.
+  box.style.height = box.scrollHeight + box.offsetHeight - box.clientHeight + "px";
+}
+
 $("memory-text").addEventListener("input", () => {
-  $("memory-save").disabled = !$("memory-text").value.trim();
-  if ($("memory-status").textContent) setMemoryStatus("");
+  const box = $("memory-text");
+  $("memory-save").disabled = !box.value.trim();
+  resizeMemoryText();
+  // maxlength cuts a long paste off without a word, so say where the limit is.
+  if (box.value.length >= box.maxLength) {
+    setMemoryStatus(`That's the most one memory can hold (${box.maxLength.toLocaleString()} characters).`, "err");
+  } else if ($("memory-status").textContent) setMemoryStatus("");
 });
 $("memory-save").addEventListener("click", () => {
   const text = $("memory-text").value.trim();
