@@ -175,7 +175,7 @@ shortcuts are refused, because they would use your clipboard. `type` and
 | `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Any [OpenRouter model id](https://openrouter.ai/models) that supports tools. |
 | `APPROVAL_MODE` | `submits` | `all` gates every click, `submits` gates form submissions and clicks the model flags `destructive`, `none` gates nothing. |
 | `PORT` | `7331` | Broker WebSocket port. Must match `BROKER_URL` in `extension/background.js`. |
-| `JEV_AI_API_KEY` | — | Enables Jev: task rounds, check-ins, memory ranking and the other judgments. Nothing else depends on it. |
+| `JEV_AI_API_KEY` | — | Enables Jev: task rounds, check-ins, memory ranking and the other judgments. Nothing else depends on it; [loops](#loops) run without it. |
 | `TASK_MAX_ROUNDS` | `15` | Most fresh-context rounds one message can start while Jev says there is more to do. |
 | `SUPERVISOR` | off | `on` starts new chats with the supervisor on. Each chat's own setting is the **Supervisor** button in the panel. |
 | `CHECK_IN_EVERY` | `10` | Steps between check-ins on a tracked task. `0` turns them off in every chat, whatever the Supervisor button says. |
@@ -191,6 +191,27 @@ was, so a follow-up question never starts browsing or replaces the task. A
 message that may carry the task on, including a complaint about how it's
 going ("I asked you to colour the rows"), counts as work. If an answer really
 needs a page, the agent says so, and "go ahead" sends it to look.
+
+### Loops
+
+"Keep applying until I tell you to stop", "do this nonstop" or just "loop"
+makes a task a **loop**: it repeats until you press Stop. Rounds end and fresh
+ones start from a brief, as with any long task, but nothing judges whether it
+is finished. Whatever needs you (an approval, a question, a detail it doesn't
+know) is skipped and recorded instead of waited on, so a loop never sits idle.
+"Continue" picks a stopped loop back up. A message that says when to finish
+("50 more, then stop", "for the next 30 minutes") turns it back into a task
+that ends. A loop also stops itself after 5 rounds in a row that record
+nothing (`LOOP_STALLED_ROUNDS`), because by then it is stuck.
+
+With Jev, `classifyIntent` decides whether a message asks for a loop, sets an
+end, or carries on the task on record. Without Jev, or when Jev doesn't
+answer, the message's plain words decide (`loopFromWords` in `jev.ts`):
+"loop", "don't stop", "nonstop" and "until I tell you to stop" start one;
+"stop the loop", "don't continue" and questions like "what does the loop do?"
+never do. Loops are the one kind of task tracked without Jev, since only you
+end one. A loop started that way carries your last few messages into every
+round's brief, so the work it repeats is not lost.
 
 ### Check-ins
 
@@ -312,6 +333,11 @@ storage/
 
 It is written after every step, so an interrupted run still leaves a resumable
 chat. **New chat** in the popup abandons the transcript and starts a fresh one.
+
+Facts you add yourself on the **Saved memories** page go under
+`memories/user/notes/`, up to 4,000 characters each, with line breaks kept.
+The limit is there because every grounding check and memory search sends Jev
+all of your memories.
 
 Three things keep a sticky chat from breaking:
 
@@ -605,7 +631,11 @@ aws ssm put-parameter --name /copperos/prod/limits --type String --overwrite \
 **Taking payments** (`broker/src/cloud/stripe*.ts`). Stripe is the source of
 truth for what is for sale, and does the parts that have to be Stripe's: the
 card form (Checkout), receipts and invoices, and changing or cancelling a
-subscription (the customer portal). CopperOS never sees a card.
+subscription (the customer portal). CopperOS never sees a card. In the panel,
+each plan's button has its renewal terms right under it (the price, every
+month until you cancel, and where to cancel), as California's auto-renewal law
+asks, and the sign-up popup has people confirm they are 13 or older, as the
+Terms require.
 
 | | Price | What it is |
 |---|---|---|
@@ -771,7 +801,7 @@ They are made two ways:
   now**. The chat stays in mold-making (`session.molding`) across messages and
   across answered questions until a proposal is made.
 - **A task that repeats.** The first task in a chat that repeats until you stop
-  it (Jev's `loop` verdict) opens a popup asking whether to keep it; **Save as
+  it (a [loop](#loops)) opens a popup asking whether to keep it; **Save as
   mold** has the model write it up from what you asked (`Agent.draftWorkflow`)
   and saves it at once, with a toast and an **Edit** link (`offer_workflow`,
   once per chat, remembered with the chat).

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CopperOS",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "CopperOS is an Open-Source Agentic Browser Extension that lets AI perform tasks on your browser.",
   "homepage_url": "https://copper.jassydev.com",
   "permissions": [
