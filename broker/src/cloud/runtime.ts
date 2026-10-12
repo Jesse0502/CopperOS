@@ -16,17 +16,18 @@
 //
 //     $0.024   the agent Lambda (512 MB, arm64) waiting on the model and the browser
 //     $0.010   the socket, DynamoDB, S3 and logs
-//     $0.050   Jev's checks on every step (about 3% of a model call's cost, at
-//              720 steps an hour; this is the part that grows with the number of steps)
 //     ------
-//     $0.085   an hour
+//     $0.034   an hour
 //
-// Foundry is $5 a month, $4.55 after Stripe's fee. Eight hours a week is 35 hours
-// a month, $3 at the very most, if somebody uses every minute: that is 65% of
-// what it brings in, and few will. Tasks on Foundry can be as long as they
-// like (the limit is the week, not the task), and a week with more to do
-// than that is told when it starts again. Raise the number and the price
-// together: the arithmetic above is all there is to it.
+// Jev is not in it: a Foundry account's checks run on its own Jev key, or not
+// at all (jev.ts's withJev), never on CopperOS's.
+//
+// Foundry is $5 a month, $4.55 after Stripe's fee. Fourteen hours a week (two
+// a day, pooled) is about 61 hours a month, $2.10 at the very most, if somebody
+// uses every minute: under half of what it brings in, and few will. Tasks on
+// Foundry can be as long as they like (the limit is the week, not the task),
+// and a week with more to do than that is told when it starts again. Raise
+// the number and the price together: the arithmetic above is all there is to it.
 //
 // To run longer than a Lambda's 15 minutes a task is handed from one Lambda to
 // the next (agent-run.ts). That is all a longer limit needs; a task that would
@@ -46,7 +47,7 @@ export const DEFAULT_RUNTIME: Runtime = {
   ore: { taskMinutes: 15, weeklyHours: null },
   ingot: { taskMinutes: 5 * 60, weeklyHours: null },
   facet: { taskMinutes: 24 * 60, weeklyHours: null },
-  foundry: { taskMinutes: null, weeklyHours: 8 },
+  foundry: { taskMinutes: null, weeklyHours: 14 },
 };
 
 const HOUR_MS = 60 * 60_000;

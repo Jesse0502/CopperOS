@@ -538,7 +538,7 @@ hosting, storage and convenience and not for the model.
 | Model | `deepseek/deepseek-v4.1-flash`, fixed (`PLATFORM_MODEL`) | any model on OpenRouter or OpenAI that can use tools, picked from the list in Settings |
 | Paid by | the allowance, then credits | them, to their provider |
 | Limit | dollars of model use: a week on Ore, the billing month on Ingot and Facet | none from CopperOS |
-| Task length | by plan: 15 minutes on Ore, 5 hours on Ingot, 24 hours on Facet | no limit on a task; 8 hours a week of working time (Foundry) |
+| Task length | by plan: 15 minutes on Ore, 5 hours on Ingot, 24 hours on Facet | no limit on a task; 14 hours a week of working time (Foundry) |
 | Jev (supervisor, safety checks) | CopperOS's | their own Jev key, optional; never CopperOS's |
 
 Own key is gated on the plan, on the server: `usesPlatformKey` in `config.ts`
@@ -713,11 +713,11 @@ grant <user> -1000` for a $10 pack), and currencies other than USD.
 numbers: how long one task may run, in minutes of working time (waiting on the
 person never counts), and how much working time all of an account's tasks share
 in a week. Ore is 15 minutes a task, Ingot 5 hours, Facet 24 hours, Foundry has
-no limit on a task and 8 hours a week. Plans on CopperOS's model have no weekly
+no limit on a task and 14 hours a week. Plans on CopperOS's model have no weekly
 hours: they pay for every step in dollars, so the allowance and credits are
 their real ceiling. Foundry runs on its own key, so time is all that bounds what
-it costs CopperOS; the arithmetic is at the top of `runtime.ts` (about $0.085 an
-hour all in, so 8 hours a week is at most $3 of a $5 plan). Both numbers can be
+it costs CopperOS; the arithmetic is at the top of `runtime.ts` (about $0.034 an
+hour, so 14 hours a week is at most $2.10 of a $5 plan). Both numbers can be
 changed live, with `null` for no limit:
 
 ```bash
