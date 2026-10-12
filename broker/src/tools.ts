@@ -382,9 +382,11 @@ async function checkEntry(field: string, value: string, where: string, ctx: Tool
     `Not entered: nothing in the user's messages or saved memories backs ` +
     `entering ${JSON.stringify(value)} here. Do not guess, and never use ` +
     `details from the page or the job ad (such as the employer's address) ` +
-    `as the user's own. If the field is optional, leave it blank. If it is ` +
-    `required, stop and ask the user for it — and once they answer, save it ` +
-    `with remember so it is on file next time.`
+    `as the user's own. If it is a reply or post you wrote for them, cut ` +
+    `whatever it says about them or what they make that their messages and ` +
+    `memories do not, and try once more. If the field is optional, leave it ` +
+    `blank. If it is required, stop and ask the user for it — and once they ` +
+    `answer, save it with remember so it is on file next time.`
   );
 }
 
@@ -1653,13 +1655,27 @@ const proposeMold: BrowserTool = {
             "without asking again. Put <angle brackets> around what changes from run to run, e.g. " +
             '"2. Search for <job title>", and end with when to stop.',
         ),
+        writing: str(
+          "Only for a mold that writes anything in the user's name (replies, comments, posts, " +
+            "messages, emails); leave it out otherwise. Its Writing section, as lines: whose voice " +
+            "it writes in; that they approve in advance what it writes, or where they want to see " +
+            "it first; the facts it may state about them and what they make, with links; never " +
+            "to invent numbers, users, results or experiences. It is added under the steps.",
+        ),
       },
       required: ["name", "steps"],
     },
   },
-  async run({ name, steps }, ctx) {
-    const n = String(name ?? "").replace(/\s+/g, " ").trim().slice(0, MOLD_NAME_CAP);
-    const s = String(steps ?? "").replace(/\r\n/g, "\n").trim().slice(0, MOLD_STEPS_CAP);
+  async run({ name, steps, writing }, ctx) {
+    // Models sometimes write "&" as "&amp;"; the card shows text as it is.
+    const plain = (v: unknown) =>
+      String(v ?? "").replace(/&(lt|gt|quot|#39|amp);/g, (_, e: string) => ({ lt: "<", gt: ">", quot: '"', "#39": "'", amp: "&" })[e]!);
+    const n = plain(name).replace(/\s+/g, " ").trim().slice(0, MOLD_NAME_CAP);
+    const w = plain(writing).replace(/\r\n/g, "\n").trim();
+    const body = plain(steps).replace(/\r\n/g, "\n").trim();
+    // Added under the steps, unless the model already put it there itself.
+    const add = w && !/^\s*Writing:?\s*$/im.test(body) ? `\n\nWriting:\n${w.replace(/^Writing:?\s*\n/i, "")}` : "";
+    const s = (body + add).slice(0, MOLD_STEPS_CAP);
     if (!n || !s) return "Pass both a name and the steps.";
     emit("mold_proposal", ctx.chatId, JSON.stringify({ name: n, steps: s }));
     return (

@@ -264,7 +264,7 @@ When you already know the refs and values for several actions — the fields of 
 - Set destructive=true on any click that purchases, sends, posts, deletes, or confirms something hard to undo. The user is asked to approve those.
 - If the user declines an action, do not retry it. Explain the situation and stop.
 - Never enter credentials, payment details, or other secrets. If a task requires signing in, stop and tell the user to sign in themselves, then continue.
-- Only enter details about the user that they gave you — in their messages, their ask_user answers, or their saved memories. Never guess one, and never take one from the page or the job ad (an employer's address is not the user's address). Every form entry is checked against those, and one that is not backed is refused.
+- Only enter details about the user that they gave you — in their messages, their ask_user answers, or their saved memories. Never guess one, and never take one from the page or the job ad (an employer's address is not the user's address). Every form entry, and every reply or post you write for them, is checked against those by Jev, CopperOS's built-in checker (never a person, and never the user), and one that is not backed is refused.
 - When you need information from the user, ask with ask_user — never by listing questions in your reply.
 - Choosing jobs to apply to: open each job's details and call check_job_fit before applying. Its verdict is final — apply on APPLY; on SKIP, move to the next listing without arguing with it. An application you start on a job you have not checked is checked for you, and stopped if it does not fit.
 - Set destructive=true on the click that submits an application, as on any other submit; the approval step lets through what the user asked for without bothering them.
@@ -336,16 +336,31 @@ const MOLD_NOTICE =
   "2. Read their idea closely. In ONE ask_user call, ask follow-up questions only about what " +
   "it leaves unclear or missing for the mold to run on its own (what changes from one run " +
   "to the next, when it is done, what to do in a case it does not cover), never about " +
-  "anything they already said. In the same call, add one multiple-choice question offering " +
+  "anything they already said. If it will write anything in their name (replies, comments, " +
+  "posts, messages, emails), it also needs what it may say about them and what they make, " +
+  "and whether it may send without showing them first, place by place. In the same call, " +
+  "add one multiple-choice question offering " +
   "2 to 4 additions that would make it hold up better, with an option for none. If their " +
   "idea is complete, that one question is all you ask.\n" +
   "3. If they mention something of theirs you have not been told (\"my resume\", \"my usual " +
   "list\"), search_memory once for that thing and for nothing else.\n" +
-  "4. Write the mold from their idea, their answers and the additions they picked: specific " +
-  "numbered steps, what to do when something goes wrong (a login, no results, a question it " +
-  "has no answer for, something it has already done), a clear point at which it stops, and " +
-  "rules that keep it to the task. Call propose_mold with a short name and the steps, with " +
-  "<angle brackets> around what changes from run to run. If they ask for changes, call " +
+  "4. Write the mold from their idea, their answers and the additions they picked: numbered " +
+  "steps, each one thing the agent can do in a browser (the URL to open, the words to search, " +
+  "what to read or check, what to type where, and what on the page shows it worked); where it " +
+  "keeps track of what it already did (its progress notes, or their own history on the site); " +
+  "what to do when something goes wrong (a login, no results, a question it has no answer " +
+  "for, something it has already done, the check refusing what it wrote: cut what is not in " +
+  "their words and try once more, then skip); a clear point at which it stops; and rules that " +
+  "keep it to the task. No two steps may contradict each other.\n" +
+  "5. If it writes anything in their name, write its Writing section for propose_mold's " +
+  "writing: whose voice it writes in; that they approve in advance what it writes for this " +
+  "mold, or where they want to see it first (there it drafts into its report instead of " +
+  "sending); the facts it may state about them and what they make, from their answers and " +
+  "memories, with links; and never to invent numbers, users, results or experiences. A " +
+  "check refuses text whose claims about them are not in their words, so this section is " +
+  "what lets its writing through.\n" +
+  "6. Call propose_mold with a short name, the steps (with <angle brackets> around what " +
+  "changes from run to run) and the writing, if any. If they ask for changes, call " +
   "propose_mold again with the new version.]";
 
 // Pushed, for a run with no tracked task to brief from, when a long task is
@@ -378,6 +393,16 @@ const REPLY_NOTE =
 const LOOP_NOTICE =
   "[This task repeats until the user stops it. Keep going on your own: never " +
   "ask whether to continue, and never stop because a batch is done; find " +
+  "more (the next page, a new search) instead. If an item needs an answer " +
+  "from the user (a question, something you do not know), skip it and move " +
+  "on to the next: it is recorded for them. An action that needs their " +
+  "approval is still put to them, and the task carries on once they answer. " +
+  "Record each finished or skipped item with update_progress.]";
+// The notice before approvals were put to the user in loops (2026-10-12):
+// chats from before then still hold it.
+const LOOP_NOTICE_SKIPPING_APPROVALS =
+  "[This task repeats until the user stops it. Keep going on your own: never " +
+  "ask whether to continue, and never stop because a batch is done; find " +
   "more (the next page, a new search) instead. If an item needs the user (a " +
   "question, an approval, something you do not know), skip it and move on to " +
   "the next: it is recorded for them. Record each finished or skipped item " +
@@ -393,7 +418,7 @@ const LOOP_END_NOTICE =
 
 /** The loop notes: the agent's own, never the user's words. */
 function isLoopNote(text: string): boolean {
-  return text === LOOP_NOTICE || text === LOOP_END_NOTICE;
+  return text === LOOP_NOTICE || text === LOOP_NOTICE_SKIPPING_APPROVALS || text === LOOP_END_NOTICE;
 }
 
 /**
@@ -1257,7 +1282,7 @@ export class Agent {
       this.rules = tracked?.rules ?? options.rules ?? null;
       if (tracked?.loop) {
         this.session.messages.push({ role: "user", content: LOOP_NOTICE });
-        emit("loop", this.session.id, "repeats until you stop it; anything that needs you is skipped and listed");
+        emit("loop", this.session.id, "repeats until you stop it; questions for you are skipped and listed, approvals still ask you");
         // A job that repeats is the kind worth keeping: the first one in a chat
         // asks whether to save it as a workflow (the panel decides, and the
         // model writes it up from what was asked). Once a chat, not every time.
@@ -1772,7 +1797,7 @@ export class Agent {
     return null;
   }
 
-  /** In a loop: records what needed the user as skipped, and tells the model to move on. */
+  /** In a loop: records a question for the user as skipped, and tells the model to move on. */
   private async skipForLoop(request: UserRequest): Promise<string> {
     const what = (
       request.kind === "approval"
@@ -2323,10 +2348,10 @@ export class Agent {
         this.logAction(loop, describeAction(c.function.name, input, label, out));
       } catch (err) {
         // Not a failure: the call is waiting on the person, and so is the
-        // turn. Not in a loop, though, which runs until the user stops it:
-        // what needed them is skipped and recorded, and the loop goes on.
+        // turn. A loop, which runs until the user stops it, waits only on an
+        // approval: a question is skipped and recorded, and the loop goes on.
         if (err instanceof PauseForUser) {
-          if (!loop.tracked?.loop) return { callId: c.id, request: err.request };
+          if (!loop.tracked?.loop || err.request.kind === "approval") return { callId: c.id, request: err.request };
           const content = await this.skipForLoop(err.request);
           this.session.messages.push({ role: "tool", tool_call_id: c.id, content });
           this.logAction(loop, describeAction(c.function.name, input, label, content));

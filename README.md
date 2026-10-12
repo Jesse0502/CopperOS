@@ -197,8 +197,9 @@ needs a page, the agent says so, and "go ahead" sends it to look.
 "Keep applying until I tell you to stop", "do this nonstop" or just "loop"
 makes a task a **loop**: it repeats until you press Stop. Rounds end and fresh
 ones start from a brief, as with any long task, but nothing judges whether it
-is finished. Whatever needs you (an approval, a question, a detail it doesn't
-know) is skipped and recorded instead of waited on, so a loop never sits idle.
+is finished. A question for you (or a detail it doesn't know) is skipped and
+recorded instead of waited on, so a loop never sits idle on one. An action that
+needs your approval is still put to you, and the loop carries on once you answer.
 "Continue" picks a stopped loop back up. A message that says when to finish
 ("50 more, then stop", "for the next 30 minutes") turns it back into a task
 that ends. A loop also stops itself after 5 rounds in a row that record

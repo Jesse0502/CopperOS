@@ -15,7 +15,7 @@
 // task; superviseTask, at agent.ts's check-ins, decides whether the model
 // is still doing what it was asked or needs setting straight;
 // checkGrounded stops tools.ts entering anything about the user that
-// the user never said; and judgeJobFit decides whether a job is worth
+// the user never said, in a form or in a reply it writes for them; and judgeJobFit decides whether a job is worth
 // applying to at all.
 //
 // Every one of them returns null on any error, timeout, cancel, or
@@ -871,6 +871,11 @@ export type Grounding = {
 // differently from the user's (a visa description, a work-rights option)
 // scored 0.11–0.24; made-up or unconfirmed ones (an employer's address
 // entered as the user's, a state the user never gave) scored 0.38 and up.
+// Replies the user's task tells the agent to write (promo comments on
+// Reddit and X, 2026-10-11) scored 0.36–0.44 until `supported` named them:
+// they now score 0.05–0.26, while the same replies with an invented usage
+// story or user count, a draft the user rejected, and job answers claiming
+// experience or residency they lack all stay at 0.96–1.00.
 const UNSUPPORTED_BLOCK_AT = 0.3;
 
 /**
@@ -899,11 +904,11 @@ export async function checkGrounded(
             `A browser agent is about to enter \`value\` into the form field shown in \`field\` (the page lines leading up to it) on the user's behalf. ${CONVERSATION_NOTE} Is what this entry says backed by the user's own messages, the conversation, or saved memories?`,
             {
               supported:
-                "Backed: the user's messages or memories say it, or it follows necessarily from what they say. Rewording, reformatting, and picking the option that means the same thing as what the user said all count. So does text the assistant wrote in `conversation` — a draft, a post, a message, a summary — that the user then accepted: said they liked it, answered yes to using it, or told the assistant to use, save, send or post it.",
+                "Backed: the user's messages or memories say it, or it follows necessarily from what they say. Rewording, reformatting, and picking the option that means the same thing as what the user said all count. So does text the assistant wrote in `conversation` — a draft, a post, a message, a summary — that the user then accepted: said they liked it, answered yes to using it, or told the assistant to use, save, send or post it. So does a reply, comment, post or message the user's instructions tell the agent to write itself: what it says about the user, and about what they make or sell, comes from their messages or memories, and the rest only answers the page it is replying to.",
               not_about_user:
                 "It says nothing about the user: a search term, a filter, or other navigation input.",
               unsupported:
-                "Not backed: it says something about the user — an address, contact detail, date, age, qualification, experience, or screening answer — that the user's messages and memories do not say. A plausible guess does not count, neither does a detail taken from the page or the job ad, and neither does something the assistant wrote that the user never accepted.",
+                "Not backed: it says something about the user, or about what they make or sell — an address, contact detail, date, age, qualification, experience, screening answer, number, result or feature — that the user's messages and memories do not say. A plausible guess does not count, neither does a detail taken from the page or the job ad, and neither does something the assistant wrote that the user never accepted or asked it to write.",
             },
           ),
         },

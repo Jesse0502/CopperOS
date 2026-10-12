@@ -30,8 +30,8 @@ export type TaskState = {
   rules?: string;
   /**
    * The work repeats until the user stops it ("keep applying until I say
-   * stop"): rounds never end it on their own, and whatever needs the user is
-   * skipped and recorded rather than waited on (agent.ts).
+   * stop"): rounds never end it on their own, and a question for the user is
+   * skipped and recorded rather than waited on; an approval is still asked (agent.ts).
    */
   loop?: boolean;
   status: "active" | "done" | "needs_user";
@@ -151,8 +151,9 @@ export function brief(task: TaskState): string {
       ? `This task repeats until the user stops it. Keep going on your own: ` +
         `never ask whether to continue, and never stop because a batch is ` +
         `done; find more (the next page, a new search) instead. If an item ` +
-        `needs the user (a question, an approval, something you do not know), ` +
-        `skip it and move on to the next. `
+        `needs an answer from the user (a question, something you do not ` +
+        `know), skip it and move on to the next. An action that needs their ` +
+        `approval is still put to them. `
       : "") +
     `Pick up where the last round stopped. Do not redo anything listed as ` +
     `done or skipped. If the last report says how the work was being done ` +
