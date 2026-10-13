@@ -3,7 +3,7 @@
 // Deliberately NOT enabling the Runtime domain: the well-known CDP-detection
 // trick logs an object with a getter on `.stack` to console.debug, and that
 // getter only fires when Runtime is attached. Page/DOM/Accessibility/
-// Network/Input are all we need, and they leave that check silent.
+// Network/Input/Emulation are all we need, and they leave that check silent.
 
 import * as activity from "./activity.js";
 import { isRestrictedUrl } from "./restricted.js";
@@ -31,6 +31,16 @@ const COMMAND_TIMEOUT_MS = 15_000;
 // A tab opened a moment ago by a click has no URL until its first navigation
 // commits, only a pendingUrl.
 const URL_WAIT_MS = 10_000;
+
+// Chrome stops rendering a tab you have switched away from, and a wheel event
+// waits for a frame that never comes: scrolling a background tab hung until
+// COMMAND_TIMEOUT_MS, and a page scrolled any other way never hears about it,
+// so Discord's history or a long music library never loaded more. Emulating
+// focus has Chrome treat the tab as visible and focused, so it renders and
+// scrolls like the tab in front. Every op renews it; a tab left alone this
+// long goes back to sleep rather than rendering in the background for good.
+const AWAKE_MS = 120_000;
+const awake = new Map(); // tabId -> timer that lets it sleep again
 
 export function send(tabId, method, params = {}, { timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
   return new Promise((resolve, reject) => {
@@ -114,6 +124,7 @@ export async function attach(tabId) {
       // Chrome can freeze a tab we are already on, too, once it has sat in
       // the background long enough.
       if (tab?.frozen) await unfreeze(tabId);
+      await keepAwake(tabId);
       return attached.get(tabId);
     }
     // Discarding took the page, and whatever we had set up on it, away.
@@ -126,12 +137,36 @@ export async function attach(tabId) {
       .finally(() => attaching.delete(tabId));
     attaching.set(tabId, pending);
   }
-  return pending;
+  const state = await pending;
+  await keepAwake(tabId);
+  return state;
 }
 
 // The browser answers this one itself, so it gets through to a frozen page.
 function unfreeze(tabId) {
   return send(tabId, "Page.setWebLifecycleState", { state: "active" }).catch(() => {});
+}
+
+async function keepAwake(tabId) {
+  const wasAwake = awake.has(tabId);
+  clearTimeout(awake.get(tabId));
+  awake.set(tabId, setTimeout(() => letSleep(tabId), AWAKE_MS));
+  if (wasAwake) return;
+  try {
+    await send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: true });
+  } catch {
+    // The op still runs; only scrolling a background tab would fail. The
+    // next op tries again.
+    clearTimeout(awake.get(tabId));
+    awake.delete(tabId);
+  }
+}
+
+function letSleep(tabId) {
+  awake.delete(tabId);
+  if (attached.has(tabId)) {
+    send(tabId, "Emulation.setFocusEmulationEnabled", { enabled: false }).catch(() => {});
+  }
 }
 
 async function connect(tabId, tab) {
@@ -196,8 +231,7 @@ export function stateFor(tabId) {
 
 export async function detach(tabId) {
   if (!attached.has(tabId)) return;
-  attached.delete(tabId);
-  activity.forget(tabId);
+  forgetTab(tabId);
   chrome.tabs.update(tabId, { autoDiscardable: true }).catch(() => {});
   await new Promise((resolve) => chrome.debugger.detach({ tabId }, () => {
     void chrome.runtime.lastError;
@@ -209,9 +243,12 @@ export function isAttached(tabId) {
   return attached.has(tabId);
 }
 
+// Emulation ends with the debugger session; only the timer is left to clear.
 function forgetTab(tabId) {
   attached.delete(tabId);
   dialogs.delete(tabId);
+  clearTimeout(awake.get(tabId));
+  awake.delete(tabId);
   activity.forget(tabId);
 }
 
