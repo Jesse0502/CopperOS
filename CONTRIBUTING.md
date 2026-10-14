@@ -1,7 +1,7 @@
 # Contributing
 
-Thanks for taking a look at CopperOS. This is an early beta — expect rough edges,
-and see the [Known limits](README.md#known-limits) section before assuming
+Thanks for taking a look at CopperOS. It's young, so expect rough edges, and
+see the [Known limits](README.md#known-limits) section before assuming
 something is a bug.
 
 ## Setup

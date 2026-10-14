@@ -1,13 +1,18 @@
 <img width="1230" height="454" alt="CopperOS-Banner" src="https://github.com/user-attachments/assets/188a612f-5722-4d58-9184-9ea006a7e903" />
 
 
-**Beta.** Interfaces, config format, and stored-session layout may still
-change between versions. See [Known limits](#known-limits) before assuming
-something is a bug, and [Contributing](#contributing) if you'd like to help.
+**CopperOS is an open-source AI agent for Chrome.** You type a task in a side
+panel, and it reads, clicks and types in your own tabs, signed in as you. Every
+step shows in the panel, and it asks before it submits anything.
 
-Prompt-driven browser agent. You type a task, the model you choose (Ollama,
-OpenRouter or OpenAI) drives a real Chrome tab — in your own profile, with your
-existing logins.
+**[Add to Chrome](https://chromewebstore.google.com/detail/cpiaailfifjppgijgnjdepcpokkmeoje)**
+· [Website](https://copper.jassydev.com) · [Setup guide](https://copper.jassydev.com/setup/)
+· [Pricing](https://copper.jassydev.com/pricing/)
+
+Run it on CopperOS's hosted model (sign in with Google, free weekly trial, no
+key needed), or on your own computer with the model you choose: Ollama,
+OpenRouter or OpenAI. See [Known limits](#known-limits) before assuming
+something is a bug, and [Contributing](#contributing) if you'd like to help.
 
 Perception is accessibility-tree first (cheap, exact), with badged screenshots
 escalated automatically only when the tree goes blind. Input goes through CDP
