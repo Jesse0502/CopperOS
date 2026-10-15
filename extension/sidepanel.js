@@ -1,3 +1,5 @@
+import { fetchNews, pick } from "./announcements.js";
+
 // The panel's line to the service worker. Chrome can recycle the worker (or
 // update the extension) under an open panel, which disconnects a port for
 // good — and a dead port silently swallowed Stop. So every message goes
@@ -58,6 +60,124 @@ try {
 } catch {
   // No manifest to read (a page opened outside the extension): no version line.
 }
+// ── what is new ──────────────────────────────────────────────────────────
+// For a release or a major feature, a large dialog in the middle of the panel, shown once, from the
+// website's list (announcements.js). Nothing is shown if the list cannot be reached. Closing it
+// remembers it, so it never comes back.
+const newsStore = {
+  get: async (key) => (await chrome.storage.local.get(key))[key],
+  set: (items) => chrome.storage.local.set(items),
+};
+
+async function dismissNews(id) {
+  if (!id) return;
+  try {
+    const seen = (await newsStore.get("newsDismissed")) ?? [];
+    await newsStore.set({ newsDismissed: [...seen.filter((x) => x !== id), id].slice(-100) });
+  } catch {
+    // It shows again next time; nothing worse.
+  }
+}
+
+async function showNews() {
+  try {
+    const dismissed = (await newsStore.get("newsDismissed")) ?? [];
+    const baseline = await newsStore.get("newsBaseline");
+    const ctx = { version: chrome.runtime.getManifest().version, now: Date.now(), dismissed, ...(typeof baseline === "number" ? { baseline } : {}) };
+    const list = await fetchNews(newsStore);
+
+    const modal = pick(list, ctx);
+    if (modal) {
+      // Not over the opening animation: the panel is there first, then the news.
+      for (let i = 0; i < 20 && $("boot") && !$("boot").classList.contains("done"); i++) await new Promise((r) => setTimeout(r, 250));
+      await new Promise((r) => setTimeout(r, 500));
+      openWhatsNew(modal);
+    }
+  } catch {
+    // No storage or manifest (a page opened outside the extension), or no network: nothing shown.
+  }
+}
+
+let whatsNewFrom = null; // what had focus before the dialog opened
+
+function openWhatsNew(item) {
+  const m = $("whatsnew");
+  m.dataset.id = item.id;
+  const tag = $("wn-tag");
+  tag.textContent = item.tag;
+  tag.hidden = !item.tag;
+  $("wn-title").textContent = item.title;
+  const lead = $("wn-lead");
+  lead.textContent = item.lead;
+  lead.hidden = !item.lead;
+  const points = $("wn-points");
+  points.replaceChildren(
+    ...item.points.map((p) => {
+      const li = document.createElement("li");
+      li.textContent = p;
+      return li;
+    }),
+  );
+  points.hidden = !item.points.length;
+  const img = $("wn-img");
+  img.hidden = true;
+  if (item.image) {
+    // A picture that does not load leaves no empty frame.
+    img.onload = () => (img.hidden = false);
+    img.onerror = () => (img.hidden = true);
+    img.src = item.image;
+  }
+  const cta = $("wn-cta");
+  cta.hidden = !item.cta;
+  if (item.cta) {
+    cta.href = item.cta.url;
+    cta.textContent = item.cta.label;
+  }
+  // The button that does the thing is the main one; "Got it" is the main one when there is no thing.
+  $("wn-ok").classList.toggle("pr", !item.cta);
+  $("wn-ok").textContent = item.cta ? "Not now" : "Got it";
+  whatsNewFrom = document.activeElement;
+  m.hidden = false;
+  (item.cta ? cta : $("wn-ok")).focus();
+}
+
+function closeWhatsNew() {
+  const m = $("whatsnew");
+  if (m.hidden) return;
+  m.hidden = true;
+  void dismissNews(m.dataset.id);
+  if (whatsNewFrom && typeof whatsNewFrom.focus === "function") whatsNewFrom.focus();
+  whatsNewFrom = null;
+}
+
+$("wn-ok").addEventListener("click", closeWhatsNew);
+$("wn-x").addEventListener("click", closeWhatsNew);
+$("wn-cta").addEventListener("click", closeWhatsNew);
+document.addEventListener("keydown", (e) => {
+  const m = $("whatsnew");
+  if (m.hidden) return;
+  if (e.key === "Escape") {
+    e.preventDefault();
+    closeWhatsNew();
+    return;
+  }
+  // Tab stays inside the dialog while it is open.
+  if (e.key === "Tab") {
+    const items = [...m.querySelectorAll("button, a[href]")].filter((el) => !el.hidden && el.offsetParent !== null);
+    if (!items.length) return;
+    const first = items[0];
+    const last = items[items.length - 1];
+    if (e.shiftKey && document.activeElement === first) {
+      e.preventDefault();
+      last.focus();
+    } else if (!e.shiftKey && document.activeElement === last) {
+      e.preventDefault();
+      first.focus();
+    }
+  }
+});
+void showNews();
+
 const log = $("log");
 const task = $("task");
 
@@ -1113,8 +1233,10 @@ function renderAccount() {
   $("local-row").hidden = backend !== "local";
   $("account-who").textContent = account ? account.email ?? "Signed in" : "Not signed in";
   $("account-btn").textContent = account ? "Sign out" : "Sign in";
-  $("delete-account").hidden = !(backend === "cloud" && account);
+  // The whole section, title and all, only where there is an account to delete.
+  $("delete-sec").hidden = !(backend === "cloud" && account);
   setBusy($("delete-account"), false);
+  renderAi();
   // Nobody's Ollama is reachable from the cloud.
   $("cfg-provider").querySelector('option[value="ollama"]').hidden = backend === "cloud";
 }
@@ -1132,6 +1254,82 @@ function renderSettingsAvailability() {
   renderOwnKey();
   renderPlan();
 }
+
+// ── AI apps ──────────────────────────────────────────────────────────────
+// Claude and other AI apps connected to this account (the hosted service's MCP address): the
+// address to add, the apps that hold a sign-in, and the one switch that lets them lower
+// approvals and add memories and molds.
+let aiAccess = null; // last "ai_access" message: { url, loosening, apps }
+let aiError = "";
+
+function requestAiAccess() {
+  if (backend === "cloud" && account && connected) port.postMessage({ type: "get_ai_access" });
+}
+
+function renderAi() {
+  const on = backend === "cloud" && Boolean(account);
+  $("ai-card").hidden = !on;
+  if (!on) {
+    aiAccess = null;
+    return;
+  }
+  const a = aiAccess;
+  $("ai-url").textContent = a?.url ?? (aiError ? "Not available right now" : "Loading…");
+  $("ai-copy").disabled = !a?.url;
+  const list = $("ai-list");
+  list.replaceChildren();
+  for (const app of a?.apps ?? []) {
+    const row = document.createElement("div");
+    row.className = "ai-row";
+    const name = document.createElement("span");
+    name.className = "nm";
+    name.textContent = app.name;
+    const when = document.createElement("span");
+    when.className = "when";
+    when.textContent = `active ${timeAgo(new Date(app.lastActive).toISOString())}`;
+    const out = document.createElement("button");
+    out.type = "button";
+    out.className = "link";
+    out.dataset.id = app.id;
+    out.textContent = "Disconnect";
+    row.append(name, when, out);
+    list.append(row);
+  }
+  if (a && !a.apps.length) {
+    const none = document.createElement("div");
+    none.className = "help";
+    none.textContent = "No AI app is connected.";
+    list.append(none);
+  }
+  $("ai-loosen").checked = a?.loosening === true;
+  $("ai-loosen").disabled = !a;
+  const status = $("ai-status");
+  status.textContent = aiError;
+  status.classList.toggle("err", Boolean(aiError));
+}
+
+$("ai-copy").addEventListener("click", async () => {
+  if (!aiAccess?.url) return;
+  try {
+    await navigator.clipboard.writeText(aiAccess.url);
+    $("ai-copy").textContent = "Copied";
+    setTimeout(() => ($("ai-copy").textContent = "Copy"), 1500);
+  } catch {
+    // The address is selectable on screen.
+  }
+});
+$("ai-loosen").addEventListener("change", () => {
+  $("ai-loosen").disabled = true;
+  aiError = "";
+  port.postMessage({ type: "set_ai_access", loosening: $("ai-loosen").checked });
+});
+$("ai-list").addEventListener("click", (e) => {
+  const b = e.target.closest("button[data-id]");
+  if (!b) return;
+  setBusy(b, true);
+  aiError = "";
+  port.postMessage({ type: "revoke_ai_app", clientId: b.dataset.id });
+});
 
 // Named for copper on its way from the ground to the mark on the logo.
 const PLAN_NAMES = { ore: "Ore", ingot: "Ingot", facet: "Facet", foundry: "Foundry" };
@@ -1256,8 +1454,8 @@ function renderPlan() {
     set(
       "Foundry",
       credits > 0
-        ? `Using CopperOS's model on your credits: ${creditText(credits)} left. Add your own API key below to use your own model.`
-        : "Foundry runs on your own API key. Add yours below, or buy credits to use CopperOS's model.",
+        ? `Using CopperOS's model on your credits: ${creditText(credits)} left. Add your own API key under Providers to use your own model.`
+        : "Foundry runs on your own API key. Add yours under Providers, or buy credits to use CopperOS's model.",
       { plans: true, runtime },
     );
     return;
@@ -1604,6 +1802,7 @@ function openSettings() {
   renderSettingsAvailability();
   if (connected) port.postMessage({ type: "get_config" });
   requestUsage();
+  requestAiAccess();
   // Also catches up with a payment whose webhook was missed: the service checks Stripe when billing is asked for.
   requestBilling();
 }
@@ -2671,6 +2870,15 @@ port.onMessage.addListener((msg) => {
         requestUsage();
         setTimeout(() => { if ($("settings-status").textContent === "Saved") setSettingsStatus(""); }, 1500);
       }
+      break;
+
+    case "ai_access":
+      if (msg.error) aiError = msg.error;
+      else {
+        aiError = "";
+        aiAccess = { url: msg.url, loosening: msg.loosening === true, apps: Array.isArray(msg.apps) ? msg.apps : [] };
+      }
+      renderAi();
       break;
 
     case "usage":

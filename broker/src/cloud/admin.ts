@@ -7,6 +7,17 @@
 //   AWS_PROFILE=jassydev npm run admin -- grant  <email|id> <credits>      credits, as people see them (100 a dollar); negative takes some back
 //   AWS_PROFILE=jassydev npm run admin -- plan   <email|id> <ore|ingot|facet|foundry> [days]
 //   AWS_PROFILE=jassydev npm run admin -- report [week]                    everyone's spend, biggest first, and the free pool
+//   AWS_PROFILE=jassydev npm run admin -- ai      <email|id>                AI apps (Claude and others) connected to the account over MCP
+//   AWS_PROFILE=jassydev npm run admin -- ai-revoke <email|id>              cuts all of them off; they have to be signed in again
+//   AWS_PROFILE=jassydev npm run admin -- welcome <email>                  sends the welcome email to that address now (to see it, or to send it again)
+//   npm run admin -- welcome-html > welcome.html                           the welcome email as a page to open in a browser; sends nothing
+//   npm run admin -- whats-new-html <id> > whats-new.html                 the what's-new email for an announcement (draft or live); sends nothing
+//   AWS_PROFILE=jassydev npm run admin -- whats-new <id> --test <email>    sends it to that one address now
+//   AWS_PROFILE=jassydev npm run admin -- whats-new <id> --all             counts who it would go to, sends nothing
+//   AWS_PROFILE=jassydev npm run admin -- whats-new <id> --all --yes       sends it to everyone who has not unsubscribed or had it
+//       <id> is an entry in website/announcements.json; --all needs it published (announce.py publish), and
+//       UNSUBSCRIBE_URL=$(aws cloudformation describe-stacks --stack-name CopperOS-<stage> \
+//         --query "Stacks[0].Outputs[?OutputKey=='UnsubscribeUrl'].OutputValue" --output text)
 //   AWS_PROFILE=jassydev npm run admin -- encrypt <email|id|all>          encrypts what was saved before saving was encrypted
 //       needs TRANSCRIPTS_BUCKET=$(aws cloudformation describe-stacks --stack-name CopperOS-<stage> \
 //         --query "Stacks[0].Outputs[?OutputKey=='TranscriptsBucket'].OutputValue" --output text)
@@ -21,6 +32,8 @@ import {
 } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DynamoDBDocumentClient, QueryCommand, ScanCommand } from "@aws-sdk/lib-dynamodb";
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { creditsOf, MICROS_PER_CREDIT, monthOf, toUsd, usageSummary, weekOf, type PlanId } from "./billing.js";
 
 const stage = process.env.STAGE ?? "prod";
@@ -35,12 +48,20 @@ process.env.CHATS_TABLE ??= `copperos-${stage}-chats`;
 process.env.TASKS_TABLE ??= `copperos-${stage}-tasks`;
 process.env.MEMORIES_TABLE ??= `copperos-${stage}-memories`;
 process.env.WORKFLOWS_TABLE ??= `copperos-${stage}-workflows`;
+process.env.MCP_AUTH_TABLE ??= `copperos-${stage}-mcpauth`;
+process.env.FROM_ADDRESS ??= "no-reply@copper.jassydev.com";
 process.env.USER_KEYS_PARAM ??= `/copperos/${stage}/user-keys-secret`;
 process.env.AWS_REGION ??= "us-east-1";
 
 // Loaded after the environment above is set: the ledger reads it as it runs.
 const { dynamoLedger, loadLimits, loadRuntime } = await import("./ledger.js");
 const { encryptUserData } = await import("../store/cloud.js");
+const { dynamoAuthStore } = await import("./mcp-store.js");
+const { sendWelcome } = await import("./welcome.js");
+const { welcomeEmail } = await import("./welcome-email.js");
+const { whatsNewEmail } = await import("./updates-email.js");
+const { listRecipients, sendWhatsNew, unsubscribeLink } = await import("./updates.js");
+const { sendMail } = await import("./mail.js");
 
 const db = DynamoDBDocumentClient.from(new DynamoDBClient({}));
 const cognito = new CognitoIdentityProviderClient({});
@@ -52,25 +73,56 @@ const fail = (message: string): never => {
 
 const money = (usd: number) => `$${usd.toFixed(usd < 1 ? 4 : 2)}`;
 
+/** The sign-in pool's id. */
+async function poolId(): Promise<string> {
+  let id: string | undefined;
+  let token: string | undefined;
+  do {
+    const page = await cognito.send(new ListUserPoolsCommand({ MaxResults: 60, NextToken: token }));
+    id = page.UserPools?.find((p) => p.Name === `copperos-${stage}-users`)?.Id;
+    token = id ? undefined : page.NextToken;
+  } while (token);
+  return id ?? fail(`No sign-in pool named copperos-${stage}-users. Is STAGE right?`);
+}
+
 /** The user id (Cognito `sub`) behind an email, or the id itself. */
 async function resolve(who: string | undefined): Promise<string> {
   if (!who) return fail("Say whose: an email or a user id.");
   if (!who.includes("@")) return who;
-  let poolId: string | undefined;
-  let token: string | undefined;
-  do {
-    const page = await cognito.send(new ListUserPoolsCommand({ MaxResults: 60, NextToken: token }));
-    poolId = page.UserPools?.find((p) => p.Name === `copperos-${stage}-users`)?.Id;
-    token = poolId ? undefined : page.NextToken;
-  } while (token);
-  if (!poolId) return fail(`No sign-in pool named copperos-${stage}-users. Is STAGE right?`);
   const found = await cognito.send(
-    new ListUsersCommand({ UserPoolId: poolId, Filter: `email = "${who.replace(/"/g, "")}"`, Limit: 10 }),
+    new ListUsersCommand({ UserPoolId: await poolId(), Filter: `email = "${who.replace(/"/g, "")}"`, Limit: 10 }),
   );
   const ids = (found.Users ?? []).map((u) => u.Attributes?.find((a) => a.Name === "sub")?.Value).filter(Boolean) as string[];
   if (ids.length === 0) return fail(`Nobody has signed in as ${who}.`);
   if (ids.length > 1) return fail(`${who} has ${ids.length} sign-ins; pass one of these ids instead:\n  ${ids.join("\n  ")}`);
   return ids[0];
+}
+
+/** An announcement from the website's files: the live list first, then the drafts. */
+function announcement(id: string | undefined): { entry: import("./updates-email.js").WhatsNew; live: boolean } {
+  if (!id) return fail("Say which announcement: its id (python3 website/announce.py list).");
+  const dir = process.env.WEBSITE_DIR ?? path.resolve(import.meta.dirname, "../../../website");
+  for (const [file, live] of [["announcements.json", true], ["announcements.draft.json", false]] as const) {
+    let list: Array<Record<string, unknown>> = [];
+    try {
+      list = JSON.parse(readFileSync(path.join(dir, file), "utf8")).announcements ?? [];
+    } catch {
+      continue;
+    }
+    const hit = list.find((a) => a.id === id);
+    if (hit) return { entry: hit as unknown as import("./updates-email.js").WhatsNew, live };
+  }
+  return fail(`No announcement "${id}" in ${dir}. See: python3 website/announce.py list`);
+}
+
+function unsubscribeBase(): string {
+  return (
+    process.env.UNSUBSCRIBE_URL ||
+    fail(
+      "Set UNSUBSCRIBE_URL to the stack's UnsubscribeUrl output:\n" +
+        `  export UNSUBSCRIBE_URL=$(aws cloudformation describe-stacks --stack-name CopperOS-${stage} --query "Stacks[0].Outputs[?OutputKey=='UnsubscribeUrl'].OutputValue" --output text)`,
+    )
+  );
 }
 
 async function show(userId: string): Promise<void> {
@@ -177,6 +229,72 @@ switch (command) {
   case "report":
     await report(who ?? weekOf(Date.now()).id);
     break;
+  case "welcome": {
+    if (!who?.includes("@")) fail("Say where to send it: welcome <email>");
+    await sendWelcome(who!);
+    console.log(`Sent the welcome email to ${who}.`);
+    break;
+  }
+  case "whats-new-html": {
+    const { entry } = announcement(who);
+    // A link to nowhere: this is for looking at.
+    console.log(whatsNewEmail({ entry, unsubscribeUrl: "https://copper.jassydev.com/" }).html);
+    break;
+  }
+  case "whats-new": {
+    const { entry, live } = announcement(who);
+    if (arg === "--test") {
+      const to = days;
+      if (!to?.includes("@")) fail("Say where to send it: whats-new <id> --test <email>");
+      const link = await unsubscribeLink(unsubscribeBase(), "preview");
+      await sendMail({ to: to!, ...whatsNewEmail({ entry, unsubscribeUrl: link }), headers: { "List-Unsubscribe": `<${link}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } });
+      console.log(`Sent "${entry.title}" to ${to}. Its Unsubscribe link is a test one: it changes nothing.`);
+      break;
+    }
+    if (arg !== "--all") fail("Say who: whats-new <id> --test <email>   or   whats-new <id> --all [--yes]");
+    // What goes to everyone is what was published, not a draft.
+    if (!live) fail(`"${entry.id}" is still a draft. Publish it first (python3 website/announce.py publish ${entry.id}, then ./deploy.sh), then run this again.`);
+    const yes = process.argv.includes("--yes");
+    const { recipients, unusable } = await listRecipients(await poolId());
+    const out = await sendWhatsNew({ entry, recipients, unsubscribeBase: unsubscribeBase(), dryRun: !yes, delayMs: 100 });
+    console.log(`"${entry.title}" (${entry.id})`);
+    console.log(`${out.recipients} people can be emailed${unusable ? `, ${unusable} sign-ins cannot (not confirmed, disabled or no verified address)` : ""}.`);
+    console.log(`${out.optedOut} unsubscribed, ${out.alreadySent} already had it.`);
+    if (!yes) {
+      console.log(`${out.wouldSend} would be sent it. Nothing was sent. To send: add --yes`);
+    } else {
+      console.log(`${out.sent} sent${out.failed ? `, ${out.failed} failed: ${out.errors.join("; ")}` : ""}.${out.failed ? " Run it again to retry the failed ones." : ""}`);
+    }
+    break;
+  }
+  case "welcome-html":
+    console.log(welcomeEmail({ support: process.env.REPLY_TO ?? "hello@jassydev.com" }).html);
+    break;
+  case "ai": {
+    const userId = await resolve(who);
+    const auth = dynamoAuthStore();
+    const apps = new Map<string, { access: number; refresh: number; until: number }>();
+    for (const r of await auth.recordsOf(userId)) {
+      const id = String(r.id);
+      const kind = id.startsWith("access#") ? "access" : id.startsWith("refresh#") ? "refresh" : null;
+      if (!kind || typeof r.clientId !== "string") continue;
+      const app = apps.get(r.clientId) ?? { access: 0, refresh: 0, until: 0 };
+      app[kind]++;
+      app.until = Math.max(app.until, Number(r.expiresAt) * 1000);
+      apps.set(r.clientId, app);
+    }
+    if (!apps.size) console.log("No AI apps are connected.");
+    for (const [clientId, a] of apps) {
+      const name = (await auth.get<{ name?: string }>(`client#${clientId}`))?.name ?? "(unknown app)";
+      console.log(`${name}  ${clientId}  ${a.refresh} refresh, ${a.access} access tokens; can reconnect until ${new Date(a.until).toISOString().slice(0, 10)}`);
+    }
+    break;
+  }
+  case "ai-revoke": {
+    const removed = await dynamoAuthStore().deleteUser(await resolve(who));
+    console.log(`Removed ${removed} record${removed === 1 ? "" : "s"}. Connected AI apps are signed out.`);
+    break;
+  }
   case "encrypt": {
     if (!who) fail("Say whose: encrypt <email|id|all>");
     if (!process.env.TRANSCRIPTS_BUCKET) fail("Set TRANSCRIPTS_BUCKET to the stack's TranscriptsBucket output (see the top of broker/src/cloud/admin.ts).");
@@ -192,5 +310,5 @@ switch (command) {
     break;
   }
   default:
-    fail("Commands: show, grant, plan, report, encrypt. See the top of broker/src/cloud/admin.ts.");
+    fail("Commands: show, grant, plan, report, ai, ai-revoke, welcome, welcome-html, whats-new, whats-new-html, encrypt. See the top of broker/src/cloud/admin.ts.");
 }

@@ -1029,6 +1029,11 @@ function wire(sock) {
       broadcastToPanels({ type: "usage", usage: msg.usage, ownKey: msg.ownKey });
       return;
     }
+    // The AI apps connected to the account, in answer to get_ai_access and the changes to it.
+    if (msg.type === "ai_access") {
+      broadcastToPanels({ type: "ai_access", url: msg.url, loosening: msg.loosening, apps: msg.apps, error: msg.error });
+      return;
+    }
     // Saved memories, in answer to listing, adding or deleting one.
     if (msg.type === "memories") {
       broadcastToPanels({ type: "memories", memories: msg.memories, error: msg.error, done: msg.done });
@@ -1311,6 +1316,10 @@ chrome.runtime.onConnect.addListener((port) => {
     if (msg.type === "switch_chat" && msg.id) send({ type: "switch_chat", id: msg.id });
     if (msg.type === "get_config") send({ type: "get_config" });
     if (msg.type === "get_usage") send({ type: "get_usage" });
+    // AI apps connected to the account: the list and the address, the switch, disconnecting one.
+    if (msg.type === "get_ai_access") send({ type: "get_ai_access" });
+    if (msg.type === "set_ai_access") send({ type: "set_ai_access", loosening: msg.loosening === true });
+    if (msg.type === "revoke_ai_app" && typeof msg.clientId === "string") send({ type: "revoke_ai_app", clientId: msg.clientId });
     if (msg.type === "get_billing") send({ type: "get_billing" });
     if (msg.type === "billing_portal") send({ type: "billing_portal" });
     // A plan by name, or a credit pack by the price the service listed: never an amount.
@@ -1386,6 +1395,12 @@ chrome.runtime.onInstalled.addListener(({ reason, previousVersion }) => {
     await setBackend("local");
     await switchBackend("local");
   })();
+});
+
+// A fresh install notes when it happened, so the panel does not show a new person a "what is new"
+// dialog about a change they never saw the old way (announcements.js). An update leaves it unset.
+chrome.runtime.onInstalled.addListener(({ reason }) => {
+  if (reason === "install") void chrome.storage.local.set({ newsBaseline: Date.now() }).catch(() => {});
 });
 
 // ── suggestions ─────────────────────────────────────────────────────────────

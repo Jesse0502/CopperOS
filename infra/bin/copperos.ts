@@ -49,4 +49,8 @@ if (stage === "guard") {
   freeWeeklyUsd: Number(app.node.tryGetContext("freeWeeklyUsd") ?? 2),
   freePoolMonthlyUsd: Number(app.node.tryGetContext("freePoolMonthlyUsd") ?? 50),
   testModel: context("testModel") === "true",
+  // Set with -c mcpReservedConcurrency=100 once the account's Lambda concurrency limit allows it.
+  ...(app.node.tryGetContext("mcpReservedConcurrency")
+    ? { mcpReservedConcurrency: Number(app.node.tryGetContext("mcpReservedConcurrency")) }
+    : {}),
 });

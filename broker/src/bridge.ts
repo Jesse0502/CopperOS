@@ -196,7 +196,15 @@ export function call<T = any>(
  * which chat is currently being viewed.
  */
 export function emit(event: string, chatId: string | null, text?: string): void {
+  watcher?.(event, chatId, text);
   transport().emit(event, chatId, text);
+}
+
+let watcher: ((event: string, chatId: string | null, text?: string) => void) | null = null;
+
+/** Hears every event `emit` sends, for whoever reports what a task is doing (the local task API). */
+export function watchEvents(fn: (event: string, chatId: string | null, text?: string) => void): void {
+  watcher = fn;
 }
 
 /** Put a paused task's request in front of the person. */

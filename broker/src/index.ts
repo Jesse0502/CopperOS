@@ -22,6 +22,7 @@ import { LOCAL_USER, useStore } from "./store/store.js";
 import { FsStore } from "./store/fs.js";
 import { LocalServer } from "./transport/local.js";
 import type { TaskExtras } from "./task-extras.js";
+import { apiRoutes, type Outcome } from "./task-api.js";
 
 const PORT = Number(process.env.PORT ?? 7331);
 // Optional locally: a limit on each task's active time, like the hosted
@@ -75,12 +76,8 @@ async function chatStateFor(id: string): Promise<ChatState> {
   };
 }
 
-/** How a run ended, for callers that wait on it (the task API). */
-type Outcome =
-  | { status: "done"; text: string; steps: number }
-  | { status: "paused"; request: string }
-  | { status: "timeout" | "cancelled"; text: string; steps: number }
-  | { status: "error"; error: string };
+// How each chat's last run ended, kept for the task API to report.
+const outcomes = new Map<string, { status: string; at: string; error?: string }>();
 
 async function runTask(agent: Agent, text: string, extras: TaskExtras, limitMs: number | null = TASK_LIMIT_MS): Promise<Outcome> {
   const id = agent.info().id;
@@ -100,6 +97,18 @@ async function runTask(agent: Agent, text: string, extras: TaskExtras, limitMs: 
  * running, waiting on you) and its request is shown until it is answered.
  */
 async function drive(agent: Agent, job: () => Promise<RunResult>): Promise<Outcome> {
+  const outcome = await driveRun(agent, job);
+  if (outcome.status !== "paused") {
+    outcomes.set(agent.info().id, {
+      status: outcome.status,
+      at: new Date().toISOString(),
+      ...(outcome.status === "error" ? { error: outcome.error } : {}),
+    });
+  }
+  return outcome;
+}
+
+async function driveRun(agent: Agent, job: () => Promise<RunResult>): Promise<Outcome> {
   // A Jev key saved in Settings, if there is one, else the broker's own (see jevFor).
   const work = () => withJev(jevFor(USER), job);
   const id = agent.info().id;
@@ -185,6 +194,23 @@ for (const chat of await listSessions(USER)) {
   console.log(`[waiting ${chat.id}] since before the restart`);
 }
 
+/** Stop, from the panel or the task API. */
+function cancelChat(chatId: string) {
+  runOf(chatId).cancelRequested = true;
+  agents.get(chatId)?.cancel();
+  emit("cancelled", chatId, "");
+  // A paused task has no run to stop: cancel it where it waits.
+  void (async () => {
+    const request = await (await getAgent(chatId)).cancelPause();
+    if (!request) return;
+    withdrawRequest(request.id);
+    const run = runOf(chatId);
+    run.busy = false;
+    run.task = null;
+    console.log(`[cancelled ${chatId}] while waiting on you`);
+  })().catch((err) => console.error(`[cancel ${chatId}] ${String(err?.message ?? err)}`));
+}
+
 function runningIds(): Set<string> {
   return new Set([...runs.entries()].filter(([, r]) => r.busy).map(([id]) => id));
 }
@@ -210,21 +236,7 @@ server.start(PORT, {
       void runTask(agent, text, extras);
     })();
   },
-  onCancel: (chatId) => {
-    runOf(chatId).cancelRequested = true;
-    agents.get(chatId)?.cancel();
-    emit("cancelled", chatId, "");
-    // A paused task has no run to stop: cancel it where it waits.
-    void (async () => {
-      const request = await (await getAgent(chatId)).cancelPause();
-      if (!request) return;
-      withdrawRequest(request.id);
-      const run = runOf(chatId);
-      run.busy = false;
-      run.task = null;
-      console.log(`[cancelled ${chatId}] while waiting on you`);
-    })().catch((err) => console.error(`[cancel ${chatId}] ${String(err?.message ?? err)}`));
-  },
+  onCancel: cancelChat,
   onReset: () => {
     void (async () => {
       const agent = register(Agent.blank(USER));
@@ -326,8 +338,9 @@ void (async () => {
   }
 })();
 
-// Task API: lets another program on this computer (such as a marketing engine)
-// run a task and get its result, without a second broker. Off unless
+// Task API: lets another program on this computer (such as a marketing engine
+// or an AI over MCP) run a task and get its result, read chats, and stop or
+// adjust them, without a second broker. Off unless
 // TASK_API_TOKEN is set. Listens on 127.0.0.1 only.
 const API_TOKEN = process.env.TASK_API_TOKEN?.trim();
 if (API_TOKEN) startTaskApi(API_TOKEN, Number(process.env.TASK_API_PORT ?? 7332));
@@ -343,10 +356,22 @@ function startTaskApi(token: string, port: number) {
     res.end(JSON.stringify(body));
   };
 
+  const moreRoutes = apiRoutes({
+    user: USER,
+    extensionConnected: () => server.isConnected(),
+    runningIds,
+    getAgent,
+    newAgent: () => register(Agent.blank(USER)),
+    runTask,
+    cancelChat,
+    lastOutcome: (id) => outcomes.get(id),
+  });
+
   createServer(async (req, res) => {
     try {
       if (!authorized(req.headers.authorization)) return reply(res, 401, { error: "unauthorized" });
       const url = new URL(req.url ?? "/", "http://127.0.0.1");
+      if (await moreRoutes(req, res, url)) return;
 
       if (req.method === "GET" && url.pathname === "/api/health") {
         return reply(res, 200, { ok: true, extension: server.isConnected(), busy: runningIds().size > 0, model: activeModelLabel(USER) });

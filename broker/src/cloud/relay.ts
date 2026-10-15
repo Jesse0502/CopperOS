@@ -34,7 +34,6 @@ import { withJev } from "../jev.js";
 import { busy, CloudStore, deleteUserData, type ChatItem } from "../store/cloud.js";
 import { useStore } from "../store/store.js";
 import {
-  createGrant,
   forgetConnection,
   getConnection,
   post,
@@ -45,8 +44,12 @@ import {
 } from "./connections.js";
 import { deleteWorkflow, listWorkflows, saveWorkflow } from "../workflows.js";
 import { usageSummary } from "./billing.js";
-import type { AgentJob, AgentRequest, DraftJob } from "./jobs.js";
+import { startAgent } from "./agent-start.js";
+import { cancelChat, setApprovalMode, setSupervisor } from "./chat-control.js";
+import type { DraftJob } from "./jobs.js";
 import { dynamoLedger, installBilling, loadLimits, loadRuntime } from "./ledger.js";
+import { aiApps, aiLoosening, revokeAiApp, setAiLoosening } from "./ai-apps.js";
+import { dynamoAuthStore } from "./mcp-store.js";
 import {
   BillingError,
   billingState,
@@ -211,45 +214,19 @@ async function handleAs(userId: string, from: string, msg: any): Promise<void> {
 
     case "cancel": {
       if (typeof msg.chatId !== "string") return;
-      await say("cancelled", msg.chatId, "");
-      // A paused task has no run to stop: cancel it where it waits.
-      if (await store.claimPending(userId, msg.chatId)) {
-        await (await Agent.forChat(userId, msg.chatId)).cancelPause();
-        return;
-      }
-      // A long task between two Lambdas has no worker to hear this: the mark tells the next one.
-      await store.markCancelled(userId, msg.chatId);
-      for (const w of await workersOf(userId, msg.chatId)) await post(w.connectionId, { type: "cancel" });
+      await cancelChat(userId, msg.chatId);
       return;
     }
 
     case "set_approval_mode": {
       if (typeof msg.chatId !== "string" || !["all", "submits", "none"].includes(msg.mode)) return;
-      const item = await store.chatItem(userId, msg.chatId);
-      // A running task holds the chat's transcript: tell it rather than
-      // writing underneath it.
-      if (item?.run && item.run.until > Date.now() && !item.pending) {
-        for (const w of await workersOf(userId, msg.chatId)) {
-          await post(w.connectionId, { type: "set_approval_mode", mode: msg.mode });
-        }
-        return;
-      }
-      await (await Agent.forChat(userId, msg.chatId)).setApprovalMode(msg.mode as ApprovalMode);
+      await setApprovalMode(userId, msg.chatId, msg.mode as ApprovalMode);
       return;
     }
 
     case "set_supervisor": {
       if (typeof msg.chatId !== "string") return;
-      const on = msg.on === true;
-      const item = await store.chatItem(userId, msg.chatId);
-      // As with the approval mode: a running task holds the transcript.
-      if (item?.run && item.run.until > Date.now() && !item.pending) {
-        for (const w of await workersOf(userId, msg.chatId)) {
-          await post(w.connectionId, { type: "set_supervisor", on });
-        }
-        return;
-      }
-      await (await Agent.forChat(userId, msg.chatId)).setSupervisor(on);
+      await setSupervisor(userId, msg.chatId, msg.on === true);
       return;
     }
 
@@ -266,6 +243,27 @@ async function handleAs(userId: string, from: string, msg: any): Promise<void> {
         });
       } catch (err) {
         await reply({ type: "memories", error: String((err as Error)?.message ?? err) });
+      }
+      return;
+    }
+
+    case "get_ai_access":
+    case "set_ai_access":
+    case "revoke_ai_app": {
+      try {
+        const auth = dynamoAuthStore();
+        if (msg.type === "set_ai_access") await setAiLoosening(userId, msg.loosening === true);
+        if (msg.type === "revoke_ai_app") await revokeAiApp(userId, String(msg.clientId ?? ""), auth);
+        await reply({
+          type: "ai_access",
+          url: process.env.MCP_URL ?? null,
+          loosening: await aiLoosening(userId),
+          apps: await aiApps(userId, auth),
+          ...(msg.type !== "get_ai_access" ? { done: msg.type } : {}),
+        });
+      } catch (err) {
+        console.error(`[relay] ${msg.type}: ${String((err as Error)?.stack ?? err)}`);
+        await reply({ type: "ai_access", error: "Could not load your MCP settings. Try again in a moment." });
       }
       return;
     }
@@ -436,8 +434,10 @@ async function handleAs(userId: string, from: string, msg: any): Promise<void> {
         return;
       }
       const removed = await deleteUserData(userId);
+      // Whatever AI apps were connected to the account lose their access with it.
+      const connected = process.env.MCP_AUTH_TABLE ? await dynamoAuthStore().deleteUser(userId) : 0;
       await deleteSignIn(userId);
-      console.log(`[relay] deleted an account: ${removed.items} items, ${removed.transcripts} transcripts`);
+      console.log(`[relay] deleted an account: ${removed.items} items, ${removed.transcripts} transcripts, ${connected} AI app records`);
       await postToExtensions(userId, { type: "account_deleted" });
       return;
     }
@@ -550,21 +550,4 @@ async function deleteSignIn(userId: string): Promise<void> {
   );
   const username = found.Users?.[0]?.Username;
   if (username) await cognito.send(new AdminDeleteUserCommand({ UserPoolId: pool, Username: username }));
-}
-
-async function startAgent(job: AgentRequest): Promise<void> {
-  try {
-    const full: AgentJob = { ...job, grant: await createGrant(job.userId, job.chatId) };
-    await lambda.send(
-      new InvokeCommand({
-        FunctionName: process.env.AGENT_FUNCTION,
-        InvocationType: "Event",
-        Payload: Buffer.from(JSON.stringify(full)),
-      }),
-    );
-  } catch (err) {
-    // Nothing is running after all: free the chat for another try.
-    await store.endRun(job.userId, job.chatId, false);
-    throw err;
-  }
 }

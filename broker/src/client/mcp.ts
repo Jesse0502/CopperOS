@@ -1,12 +1,18 @@
-// MCP server (stdio) so other agents — Claude Code, Cursor, etc. — can hand
-// browser work to CopperOS. Wraps the broker's task API; stdout is the
+// MCP server (stdio) so other agents — Claude Desktop, Claude Code, Cursor, etc. —
+// can use CopperOS running on this computer. Wraps the broker's task API; the
+// tools are in tools.ts, shared with the hosted connector. stdout is the
 // protocol, so all logging goes to stderr.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { describe, health, runTask } from "./api.js";
+import { describe, health, localBackend, runTask } from "./api.js";
+import { INSTRUCTIONS, registerTools } from "./tools.js";
 
-const server = new McpServer({ name: "copperos", version: "0.1.0" });
+const server = new McpServer({ name: "copperos", version: "0.2.0" }, { instructions: INSTRUCTIONS });
+
+const reply = (text: string, isError = false) => ({ content: [{ type: "text" as const, text }], ...(isError ? { isError } : {}) });
+
+const READ_ONLY = { readOnlyHint: true, openWorldHint: false } as const;
 
 server.registerTool(
   "browser_task",
@@ -15,18 +21,23 @@ server.registerTool(
     description:
       "Hand a task to the CopperOS browser agent, which drives the user's real Chrome (signed-in accounts included) and returns what it found or did. " +
       "Describe the goal in plain words, not clicks. One task runs at a time, in a fresh chat. It can take minutes. " +
-      "A task that needs approval or an answer it can't get comes back as blocked.",
+      "A task that needs approval or an answer it can't get comes back as blocked. " +
+      "To start a task without waiting for it (and be able to stop it, or let the person approve steps), use start_task.",
     inputSchema: {
       task: z.string().min(1).describe("What to do, e.g. 'open example.com and tell me the main heading'"),
       rules: z.string().optional().describe("Constraints for the run, e.g. 'read only, never submit forms'"),
       approval_mode: z
         .enum(["all", "submits", "none"])
         .optional()
-        .describe("Which actions need approval: all, submits (default), or none. Nobody can approve during an MCP call, so a task that asks is ended as blocked."),
+        .describe("Which actions need approval: all, submits (default), or none. Nobody can approve during an MCP call, so a task that asks is ended as blocked. 'none' needs MCP_ALLOW_LOOSENING=1 in broker/.env."),
       timeout_seconds: z.number().int().min(30).max(1800).optional().describe("Active-time limit, default 600"),
     },
   },
   async ({ task, rules, approval_mode, timeout_seconds }, extra) => {
+    // Asking for less approval than the default is loosening, like set_chat_settings.
+    if (approval_mode === "none" && process.env.MCP_ALLOW_LOOSENING !== "1") {
+      return reply("Error: approval_mode 'none' is switched off for connected AIs. The person can allow it by setting MCP_ALLOW_LOOSENING=1 in broker/.env and restarting the broker.", true);
+    }
     // Some clients reset their tool timeout on progress; a task can run for minutes.
     const token = extra._meta?.progressToken;
     let tick = 0;
@@ -50,6 +61,7 @@ server.registerTool(
     title: "Browser agent status",
     description: "Check whether the CopperOS broker is up, Chrome's extension is connected, and a task is already running.",
     inputSchema: {},
+    annotations: READ_ONLY,
   },
   async () => {
     try {
@@ -60,6 +72,8 @@ server.registerTool(
     }
   },
 );
+
+registerTools(server, localBackend);
 
 await server.connect(new StdioServerTransport());
 console.error("[copperos-mcp] ready");

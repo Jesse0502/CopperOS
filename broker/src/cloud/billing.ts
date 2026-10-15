@@ -374,8 +374,10 @@ export class UsageMeter implements Meter {
     const s = await this.standing();
     this.remember(s);
     // With the pool spent the allowance is out of reach, and the week's spending
-    // so far does not count against credits: they are all that is left.
-    if ((s.poolFull ? 0 : s.cap - s.spent) + s.credits > 0) return;
+    // so far does not count against credits: they are all that is left. Past the
+    // allowance, what credits paid for is already out of `credits`, so an
+    // overspent allowance counts as none left, never as a debt against them.
+    if ((s.poolFull ? 0 : Math.max(0, s.cap - s.spent)) + s.credits > 0) return;
     throw new UsageLimitError({
       reason: s.poolFull ? "pool" : "allowance",
       plan: s.plan,

@@ -227,8 +227,12 @@ export class CloudStore implements Store {
       }));
   }
 
-  /** Every chat's item, with its run — what the relay needs to tell which are busy. */
-  async chatItems(userId: string): Promise<ChatItem[]> {
+  /**
+   * Every chat's item, with its run — what the relay needs to tell which are busy.
+   * `consistent` reads see every write that has finished, which a decision about
+   * whether to start a task needs.
+   */
+  async chatItems(userId: string, consistent = false): Promise<ChatItem[]> {
     const items: ChatItem[] = [];
     let start: Record<string, unknown> | undefined;
     do {
@@ -237,6 +241,7 @@ export class CloudStore implements Store {
           TableName: T.chats(),
           KeyConditionExpression: "userId = :u",
           ExpressionAttributeValues: { ":u": userId },
+          ConsistentRead: consistent,
           ExclusiveStartKey: start,
         }),
       );

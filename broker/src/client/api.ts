@@ -3,6 +3,7 @@
 // Chrome that's already signed in.
 import { config } from "dotenv";
 import { fileURLToPath } from "node:url";
+import type { Backend, ChatDetail } from "./backend.js";
 
 // Read broker/.env so TASK_API_TOKEN needn't be repeated in every MCP config.
 config({ path: fileURLToPath(new URL("../../.env", import.meta.url)), quiet: true });
@@ -50,6 +51,44 @@ export async function runTask(req: TaskRequest): Promise<TaskResult> {
   if (status !== 200) return { status: "error", error: body.error ?? `broker answered ${status}` };
   return body;
 }
+
+// ── chats, memories and molds ─────────────────────────────────────────────
+
+/** Like `call`, but anything other than a 2xx is an Error carrying the broker's own words. */
+async function ok<T>(method: string, path: string, body?: unknown, timeoutMs?: number): Promise<T> {
+  const { status, body: res } = await call<T & { error?: string }>(method, path, body, timeoutMs);
+  if (status >= 300) throw new Error(res.error ?? `broker answered ${status}`);
+  return res;
+}
+
+const enc = encodeURIComponent;
+
+const LOOSENING =
+  "Lowering approvals (to a mode that asks less) or turning the supervisor off, and adding a memory or mold, only work when the person has set MCP_ALLOW_LOOSENING=1 in broker/.env; otherwise the call is refused and says so.";
+
+/** The broker on this computer, through its task API. */
+export const localBackend: Backend = {
+  maxWaitSeconds: 300,
+  canWriteTrust: true,
+  loosenNote: LOOSENING,
+  startTask: (req) => ok("POST", "/api/tasks", req),
+  listChats: (query, limit) =>
+    ok("GET", `/api/chats?${new URLSearchParams({ ...(query ? { q: query } : {}), ...(limit ? { limit: String(limit) } : {}) })}`, undefined, 60_000),
+  getChat: (chatId, turns) => ok("GET", `/api/chats/${enc(chatId)}${turns ? `?turns=${turns}` : ""}`),
+  async chatStatus(chatId) {
+    const chat = await ok<ChatDetail>("GET", `/api/chats/${enc(chatId)}?turns=1`);
+    const step = chat.activity.at(-1);
+    return { status: chat.status, ...(step ? { step: `${step.event} ${step.text}`.trim() } : {}) };
+  },
+  stopChat: (chatId) => ok("POST", `/api/chats/${enc(chatId)}/cancel`, {}),
+  setSettings: (chatId, patch) => ok("PATCH", `/api/chats/${enc(chatId)}/settings`, patch),
+  listMemories: () => ok("GET", "/api/memories"),
+  addMemory: (text) => ok("POST", "/api/memories", { text }, 60_000),
+  deleteMemory: (key) => ok("DELETE", `/api/memories/${enc(key)}`),
+  listMolds: () => ok("GET", "/api/molds"),
+  saveMold: (mold) => ok("POST", "/api/molds", mold),
+  deleteMold: (moldId) => ok("DELETE", `/api/molds/${enc(moldId)}`),
+};
 
 /** The result as plain text, for a terminal or a model. */
 export function describe(r: TaskResult): string {

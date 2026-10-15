@@ -260,6 +260,7 @@ OpenRouter, the transcript cap follows the chosen model's context window.
 | `RECONNECT_GRACE_MS` | `30000` | How long an op waits for the extension to come back before failing. |
 | `TASK_API_TOKEN` | — (off) | Turns on the [task API](#task-api) and is the bearer token callers must send. |
 | `TASK_API_PORT` | `7332` | Port for the task API (127.0.0.1 only). |
+| `MCP_ALLOW_LOOSENING` | — (off) | `1` lets an AI connected through the task API or MCP lower a chat's approvals, turn its supervisor off, and add memories and molds. Raising approvals and turning the supervisor on always work. |
 | `UPLOAD_DIRS` | — (off) | Folders, separated by `:`, that `upload_file` may upload images from. With none set the tool isn't offered. |
 | `TASK_BUDGET_MS` | — (no limit) | Optional limit on each task's active time, in ms. Time spent waiting on you does not count. The task stops cleanly before the limit, and "continue" picks it up. |
 | `STORAGE_DIR` | `<repo>/storage` | Where chat transcripts are written. |
@@ -291,6 +292,24 @@ curl -X POST -H "Authorization: Bearer $TASK_API_TOKEN" http://127.0.0.1:7332/ap
 - `timeoutMs` (30s to 30min, default 10min) is the task's active-time limit; reaching it answers `{"status":"timeout",...}`.
 - Other answers: `{"status":"error","error":"..."}`, `409` while another task runs (one tab at a time), `503` while the extension isn't connected.
 
+### Starting a task without waiting, and everything else
+
+These are what the MCP server uses. Same token and port; bodies and answers are JSON.
+
+| Request | Does |
+|---|---|
+| `POST /api/tasks` | Starts a task and answers `202 {"chatId":"...","status":"running"}` at once. Body: `text` or `moldId` (or both: `text` then adds details for the run), and optionally `chatId` to carry on in that chat, `rules`, `approvalMode`, `supervisor`, `timeoutMs`. |
+| `GET /api/chats?q=&limit=` | Chats, newest first. `q` searches everything said in them. |
+| `GET /api/chats/:id?turns=` | One chat: status (`running`, `waiting` or `idle`), settings, the request it waits on, progress, the latest steps of a running task, and the last `turns` messages. |
+| `POST /api/chats/:id/cancel` | Stops the chat's task, as Stop does. |
+| `PATCH /api/chats/:id/settings` | `{"approvalMode":"all","supervisor":true}`. Takes effect mid-task. |
+| `GET /api/memories`, `POST /api/memories`, `DELETE /api/memories/:key` | Saved memories. |
+| `GET /api/molds`, `POST /api/molds`, `DELETE /api/molds/:id` | Molds. |
+
+- A task from `POST /api/tasks` that needs approval, or has a question, stays in the side panel until you answer it. The API cannot answer it; the chat shows as `waiting`.
+- Lowering a chat's approvals, turning its supervisor off, and adding a memory or mold answer `403` unless `MCP_ALLOW_LOOSENING=1` is set. The same goes for `approvalMode: "none"` on `POST /api/tasks`. `POST /api/task` is unchanged; the MCP tool `browser_task` applies the same rule to `approval_mode: none`.
+- `409` while any task is running or waiting on you.
+
 ### CLI and MCP
 
 Two thin clients of the task API, in `broker/`. The broker must be running with
@@ -306,11 +325,30 @@ echo "find the pricing page" | npm run copper        # task from stdin
 
 Exit codes: `0` done, `1` error, `2` blocked or timed out. `--json` prints the full result.
 
-For other agents, register the MCP server (tools `browser_task` and `browser_status`):
+For other agents (Claude Code, Claude Desktop, Cursor), register the MCP server:
 
 ```bash
 claude mcp add copperos -- npx --prefix /path/to/browsercontrol/broker tsx /path/to/browsercontrol/broker/src/client/mcp.ts
 ```
+
+For Claude Desktop or Cursor, the same command goes in the client's MCP config:
+
+```json
+{ "mcpServers": { "copperos": { "command": "npx", "args": ["--prefix", "/path/to/browsercontrol/broker", "tsx", "/path/to/browsercontrol/broker/src/client/mcp.ts"] } } }
+```
+
+Tools:
+
+| Tools | Does |
+|---|---|
+| `browser_task`, `browser_status` | Run a task and wait for its result; check the broker. |
+| `start_task`, `wait_for_task`, `stop_task` | Start a task (or run a mold) and get its chat id at once; wait for it to finish or need you; stop it. |
+| `list_chats`, `get_chat` | The chat history, searchable, and one chat in full. |
+| `set_chat_settings` | A chat's approval mode and supervisor. |
+| `list_memories`, `add_memory`, `delete_memory` | Memories. |
+| `list_molds`, `save_mold`, `delete_mold` | Molds. |
+
+The read tools are marked read-only and the delete tools destructive, so clients that ask before running a tool can tell them apart.
 
 A task can run for minutes. If the client gives up first, raise its tool timeout
 (Claude Code: `MCP_TOOL_TIMEOUT=600000`).
@@ -771,6 +809,166 @@ cd infra && npx cdk deploy -c stage=prod --profile jassydev
 ```
 
 
+### Claude and other AI apps (the MCP connector)
+
+An AI app can use a signed-in person's CopperOS through one address, the stack's
+`McpUrl` output (`https://….lambda-url.us-east-1.on.aws/mcp`). In Claude it is
+Settings → Connectors → Add custom connector: paste the address, sign in with the
+CopperOS account, press **Allow**. Nothing is installed. Any MCP client that
+supports remote servers with OAuth connects the same way. Tasks still run in the
+person's own Chrome, so it has to be open with CopperOS signed in.
+
+The address is one Lambda behind a Function URL (`broker/src/cloud/mcp.ts`). It
+is its own OAuth 2.1 server (`mcp-oauth.ts`: registration, PKCE, a consent page,
+tokens kept as hashes in the `McpAuth` table, 1-hour access tokens and 30-day
+refresh tokens replaced each time they are used). The person is identified by
+CopperOS's own sign-in page through a second Cognito app client named `mcp`
+(`mcp-cognito.ts`). The tools are the ones in `client/tools.ts`, the same code the
+local stdio server uses, against `mcp-backend.ts`.
+
+| Tools | |
+|---|---|
+| `start_task`, `wait_for_task` (up to 20 s a call), `stop_task` | Start a task or a mold, follow it, stop it. |
+| `list_chats` (searches the 30 newest), `get_chat` | History. A hosted task's individual steps are not kept, so a running chat shows its status and any tracked progress, not a step list. |
+| `set_chat_settings` | Raise approvals, turn the supervisor on. Lower them or turn it off only with the switch (below). |
+| `list_memories`, `delete_memory`, `list_molds`, `delete_mold` | Read, and delete. |
+| `add_memory`, `save_mold` | Only with the switch. |
+| `get_usage` | Plan, share of the period left, credits, task length, running time. |
+
+Never offered: answering an approval or a question (a chat shows as `waiting` and
+the panel answers it) and `browser_task`.
+
+**The switch.** Lowering approvals, turning the supervisor off, adding a memory and
+saving a mold are off. Memories and molds are read by the agent as the person's own
+words. Settings → MCP has one checkbox that turns all four on for the account
+(`aiLoosening` on the `Accounts` item, `ai-apps.ts`). It is read on every request, so
+turning it off takes effect on the app's next call, and the two tools that write
+disappear from its list. Settings → MCP also shows the address to paste, the
+connected apps (name and when each was last active) with a **Disconnect** for each, which
+removes every token the app holds. The relay answers `get_ai_access`, `set_ai_access` and
+`revoke_ai_app` for it.
+
+What stands between an AI and the meter, in the order a start meets it
+(`mcp-backend.ts`; the numbers are `LIMITS`, set by `MCP_REQUESTS_PER_MIN` and
+`MCP_STARTS_PER_HOUR`):
+
+- 120 requests a minute per account, `429` after that; 20 registrations, 60
+  sign-ins and 120 token requests an hour per address.
+- A task needs a connected Chrome, or the start is refused.
+- 30 started tasks an hour per account.
+- One start at a time per account (a conditional write in `McpAuth`), and one
+  task running or waiting on the person at a time, read with a strongly consistent
+  query.
+- The meter and the week's running time are asked before anything is launched
+  (`usageProblem`): a person whose usage is spent gets the message the panel
+  shows, and no Lambda starts. The meter inside a running task is unchanged.
+- Accounts on their own key (Foundry) skip the model meter, not the weekly hours.
+
+Account deletion removes the tokens. To see or cut off what is connected:
+
+```bash
+cd broker
+AWS_PROFILE=jassydev STAGE=prod npm run admin -- ai        someone@gmail.com
+AWS_PROFILE=jassydev STAGE=prod npm run admin -- ai-revoke someone@gmail.com
+```
+
+Deploying it is the stack deploy above; it adds the table, the Lambda, its URL and
+the `mcp` app client, and needs no Parameter Store values of its own.
+
+**Concurrency.** The function's URL is public, so a flood at it takes Lambda concurrency
+from the agent. The account's limit was 50 on 2026-10-16 where AWS's default is 1000, and
+every running task holds one for up to 15 minutes. Raise it, then reserve some for the
+connector (AWS needs 100 left unreserved, so this works only above that):
+
+```bash
+aws service-quotas request-service-quota-increase --service-code lambda \
+  --quota-code L-B99A9384 --desired-value 1000 --profile jassydev --region us-east-1
+cd infra && npx cdk deploy -c stage=prod -c mcpReservedConcurrency=100 --profile jassydev
+```
+
+### The welcome email
+
+A new account gets one email: black and copper, centered, how to start in three steps,
+what a mold is, and five molds from the library page (`welcome-email.ts`; its molds are
+copied from `website/library/index.html` and change with it). Cognito runs the `Welcome`
+Lambda (`welcome.ts`) when a sign-up is confirmed, which includes a first sign-in with
+Google. It marks the account (`welcomedAt` on its `Accounts` item) before it sends, so a
+trigger that runs twice sends once, and it sends through SES from `no-reply@<emailDomain>`
+with replies going to the feedback address. A password reset does not send it, and
+accounts that exist already are not sent one. Cognito refuses a sign-up whose trigger
+fails, so the handler catches every error and gives up after 3.5 seconds.
+
+```bash
+cd broker
+npm run admin -- welcome-html > welcome.html        # open it in a browser; sends nothing
+AWS_PROFILE=jassydev npm run admin -- welcome you@example.com    # sends it to that address now
+```
+
+
+## Announcements
+
+For a release or a major feature the panel shows one large dialog in the middle: a tag, a title, a lead,
+up to five points, a picture from `copper.jassydev.com`, and a button. It comes from one file on the
+website, `website/announcements.json`, which the panel reads from
+`https://copper.jassydev.com/announcements.json` (`extension/announcements.js`) at most every six hours.
+It sends nothing about the person and shows nothing if the file cannot be reached.
+
+- It shows once. Got it, ✕, Escape or its button closes it for good.
+- It can be limited to extension versions (`minVersion`, `maxVersion`) and dates (`from`, `until`).
+- It is not shown to anyone who installed after it was published (`background.js` notes the install time):
+  it is news about a change, and they never saw the old way.
+- Only text, https links and pictures from the website are shown.
+
+Because it is a file, a feature that needs no new version of the extension can be announced the day it
+ships. `website/announce.py` writes the file. A dialog is drafted first: a draft goes to
+`announcements.draft.json`, which `deploy.sh` does not upload, so nothing goes out until it is published.
+
+```bash
+cd website
+python3 announce.py modal --title "Connect CopperOS to Claude" --lead "Let your own LLM control CopperOS actions via MCP." \
+  --point "Open Settings, then MCP, and copy the address." --point "Approvals still wait for you in the panel." \
+  --tag "New in 1.1.0" --min-version 1.1.0 --draft
+python3 announce.py preview               # the real panel with the drafts and what is live, in your browser
+python3 announce.py publish <id>          # moves the draft to the live list
+./deploy.sh
+python3 announce.py list                  # what is live and what is drafted
+python3 announce.py remove <id>
+```
+
+Entries run 21 days unless `--days` says otherwise, and expired ones are dropped each time the script
+runs. When a major feature ships, the dialog is drafted and shown with `preview`, and published only once
+it has been confirmed. `website/` is not in git; `deploy.sh` publishes it from disk.
+
+### The what's-new email
+
+The same entry can be emailed to everyone with an account (`updates-email.ts`: black and copper like the
+welcome email, with the entry's tag, title, lead, points, picture and button), so what people read in the
+panel and in their inbox is one piece of writing. It is sent by command, after the entry is published:
+
+```bash
+cd broker
+npm run admin -- whats-new-html <id> > whats-new.html                  # look at it; sends nothing
+AWS_PROFILE=jassydev npm run admin -- whats-new <id> --test you@example.com   # one copy, to you
+AWS_PROFILE=jassydev npm run admin -- whats-new <id> --all             # counts who it would go to; sends nothing
+AWS_PROFILE=jassydev npm run admin -- whats-new <id> --all --yes       # sends it
+```
+
+`--all` is refused for a draft, and without `--yes` it only counts. It goes to the people in the sign-in pool
+who are confirmed (or signed in with Google) and have a verified address, minus anyone who unsubscribed
+and anyone who has had that announcement. Each person's account item keeps the ids they have been sent
+(`newsEmailed`), marked before the email goes, so running it again, or two runs at once, sends it once; a
+send that fails gives the mark back and the next run retries it. Every email has a signed one-click
+Unsubscribe link and the `List-Unsubscribe` headers mail apps show as their own button. The link goes to
+the `Unsubscribe` function (`unsubscribe.ts`): opening it asks first, and only the button (or the mail app's
+one-click POST) sets `emailOptOut`, since mail scanners open every link. The signature is an HMAC of the
+person's id under the secret the stored data is sealed with. `UNSUBSCRIBE_URL` is the stack's
+`UnsubscribeUrl` output:
+
+```bash
+export UNSUBSCRIBE_URL=$(aws cloudformation describe-stacks --stack-name CopperOS-prod --profile jassydev \
+  --query "Stacks[0].Outputs[?OutputKey=='UnsubscribeUrl'].OutputValue" --output text)
+```
+
 
 ## Molds
 
@@ -864,6 +1062,12 @@ verdict, and the first step brings the card.
 | `broker/src/cloud/stripe.ts`, `stripe-events.ts`, `stripe-webhook.ts`, `stripe-setup.ts` | Taking money: what is for sale (read from Stripe), the checkout and billing-portal sessions, what each Stripe event does to an account, the webhook Lambda, and the script that makes Stripe match what CopperOS sells. |
 | `broker/src/cloud/billing.ts`, `ledger.ts`, `admin.ts` | Plans, their allowances, credits, the free pool and the usage ledger (rules in `billing.ts`, DynamoDB, the live limits and the pool alerts in `ledger.ts`), and the command line for looking at and changing a user's plan and credits. |
 | `broker/src/cloud/` | The hosted version's Lambda handlers: the sign-in check on connect (users and task workers), the relay (the hosted `index.ts`), the agent, and `feedback.ts`, which emails "Send a suggestion" from Settings to the team. `testing/` holds a scripted model deployed to dev stacks only. |
+| `broker/src/task-api.ts`, `ai-access.ts` | The local task API's routes for chats, memories, molds and per-chat settings, and the rules a connected AI is held to (what counts as lowering approvals, how a mold is sent, how a chat is shown), shared with the hosted endpoint. |
+| `broker/src/client/` | `api.ts`, `cli.ts` and `mcp.ts` (the local stdio server); `backend.ts` is what the MCP tools need from CopperOS, and `tools.ts` is the tool set written over it, shared with the hosted connector. |
+| `broker/src/cloud/mcp*.ts`, `ai-apps.ts` | The hosted MCP connector: the Lambda (`mcp.ts`), its OAuth server (`mcp-oauth.ts`), sign-in through Cognito (`mcp-cognito.ts`), its table (`mcp-store.ts`), the tools' backend with the start guards (`mcp-backend.ts`), and what the person controls from Settings (`ai-apps.ts`). `agent-start.ts` and `chat-control.ts` start and stop tasks for both the relay and the connector. |
+| `broker/src/cloud/welcome.ts`, `welcome-email.ts` | The welcome email sent once to each new account, and its template. |
+| `broker/src/cloud/updates.ts`, `updates-email.ts`, `unsubscribe.ts` | The what's-new email: who it may go to, the signed Unsubscribe links, the careful send (once per person, opt-outs, retry), its template, and the public Unsubscribe function. `email-kit.ts` and `mail.ts` are what both emails share: the look, and sending through SES. |
+| `extension/announcements.js` | The what's-new dialog's list: fetching it, and choosing what to show. |
 | `broker/src/stub-extension.ts` | Fake extension for testing without Chrome. |
 | `infra/` | AWS CDK app for the hosted backend: Cognito sign-in, the WebSocket API, the Lambdas, DynamoDB (including the usage ledger), S3, alarms. Secrets live in Parameter Store (free). `-c stage=guard` deploys the account's spending guard: a budget that brakes every CopperOS Lambda when the month's bill passes `spendCap` in cdk.json, plus cost anomaly emails (see `infra/lib/guard-stack.ts`, which also has the release command). |
 

@@ -8,6 +8,8 @@
 //                            ▼                 ▼
 //                  DynamoDB tables · S3 transcripts · Parameter Store keys
 //
+//   AI app ──https──► MCP λ (Function URL; signs people in, then acts as them) ──async──► agent λ
+//
 // A user with no API key of their own runs on CopperOS's model, on a key kept
 // in Parameter Store, and what each call costs is charged to their weekly
 // allowance and credits (Usage and Accounts tables; broker/src/cloud/billing.ts).
@@ -80,6 +82,14 @@ export type CopperStackProps = StackProps & {
   freePoolMonthlyUsd: number;
   /** Deploy the scripted test model (broker/src/cloud/testing/) — never in prod. */
   testModel: boolean;
+  /**
+   * Lambda concurrency kept for the public MCP endpoint, and so the most it can use of the
+   * account's: a flood at its address then cannot starve the agent. AWS requires 100 left
+   * unreserved, so it needs the account's limit raised first (it was 50 on 2026-10-16;
+   * `aws service-quotas request-service-quota-increase --service-code lambda
+   * --quota-code L-B99A9384 --desired-value 1000`). Unset: no reservation.
+   */
+  mcpReservedConcurrency?: number;
 };
 
 export class CopperStack extends Stack {
@@ -183,13 +193,15 @@ export class CopperStack extends Stack {
         extension,
         bytes: readFileSync(path.join(SIGN_IN, file)).toString("base64"),
       }));
-    new cognito.CfnManagedLoginBranding(this, "SignInStyle", {
-      userPoolId: users.userPoolId,
-      clientId: client.userPoolClientId,
-      useCognitoProvidedValues: false,
-      settings: JSON.parse(readFileSync(path.join(SIGN_IN, "style.json"), "utf8")),
-      assets: [...asset("FORM_LOGO", "logo.png", "PNG"), ...asset("FAVICON_ICO", "favicon.ico", "ICO")],
-    });
+    const signInStyle = (id: string, clientId: string) =>
+      new cognito.CfnManagedLoginBranding(this, id, {
+        userPoolId: users.userPoolId,
+        clientId,
+        useCognitoProvidedValues: false,
+        settings: JSON.parse(readFileSync(path.join(SIGN_IN, "style.json"), "utf8")),
+        assets: [...asset("FORM_LOGO", "logo.png", "PNG"), ...asset("FAVICON_ICO", "favicon.ico", "ICO")],
+      });
+    signInStyle("SignInStyle", client.userPoolClientId);
 
     // ── storage ──────────────────────────────────────────────────────────
     const table = (id: string, sortKey?: string, timeToLive?: string) =>
@@ -222,6 +234,20 @@ export class CopperStack extends Stack {
     const connections = new dynamodb.TableV2(this, "Connections", {
       tableName: name("connections"),
       partitionKey: { name: "connectionId", type: dynamodb.AttributeType.STRING },
+      globalSecondaryIndexes: [
+        { indexName: "byUser", partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING } },
+      ],
+      timeToLiveAttribute: "expiresAt",
+      billing: dynamodb.Billing.onDemand(),
+      removalPolicy: RemovalPolicy.DESTROY,
+    });
+
+    // What the MCP endpoint remembers between requests: apps that registered, sign-ins
+    // under way, and hashes of the tokens it issued (broker/src/cloud/mcp-store.ts).
+    // Everything in it expires, and a person simply signs in again if it is lost.
+    const mcpAuth = new dynamodb.TableV2(this, "McpAuth", {
+      tableName: name("mcpauth"),
+      partitionKey: { name: "id", type: dynamodb.AttributeType.STRING },
       globalSecondaryIndexes: [
         { indexName: "byUser", partitionKey: { name: "userId", type: dynamodb.AttributeType.STRING } },
       ],
@@ -379,6 +405,67 @@ export class CopperStack extends Stack {
       }),
     );
 
+    // ── the MCP endpoint ─────────────────────────────────────────────────
+    // Where an AI app (Claude's custom connectors, any MCP client) is pointed to use a
+    // person's CopperOS: a public URL that signs people in itself (cloud/mcp-oauth.ts) and
+    // answers only to the tokens it issued. It starts tasks the way the relay does, and
+    // never calls the model, so it has no model key.
+    const mcpFn = fn("Mcp", "mcp.ts", {
+      memorySize: 512,
+      timeout: Duration.seconds(30),
+      ...(props.mcpReservedConcurrency ? { reservedConcurrentExecutions: props.mcpReservedConcurrency } : {}),
+      environment: {
+        ...shared,
+        AGENT_FUNCTION: agentFn.functionName,
+        USER_POOL_ID: users.userPoolId,
+        SIGN_IN_URL: signIn.baseUrl(),
+        MCP_AUTH_TABLE: mcpAuth.tableName,
+      },
+    });
+    for (const t of [usersTable, memories, workflows, chats, tasks, usage, connections, mcpAuth]) t.grantReadWriteData(mcpFn);
+    transcripts.grantReadWrite(mcpFn);
+    mcpFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ssm:GetParameter"],
+        resources: [jevParam, userKeysParam, limitsParam, runtimeParam].map(parameterArn),
+      }),
+    );
+    agentFn.grantInvoke(mcpFn);
+    // The sign-in finds its own app client by name (cloud/mcp-cognito.ts): the client's
+    // return address is this function's URL, so the function cannot be handed the client.
+    mcpFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ["cognito-idp:ListUserPoolClients"], resources: [users.userPoolArn] }),
+    );
+    const mcpUrl = mcpFn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
+    // Account deletion removes the tokens an AI app holds.
+    relayFn.addEnvironment("MCP_AUTH_TABLE", mcpAuth.tableName);
+    // Settings → MCP shows the address to add in Claude, and lists and disconnects the apps.
+    relayFn.addEnvironment("MCP_URL", `${mcpUrl.url}mcp`);
+    mcpAuth.grantReadWriteData(relayFn);
+
+    // The sign-in an AI app starts goes through the same page as the extension's, with its own
+    // return address. Only the code is used; a person's CopperOS token is never handed to the app.
+    const mcpClient = users.addClient("Mcp", {
+      userPoolClientName: "mcp",
+      generateSecret: false,
+      oAuth: {
+        flows: { authorizationCodeGrant: true },
+        scopes: [cognito.OAuthScope.OPENID, cognito.OAuthScope.EMAIL],
+        callbackUrls: [`${mcpUrl.url}callback`],
+        logoutUrls: [mcpUrl.url],
+      },
+      supportedIdentityProviders: [
+        ...(props.emailSignIn || !google ? [cognito.UserPoolClientIdentityProvider.COGNITO] : []),
+        ...(google ? [cognito.UserPoolClientIdentityProvider.GOOGLE] : []),
+      ],
+      accessTokenValidity: Duration.hours(1),
+      idTokenValidity: Duration.hours(1),
+      refreshTokenValidity: Duration.hours(1),
+      preventUserExistenceErrors: true,
+    });
+    if (google) mcpClient.node.addDependency(google);
+    signInStyle("McpSignInStyle", mcpClient.userPoolClientId);
+
     // Stripe calls this when money moves: a subscription began or ended, a month
     // was paid, a credit pack was bought. It is public because Stripe is the
     // caller, and it trusts nothing it is not able to verify: every request has
@@ -435,6 +522,45 @@ export class CopperStack extends Stack {
     );
     const feedbackUrl = feedbackFn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
 
+    // The welcome email: Cognito runs it once a person has signed up (an emailed code, or the first
+    // sign-in with Google) and it sends the email from broker/src/cloud/welcome-email.ts. It must
+    // never fail the sign-up, so it catches everything. It is not told the pool, which depends on it.
+    const welcomeFn = fn("Welcome", "welcome.ts", {
+      memorySize: 256,
+      timeout: Duration.seconds(5),
+      environment: {
+        ACCOUNTS_TABLE: usersTable.tableName,
+        FROM_ADDRESS: `no-reply@${props.emailDomain}`,
+        REPLY_TO: props.feedbackEmail,
+      },
+    });
+    usersTable.grantReadWriteData(welcomeFn);
+    welcomeFn.addToRolePolicy(
+      new iam.PolicyStatement({
+        actions: ["ses:SendEmail"],
+        resources: [
+          `arn:aws:ses:${this.region}:${this.account}:identity/*`,
+          `arn:aws:ses:${this.region}:${this.account}:configuration-set/*`,
+        ],
+        conditions: { StringEquals: { "ses:FromAddress": `no-reply@${props.emailDomain}` } },
+      }),
+    );
+    users.addTrigger(cognito.UserPoolOperation.POST_CONFIRMATION, welcomeFn);
+
+    // Where the Unsubscribe link in the "what's new" emails goes (broker/src/cloud/unsubscribe.ts). A
+    // public address, safe to be: a link only works for the person it was made for, by a signature
+    // made with the same secret the stored data is sealed with.
+    const unsubscribeFn = fn("Unsubscribe", "unsubscribe.ts", {
+      memorySize: 256,
+      timeout: Duration.seconds(10),
+      environment: { ACCOUNTS_TABLE: usersTable.tableName, USER_KEYS_PARAM: userKeysParam },
+    });
+    usersTable.grantReadWriteData(unsubscribeFn);
+    unsubscribeFn.addToRolePolicy(
+      new iam.PolicyStatement({ actions: ["ssm:GetParameter"], resources: [parameterArn(userKeysParam)] }),
+    );
+    const unsubscribeUrl = unsubscribeFn.addFunctionUrl({ authType: lambda.FunctionUrlAuthType.NONE });
+
     // ── the socket ───────────────────────────────────────────────────────
     // Browsers cannot set headers on a WebSocket, so the Cognito access
     // token comes in the query string.
@@ -454,7 +580,9 @@ export class CopperStack extends Stack {
     });
     socket.grantManageConnections(relayFn);
     socket.grantManageConnections(agentFn);
+    socket.grantManageConnections(mcpFn);
     const callbackUrl = socketStage.callbackUrl;
+    mcpFn.addEnvironment("SOCKET_CALLBACK_URL", callbackUrl);
     relayFn.addEnvironment("SOCKET_CALLBACK_URL", callbackUrl);
     agentFn.addEnvironment("SOCKET_CALLBACK_URL", callbackUrl);
     agentFn.addEnvironment("SOCKET_URL", socketStage.url);
@@ -485,7 +613,7 @@ export class CopperStack extends Stack {
     ses("Reputation.ComplaintRate", 0.0008, "EmailComplaints");
     // Any function failing outright — not a task's own error, which the
     // agent reports to the user, but a crash or a timeout.
-    for (const [id, f] of [["Authorize", authorizerFn], ["Relay", relayFn], ["Agent", agentFn], ["Feedback", feedbackFn], ["StripeWebhook", stripeWebhookFn]] as const) {
+    for (const [id, f] of [["Authorize", authorizerFn], ["Relay", relayFn], ["Agent", agentFn], ["Mcp", mcpFn], ["Welcome", welcomeFn], ["Unsubscribe", unsubscribeFn], ["Feedback", feedbackFn], ["StripeWebhook", stripeWebhookFn]] as const) {
       new cloudwatch.Alarm(this, `${id}Errors`, {
         alarmName: name(`${id.toLowerCase()}-errors`),
         metric: f.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
@@ -504,6 +632,10 @@ export class CopperStack extends Stack {
     new CfnOutput(this, "ClientId", { value: client.userPoolClientId });
     new CfnOutput(this, "SignInUrl", { value: signIn.baseUrl() });
     new CfnOutput(this, "FeedbackUrl", { value: feedbackUrl.url });
+    // For `npm run admin -- whats-new`: the address the emails' Unsubscribe links point at.
+    new CfnOutput(this, "UnsubscribeUrl", { value: unsubscribeUrl.url });
+    // The address to add as a custom connector in Claude (or any MCP client).
+    new CfnOutput(this, "McpUrl", { value: `${mcpUrl.url}mcp` });
     // Register this in Stripe: npm run stripe:setup -- --stage <stage> --webhook <this url>
     new CfnOutput(this, "StripeWebhookUrl", { value: stripeWebhookUrl.url });
 
