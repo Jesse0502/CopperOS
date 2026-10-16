@@ -31,26 +31,29 @@ if (stage === "guard") {
     spendCap,
     alertEmail: context("alertEmail"),
   });
-} else new CopperStack(app, `CopperOS-${stage}`, {
-  env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: "us-east-1" },
-  stage,
-  google: context("google") === "true",
-  extensionId: context("extensionId"),
-  devExtensionIds: String(app.node.tryGetContext("devExtensionIds") ?? "")
-    .split(",")
-    .map((id) => id.trim())
-    .filter(Boolean),
-  emailDomain: context("emailDomain"),
-  // Stages whose sign-in page offers an emailed code; add prod once SES
-  // production access is approved.
-  emailSignIn: context("emailSignIn").split(",").map((s) => s.trim()).includes(stage),
-  alertEmail: context("alertEmail"),
-  feedbackEmail: context("feedbackEmail"),
-  freeWeeklyUsd: Number(app.node.tryGetContext("freeWeeklyUsd") ?? 2),
-  freePoolMonthlyUsd: Number(app.node.tryGetContext("freePoolMonthlyUsd") ?? 50),
-  testModel: context("testModel") === "true",
-  // Set with -c mcpReservedConcurrency=100 once the account's Lambda concurrency limit allows it.
-  ...(app.node.tryGetContext("mcpReservedConcurrency")
-    ? { mcpReservedConcurrency: Number(app.node.tryGetContext("mcpReservedConcurrency")) }
-    : {}),
-});
+} else {
+  const mcpReserved = Number(app.node.tryGetContext("mcpReservedConcurrency") ?? (stage === "prod" ? 100 : 0));
+  new CopperStack(app, `CopperOS-${stage}`, {
+    env: { account: process.env.CDK_DEFAULT_ACCOUNT, region: "us-east-1" },
+    stage,
+    google: context("google") === "true",
+    extensionId: context("extensionId"),
+    devExtensionIds: String(app.node.tryGetContext("devExtensionIds") ?? "")
+      .split(",")
+      .map((id) => id.trim())
+      .filter(Boolean),
+    emailDomain: context("emailDomain"),
+    // Stages whose sign-in page offers an emailed code; add prod once SES
+    // production access is approved.
+    emailSignIn: context("emailSignIn").split(",").map((s) => s.trim()).includes(stage),
+    alertEmail: context("alertEmail"),
+    feedbackEmail: context("feedbackEmail"),
+    freeWeeklyUsd: Number(app.node.tryGetContext("freeWeeklyUsd") ?? 2),
+    freePoolMonthlyUsd: Number(app.node.tryGetContext("freePoolMonthlyUsd") ?? 50),
+    testModel: context("testModel") === "true",
+    // Lambda concurrency kept for the public MCP endpoint. Prod keeps 100 of the account's 1000, so a
+    // flood at its address cannot starve the agent; other stages keep none. Override with
+    // -c mcpReservedConcurrency=<n> (0 for none).
+    ...(mcpReserved > 0 ? { mcpReservedConcurrency: mcpReserved } : {}),
+  });
+}

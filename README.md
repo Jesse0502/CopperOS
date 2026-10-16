@@ -875,16 +875,19 @@ AWS_PROFILE=jassydev STAGE=prod npm run admin -- ai-revoke someone@gmail.com
 Deploying it is the stack deploy above; it adds the table, the Lambda, its URL and
 the `mcp` app client, and needs no Parameter Store values of its own.
 
-**Concurrency.** The function's URL is public, so a flood at it takes Lambda concurrency
-from the agent. The account's limit was 50 on 2026-10-16 where AWS's default is 1000, and
-every running task holds one for up to 15 minutes. Raise it, then reserve some for the
-connector (AWS needs 100 left unreserved, so this works only above that):
+**Concurrency.** The function's URL is public, so a flood at it could take Lambda concurrency from the
+agent, and every running task holds one for up to 15 minutes. Prod reserves 100 of the account's 1000 for
+the connector (`mcpReservedConcurrency` in `infra/bin/copperos.ts`), so it can never use more than that and
+the other 900 are the agent's and the relay's. Other stages reserve none. AWS requires 100 to stay
+unreserved. The account's limit was 50 until 2026-10-17; it was raised with:
 
 ```bash
 aws service-quotas request-service-quota-increase --service-code lambda \
   --quota-code L-B99A9384 --desired-value 1000 --profile jassydev --region us-east-1
-cd infra && npx cdk deploy -c stage=prod -c mcpReservedConcurrency=100 --profile jassydev
 ```
+
+To change the reservation, deploy with `-c mcpReservedConcurrency=<n>` (`0` for none). A deploy without
+the flag keeps what `bin/copperos.ts` says.
 
 ### The welcome email
 

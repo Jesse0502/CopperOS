@@ -85,9 +85,8 @@ export type CopperStackProps = StackProps & {
   /**
    * Lambda concurrency kept for the public MCP endpoint, and so the most it can use of the
    * account's: a flood at its address then cannot starve the agent. AWS requires 100 left
-   * unreserved, so it needs the account's limit raised first (it was 50 on 2026-10-16;
-   * `aws service-quotas request-service-quota-increase --service-code lambda
-   * --quota-code L-B99A9384 --desired-value 1000`). Unset: no reservation.
+   * unreserved. The account's limit was 50 until 2026-10-17, when the increase to 1000 came
+   * through; bin/copperos.ts reserves 100 on prod. Unset: no reservation.
    */
   mcpReservedConcurrency?: number;
 };
