@@ -954,7 +954,7 @@ AWS_PROFILE=jassydev npm run admin -- whats-new <id> --all --yes       # sends i
 ```
 
 `--all` is refused for a draft, and without `--yes` it only counts. It goes to the people in the sign-in pool
-who are confirmed (or signed in with Google) and have a verified address, minus anyone who unsubscribed
+who signed in with Google (Google vouches for the address; Cognito stores `email_verified` as false for all of them) or are confirmed with a verified address, minus anyone who unsubscribed
 and anyone who has had that announcement. Each person's account item keeps the ids they have been sent
 (`newsEmailed`), marked before the email goes, so running it again, or two runs at once, sends it once; a
 send that fails gives the mark back and the next run retries it. Every email has a signed one-click

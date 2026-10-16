@@ -258,7 +258,7 @@ switch (command) {
     const { recipients, unusable } = await listRecipients(await poolId());
     const out = await sendWhatsNew({ entry, recipients, unsubscribeBase: unsubscribeBase(), dryRun: !yes, delayMs: 100 });
     console.log(`"${entry.title}" (${entry.id})`);
-    console.log(`${out.recipients} people can be emailed${unusable ? `, ${unusable} sign-ins cannot (not confirmed, disabled or no verified address)` : ""}.`);
+    console.log(`${out.recipients} people can be emailed${unusable ? `, ${unusable} sign-ins cannot (not confirmed, disabled, or an unverified address)` : ""}.`);
     console.log(`${out.optedOut} unsubscribed, ${out.alreadySent} already had it.`);
     if (!yes) {
       console.log(`${out.wouldSend} would be sent it. Nothing was sent. To send: add --yes`);

@@ -108,7 +108,12 @@ async function release(userId: string, id: string): Promise<void> {
 
 export type Recipient = { userId: string; email: string };
 
-/** Everyone in the sign-in pool who can be emailed: enabled, confirmed (or signed in with Google), with a verified address. */
+/**
+ * Everyone in the sign-in pool who can be emailed: enabled, with an address, and either confirmed with a
+ * verified address or signed in with Google. Google vouches for the address of someone who signs in with
+ * it, but Cognito does not copy that across: every such account reads email_verified = false (all twelve
+ * in prod did on 2026-10-16), so for them the flag says nothing and is not asked.
+ */
 export async function listRecipients(
   poolId: string,
   cognito: Pick<CognitoIdentityProviderClient, "send"> = new CognitoIdentityProviderClient({}),
@@ -122,7 +127,8 @@ export async function listRecipients(
       const attr = (name: string) => u.Attributes?.find((a) => a.Name === name)?.Value;
       const sub = attr("sub");
       const email = attr("email");
-      const ok = u.Enabled !== false && (u.UserStatus === "CONFIRMED" || u.UserStatus === "EXTERNAL_PROVIDER") && attr("email_verified") === "true";
+      const federated = u.UserStatus === "EXTERNAL_PROVIDER";
+      const ok = u.Enabled !== false && (federated || (u.UserStatus === "CONFIRMED" && attr("email_verified") === "true"));
       if (!sub || !email || !ok) {
         unusable++;
         continue;
