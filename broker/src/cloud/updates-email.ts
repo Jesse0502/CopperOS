@@ -1,7 +1,8 @@
-// The email for what is new in a release or a major feature (updates.ts): the same entry the panel
-// shows as its dialog (website/announcements.json), so what people read in the panel and in their inbox
-// is one piece of writing. Black and copper like the welcome email, and every one carries a link to
-// unsubscribe from product updates.
+// The email for what is new in a release or a major feature (updates.ts). An entry in
+// website/announcements.json can carry its own email copy (`email`): a few short paragraphs in a plain,
+// left-aligned letter, written to be read as a note from a person and not as the panel's dialog. Without
+// it the email is built from the dialog's own fields, as a centered card. Black and copper like the welcome
+// email, and every one carries a link to unsubscribe from product updates.
 
 import { button, C, esc, FONT, footer, logoRow, shell, SITE } from "./email-kit.js";
 
@@ -15,6 +16,8 @@ export type WhatsNew = {
   /** A picture on the website. */
   image?: string;
   cta?: { label: string; url: string };
+  /** The email's own words. Paragraphs are plain text; the first is usually the greeting. */
+  email?: { subject?: string; paragraphs?: string[]; signoff?: string; label?: string };
 };
 
 export type UpdatesMail = { subject: string; html: string; text: string };
@@ -30,9 +33,65 @@ function point(text: string): string {
   );
 }
 
+/**
+ * A note: the entry's own paragraphs, left-aligned on the dark page with no card around them, a small
+ * mark at the top and a sign-off. Made to look unlike the panel's dialog.
+ */
+function letter(entry: WhatsNew, paragraphs: string[], unsubscribeUrl: string): UpdatesMail {
+  const subject = entry.email?.subject?.trim() || entry.title;
+  const signoff = entry.email?.signoff?.trim();
+  // What sits at the right of the header, such as the version.
+  const label = entry.email?.label?.trim();
+  const p = (text: string) => `<p style="margin:0 0 18px;font:400 16px/1.7 ${FONT};color:${C.text}">${esc(text)}</p>`;
+
+  const html = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="color-scheme" content="dark">
+<meta name="supported-color-schemes" content="dark">
+<title>${esc(subject)}</title>
+</head>
+<body style="margin:0;padding:0;background:${C.page};-webkit-text-size-adjust:100%">
+<div style="display:none;max-height:0;overflow:hidden;opacity:0;color:${C.page}">${esc(paragraphs.find((x) => x.length > 20) ?? subject)}&#8199;&zwnj;&#8199;&zwnj;&#8199;&zwnj;</div>
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" bgcolor="${C.page}" style="background:${C.page}">
+<tr><td align="center" style="padding:36px 20px 48px">
+<table role="presentation" width="560" cellpadding="0" cellspacing="0" border="0" style="width:100%;max-width:560px">
+<tr><td align="left" style="padding:0 0 28px">
+<table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+<td align="left" valign="middle">
+<table role="presentation" cellpadding="0" cellspacing="0" border="0"><tr>
+<td valign="middle" style="padding-right:10px"><img src="${SITE}/assets/logo.png" width="28" height="28" alt="" style="display:block;border:0"></td>
+<td valign="middle" style="font:600 15px/1 ${FONT};color:#ffffff;letter-spacing:-.01em">CopperOS</td>
+</tr></table>
+</td>
+${label ? `<td align="right" valign="middle" style="font:600 14px/1 ${FONT};color:${C.copper};text-align:right;white-space:nowrap">${esc(label)}</td>` : ""}
+</tr></table>
+</td></tr>
+<tr><td align="left" style="text-align:left">
+${paragraphs.map(p).join("\n")}
+${signoff ? `<p style="margin:26px 0 0;font:400 16px/1.7 ${FONT};color:${C.text}">${signoff.split("\n").map((l) => esc(l.trim())).join("<br>")}</p>` : ""}
+</td></tr>
+<tr><td align="left" style="padding:44px 0 0;border-top:0">
+<div style="height:1px;line-height:1px;background:${C.line};margin-bottom:16px">&nbsp;</div>
+<p style="margin:0;font:400 12.5px/1.6 ${FONT};color:${C.faint}">You're getting this as a CopperOS user. <a href="${esc(unsubscribeUrl)}" style="color:${C.faint};text-decoration:underline">Unsubscribe from product updates</a>.</p>
+</td></tr>
+</table>
+</td></tr>
+</table>
+</body>
+</html>`;
+
+  const text = [...paragraphs, ...(signoff ? [signoff] : []), "--", `You're getting this as a CopperOS user. Unsubscribe from product updates: ${unsubscribeUrl}`].join("\n\n");
+  return { subject, html, text };
+}
+
 /** The what's-new email. `unsubscribeUrl` is this person's own link. */
 export function whatsNewEmail(opts: { entry: WhatsNew; unsubscribeUrl: string }): UpdatesMail {
   const { entry, unsubscribeUrl } = opts;
+  const own = (entry.email?.paragraphs ?? []).map((x) => x.trim()).filter(Boolean);
+  if (own.length) return letter(entry, own, unsubscribeUrl);
   const subject = `${entry.tag ? `${entry.tag}: ` : ""}${entry.title}`;
   const points = entry.points ?? [];
   const cta = entry.cta && https(entry.cta.url) ? { label: entry.cta.label, url: entry.cta.url } : null;

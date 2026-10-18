@@ -248,7 +248,7 @@ switch (command) {
       if (!to?.includes("@")) fail("Say where to send it: whats-new <id> --test <email>");
       const link = await unsubscribeLink(unsubscribeBase(), "preview");
       await sendMail({ to: to!, ...whatsNewEmail({ entry, unsubscribeUrl: link }), headers: { "List-Unsubscribe": `<${link}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } });
-      console.log(`Sent "${entry.title}" to ${to}. Its Unsubscribe link is a test one: it changes nothing.`);
+      console.log(`Sent "${whatsNewEmail({ entry, unsubscribeUrl: link }).subject}" to ${to}. Its Unsubscribe link is a test one: it changes nothing.`);
       break;
     }
     if (arg !== "--all") fail("Say who: whats-new <id> --test <email>   or   whats-new <id> --all [--yes]");
@@ -257,7 +257,7 @@ switch (command) {
     const yes = process.argv.includes("--yes");
     const { recipients, unusable } = await listRecipients(await poolId());
     const out = await sendWhatsNew({ entry, recipients, unsubscribeBase: unsubscribeBase(), dryRun: !yes, delayMs: 100 });
-    console.log(`"${entry.title}" (${entry.id})`);
+    console.log(`Subject: "${whatsNewEmail({ entry, unsubscribeUrl: "https://example.com/" }).subject}" (${entry.id})`);
     console.log(`${out.recipients} people can be emailed${unusable ? `, ${unusable} sign-ins cannot (not confirmed, disabled, or an unverified address)` : ""}.`);
     console.log(`${out.optedOut} unsubscribed, ${out.alreadySent} already had it.`);
     if (!yes) {
