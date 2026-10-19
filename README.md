@@ -1,7 +1,7 @@
-<img width="1230" height="454" alt="CopperOS-Banner" src="https://github.com/user-attachments/assets/188a612f-5722-4d58-9184-9ea006a7e903" />
+<img width="1230" height="454" alt="CopperOS browser agent for Chrome" src="https://github.com/user-attachments/assets/188a612f-5722-4d58-9184-9ea006a7e903" />
 
 
-**CopperOS is an open-source AI agent for Chrome.** You type a task in a side
+**The CopperOS browser agent for Chrome is open source.** You type a task in a side
 panel, and it reads, clicks and types in your own tabs, signed in as you. Every
 step shows in the panel, and it asks before it submits anything.
 
