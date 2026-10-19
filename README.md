@@ -249,6 +249,22 @@ this too happens only with the supervisor on). The
 model's check-in answer becomes the handover note, so the next round knows
 how the work was being done and keeps doing it that way.
 
+### Text the agent enters
+
+With Jev on, everything the agent types, pastes or selects, and every block it writes into a Google
+Sheet, is checked before it goes in. Text that your messages, your `ask_user` answers or your saved
+memories back goes through, and so does a draft you told the assistant you liked.
+
+Anything else is refused, and the refusal tells the model it can call the same tool again with a
+`justification`: where the text came from and what it is for. A second Jev check reads that next to
+the task, the conversation, the pages the broker saw the agent open in this chat, and where the text
+or an address in it appears on those pages. A tagline or post the task asks for, and a link or version
+the agent read on a page, go through. A detail about you (an address, an age, experience, a screening
+answer) or an invented number for what you make is refused whatever the justification says, and so is
+a justification that names a page the agent never opened. If it is still refused, the model is told to
+ask you with `ask_user`; your yes backs the text. When the second check lets an entry through, the
+panel's log shows a Supervisor row that starts with "allowed".
+
 No API key is needed for a local model. `OLLAMA_API_KEY` is sent if set, for
 remote or cloud-hosted Ollama endpoints that require one.
 

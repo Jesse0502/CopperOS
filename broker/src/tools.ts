@@ -17,6 +17,7 @@ import {
 } from "./bridge.js";
 import {
   checkGrounded,
+  checkJustified,
   jevOn,
   judgeAction,
   judgeJobFit,
@@ -24,6 +25,7 @@ import {
   judgeOutcome,
   type JobFit,
   LIKELY_AT,
+  type Provenance,
   rankSources,
   type Source,
   type Turn,
@@ -278,6 +280,47 @@ async function jobFitGate(ref: string, label: string, why: string, ctx: ToolCtx)
 // account's page can never be read as another's, whatever the chat ids.
 const lastSnapshot = new Map<string, string>();
 
+// The pages the agent has opened in each chat, oldest first, and their text: where the words of an entry
+// could have come from. The broker fills this from what the extension reports, so what an entry's
+// justification says about its source can be checked against something the model cannot write to.
+type SeenPage = { url: string; title: string; text: string };
+const seenPages = new Map<string, SeenPage[]>();
+const SEEN_PAGES = 12;
+const SEEN_TEXT = 60_000;
+
+/** A chat's latest snapshot, and a note of the page it shows (its first two lines are `# title`, `# url`). */
+function setSnapshot(key: string, text: string): void {
+  lastSnapshot.set(key, text);
+  const [title, url] = text.split("\n");
+  if (!title?.startsWith("# ") || !url?.startsWith("# ")) return;
+  const list = (seenPages.get(key) ?? []).filter((p) => p.url !== url.slice(2).trim());
+  list.push({ url: url.slice(2).trim(), title: title.slice(2).trim(), text: text.slice(0, SEEN_TEXT) });
+  seenPages.set(key, list.slice(-SEEN_PAGES));
+}
+
+/** Text read from the page the latest snapshot shows (read_page), added to that page's note. */
+function addReadText(key: string, text: string): void {
+  const page = (seenPages.get(key) ?? []).find((p) => p.url === snapshotUrl(key));
+  if (page) page.text = `${page.text}\n${text}`.slice(0, SEEN_TEXT);
+}
+
+const URL_IN_TEXT = /https?:\/\/[^\s<>"'`)\]]+/g;
+const bareUrl = (u: string) => u.replace(/#.*$/, "").replace(/[/.,;:]+$/, "").toLowerCase();
+const flatten = (s: string) => ` ${s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim()} `;
+
+/** Where `value` was found in this chat's pages, and which pages were read at all. */
+function provenanceOf(value: string, key: string): Provenance {
+  const pages = seenPages.get(key) ?? [];
+  const addresses = (value.match(URL_IN_TEXT) ?? []).map(bareUrl);
+  const wanted = flatten(value);
+  const found_on: string[] = [];
+  for (const p of pages) {
+    if (addresses.includes(bareUrl(p.url))) found_on.push(`${p.url} (the value is this page's own address)`);
+    else if (wanted.trim().length >= 4 && flatten(p.text).includes(wanted)) found_on.push(`${p.url} (the value's words are on this page)`);
+  }
+  return { pages_read: pages.map(({ url, title }) => ({ url, title })), found_on };
+}
+
 /** The key the per-chat caches here use: the user and the chat, not the chat alone. */
 function chatKey(ctx: Pick<ToolCtx, "userId" | "chatId">): string {
   return `${ctx.userId}\n${ctx.chatId}`;
@@ -333,28 +376,30 @@ function saidVerbatim(value: string, texts: string[]): boolean {
 }
 
 /** Null when `value` may go into `ref` (or, with no ref, the focused element); otherwise why not. */
-function groundingGate(ref: string | undefined, value: string, ctx: ToolCtx): Promise<string | null> {
+function groundingGate(ref: string | undefined, value: string, ctx: ToolCtx, justification?: unknown): Promise<string | null> {
   const field = !ref
     ? "(the element that has keyboard focus — no ref was given)"
     : refLine(chatKey(ctx), ref)?.field ?? `(${ref} is not in the latest snapshot)`;
-  return checkEntry(field, value, ref ?? "focused element", ctx);
+  return checkEntry(field, value, ref ?? "focused element", ctx, justification);
 }
 
 /**
  * Null when `value` may go into the place `field` describes; otherwise why
  * not, as the tool result. `where` names it in the popup log. Values with no
  * letters or digits say nothing and are not checked.
+ *
+ * An entry the user's words do not back is not simply lost: the model can
+ * call the tool again with a `justification` (where the text came from, what
+ * it is for), and checkJustified reads that beside the task and the pages the
+ * broker saw it open. A tagline the task asks for, or a link from the user's
+ * own site, passes that way; a detail about the user does not.
  */
-async function checkEntry(field: string, value: string, where: string, ctx: ToolCtx): Promise<string | null> {
+async function checkEntry(field: string, value: string, where: string, ctx: ToolCtx, justification?: unknown): Promise<string | null> {
   if (!jevOn() || !/[\p{L}\p{N}]/u.test(value)) return null;
   const said = userSaid(ctx);
   const memories = (await memoriesBefore(ctx.userId, ctx.chatStartedAt)).map((m) => `${m.title}: ${m.content}`);
-  const verdict = await checkGrounded(
-    { field, value },
-    { user_messages: said, conversation: ctx.conversation, saved_memories: memories },
-    ctx.chatId,
-    ctx.signal,
-  );
+  const grounding = { user_messages: said, conversation: ctx.conversation, saved_memories: memories };
+  const verdict = await checkGrounded({ field, value }, grounding, ctx.chatId, ctx.signal);
   if (verdict?.ok) return null;
   // Jev did not answer — it has spells of timing out. What the user wrote,
   // word for word, needs no judge to be theirs, so a Jev outage never
@@ -364,6 +409,38 @@ async function checkEntry(field: string, value: string, where: string, ctx: Tool
     console.log(`[grounding] chat=${ctx.chatId} check failed; allowed as the user's own words — ${JSON.stringify(value.slice(0, 80))}`);
     return null;
   }
+  const couldNotCheck =
+    `Not entered: ${JSON.stringify(value)} could not be checked against the ` +
+    `user's messages and memories (the check failed). Try once more; if it ` +
+    `keeps failing, stop and tell the user.`;
+
+  // The model's own account of the text, read by a second check.
+  const account = typeof justification === "string" ? justification.trim().slice(0, 1000) : "";
+  if (verdict && account) {
+    const second = await checkJustified({ field, value }, grounding, account, provenanceOf(value, chatKey(ctx)), ctx.chatId, ctx.signal);
+    if (second?.ok) {
+      emit("supervisor", ctx.chatId, `allowed ${where} ⇐ ${preview(value)} — you said: ${preview(account, 140)}`);
+      return null;
+    }
+    emit(
+      "blocked",
+      ctx.chatId,
+      second
+        ? `${where} ⇐ ${preview(value)} — the reason given did not hold up`
+        : `${where} ⇐ ${preview(value)} — could not be checked: Jev did not answer`,
+    );
+    if (!second) return couldNotCheck;
+    return second.verdict === "about_user"
+      ? `Not entered: your justification was read and ${JSON.stringify(value)} still says something about the ` +
+          `user, or about what they make, that their messages and memories do not. A justification cannot supply ` +
+          `that. Cut those parts and try again, or ask the user with ask_user whether to use the text as it ` +
+          `is: their yes backs it.`
+      : `Not entered: your justification was read and does not fit what the user asked for. Say more exactly ` +
+          `where the text came from (a page you opened, or your own writing for their task) and what it is for, ` +
+          `or change the text so it serves the task. If it still does not fit, ask the user with ask_user ` +
+          `whether to use it: their yes backs it.`;
+  }
+
   emit(
     "blocked",
     ctx.chatId,
@@ -371,26 +448,32 @@ async function checkEntry(field: string, value: string, where: string, ctx: Tool
       ? `${where} ⇐ ${preview(value)} — not in your messages or memories`
       : `${where} ⇐ ${preview(value)} — could not be checked: Jev did not answer`,
   );
-  if (!verdict) {
-    return (
-      `Not entered: ${JSON.stringify(value)} could not be checked against the ` +
-      `user's messages and memories (the check failed). Try once more; if it ` +
-      `keeps failing, stop and tell the user.`
-    );
-  }
+  if (!verdict) return couldNotCheck;
   return (
     `Not entered: nothing in the user's messages or saved memories backs ` +
     `entering ${JSON.stringify(value)} here. Do not guess, and never use ` +
     `details from the page or the job ad (such as the employer's address) ` +
-    `as the user's own. If it is a reply or post you wrote for them, cut ` +
-    `whatever it says about them or what they make that their messages and ` +
-    `memories do not, and try once more. If the field is optional, leave it ` +
-    `blank. If it is required, stop and ask the user for it — and once they ` +
-    `answer, save it with remember so it is on file next time.`
+    `as the user's own. If it is not a claim about the user — a tagline, ` +
+    `headline, post or reply the task asks you to write, facts about a ` +
+    `topic, or a link, name or version you read on a page — call this tool ` +
+    `again with the same text and a \`justification\`: where it came from ` +
+    `and what you will use it for. A separate check reads it and decides. ` +
+    `Otherwise, if it is a reply or post you wrote for them, cut whatever it ` +
+    `says about them or what they make that their messages and memories do ` +
+    `not, and try once more. If the field is optional, leave it blank. If it ` +
+    `is required, stop and ask the user for it — and once they answer, save ` +
+    `it with remember so it is on file next time.`
   );
 }
 
 const str = (description: string) => ({ type: "string" as const, description });
+
+/** On every tool that enters text: the model's account of a refused entry (see checkEntry). */
+const JUSTIFICATION = str(
+  "Only after this entry was refused as not backed by the user's words: where the text came from " +
+    "(a page you opened, your own writing for the task) and what you will use it for. A separate " +
+    "check reads it. It cannot back a detail about the user.",
+);
 
 /**
  * The page after an action, as the extension reports it: on the same page,
@@ -416,7 +499,7 @@ async function pageReport(page: PageReport | undefined, ctx: ToolCtx): Promise<C
   if (page.error) {
     return [{ type: "text", text: `(The page could not be read afterwards: ${page.error} Take a snapshot.)` }];
   }
-  if (page.snapshot) lastSnapshot.set(chatKey(ctx), page.snapshot);
+  if (page.snapshot) setSnapshot(chatKey(ctx), page.snapshot);
   if (!page.full) {
     return [{
       type: "text",
@@ -572,7 +655,7 @@ const snapshot: BrowserTool = {
       text: string; weak: string | null; interactiveCount: number;
     }>("snapshot", ctx.chatId, {}, undefined, ctx.signal);
     emit("snapshot", ctx.chatId, `${snap.interactiveCount} interactive elements`);
-    lastSnapshot.set(chatKey(ctx), snap.text);
+    setSnapshot(chatKey(ctx), snap.text);
     return withVision([{ type: "text", text: snap.text }], snap.weak, ctx);
   },
 };
@@ -623,6 +706,7 @@ const readPage: BrowserTool = {
   async run({ maxChars }, ctx) {
     const r = await call<{ text: string }>("read_page", ctx.chatId, { maxChars }, undefined, ctx.signal);
     emit("read", ctx.chatId, `${r.text.length} chars`);
+    addReadText(chatKey(ctx), r.text);
     return r.text || "(no readable text found)";
   },
 };
@@ -690,15 +774,16 @@ const type: BrowserTool = {
         ref: str('Text field ref, e.g. "e12". Omit to type into the focused element.'),
         text: str("Text to type"),
         submit: { type: "boolean", description: "Press Enter after typing" },
+        justification: JUSTIFICATION,
       },
       required: ["text"],
     },
   },
-  async run({ ref: rawRef, text, submit }, ctx) {
+  async run({ ref: rawRef, text, submit, justification }, ctx) {
     const ref = optionalRef(rawRef);
     const where = ref ?? "the focused element";
     const what = submit ? `Type into ${where} and submit: "${text}"` : `Type into ${where}: "${text}"`;
-    const blocked = await groundingGate(ref, String(text ?? ""), ctx);
+    const blocked = await groundingGate(ref, String(text ?? ""), ctx, justification);
     if (blocked) return blocked;
     if (submit) {
       await gate("submit", what, ctx);
@@ -780,17 +865,18 @@ const paste: BrowserTool = {
         ref: str('Text field ref, e.g. "e12". Omit to paste into the focused element.'),
         text: str("Text to paste"),
         submit: { type: "boolean", description: "Press Enter after pasting" },
+        justification: JUSTIFICATION,
       },
       required: ["text"],
     },
   },
-  async run({ ref: rawRef, text, submit }, ctx) {
+  async run({ ref: rawRef, text, submit, justification }, ctx) {
     const ref = optionalRef(rawRef);
     const where = ref ?? "the focused element";
     const what = submit
       ? `Paste into ${where} and submit: ${preview(text, 200)}`
       : `Paste into ${where}: ${preview(text, 200)}`;
-    const blocked = await groundingGate(ref, String(text ?? ""), ctx);
+    const blocked = await groundingGate(ref, String(text ?? ""), ctx, justification);
     if (blocked) return blocked;
     if (submit) {
       await gate("submit", what, ctx);
@@ -901,12 +987,13 @@ const selectOption: BrowserTool = {
       properties: {
         ref: str("Select element ref"),
         value: str("Visible label of the option to choose"),
+        justification: JUSTIFICATION,
       },
       required: ["ref", "value"],
     },
   },
-  async run({ ref, value }, ctx) {
-    const blocked = await groundingGate(ref, String(value ?? ""), ctx);
+  async run({ ref, value, justification }, ctx) {
+    const blocked = await groundingGate(ref, String(value ?? ""), ctx, justification);
     if (blocked) return blocked;
     emit("select", ctx.chatId, `${ref} ← ${value}`);
     return withPage(await call("select_option", ctx.chatId, { ref, value }, undefined, ctx.signal), ctx);
@@ -1032,11 +1119,12 @@ const sheetWrite: BrowserTool = {
           items: { type: "array", items: { type: "string" } },
           description: 'The values, row by row, e.g. [["Name", "Price"], ["Apple", "1.20"]]',
         },
+        justification: JUSTIFICATION,
       },
       required: ["start", "rows"],
     },
   },
-  async run({ start, rows }, ctx) {
+  async run({ start, rows, justification }, ctx) {
     const grid = cellRows(rows);
     if (!grid) {
       return 'Pass rows as a list of rows, each a list of cell values, e.g. rows: [["Name", "Price"], ["Apple", "1.20"]].';
@@ -1059,6 +1147,7 @@ const sheetWrite: BrowserTool = {
       grid.map((r) => r.join("\t")).join("\n").slice(0, 4000),
       `sheet ${at}`,
       ctx,
+      justification,
     );
     if (blocked) return blocked;
     await gate("click", what, ctx);
