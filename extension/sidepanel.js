@@ -45,6 +45,22 @@ chrome.runtime.onMessage.addListener((msg) => {
 
 const $ = (id) => document.getElementById(id);
 
+// The panel never scrolls as a page. If something does move it (a focus while Chrome is still
+// opening a narrow panel did), it goes straight back.
+addEventListener("scroll", () => {
+  if (scrollX || scrollY) scrollTo(0, 0);
+});
+
+// What a sighted person sees change on its own, said once for a screen reader: an approval to give,
+// a question, the end of a run, a reply. The run log itself stays quiet, since its steps and timer
+// change every second.
+function announce(text) {
+  const el = $("sr-live");
+  if (!el || !text) return;
+  el.textContent = "";
+  setTimeout(() => (el.textContent = text), 30);
+}
+
 // The panel opens on the mark and a moving line, and stays there until the
 // service worker has said where things stand — for at least a moment, so it
 // reads as a start and not a flash.
@@ -197,7 +213,7 @@ let lastMemories = null; // the last "memories" list from the broker, shown at o
 let memoriesTimer = null; // a request the broker has not answered yet
 let currentConfig = null; // last "config" message from the broker
 let workflows = null; // the saved workflows, from the last "workflows" message, or null until asked
-let libraryTab = "chats"; // which half of the Chats and workflows window is showing
+let moldsOpen = false;
 let offer = null; // the popup asking whether to keep a repeating task as a workflow: { chatId, text }
 let autoSave = null; // the popup's workflow, written up and saved without the editor: null, "drafting" or "saving"
 let toastTimer = null;
@@ -207,6 +223,8 @@ let workflowsTimer = null; // a request the broker has not answered yet
 let draftTimer = null;
 let afterReset = null; // what to do once a fresh chat is ready: { then, from (the chat left), timer }
 let moldDraft = false; // New mold was pressed: the next message is the person's idea for the mold
+let moldLink = null; // a library mold from the website is in the box, ready to run: { raw (as the page has it) }
+let moldLinkAt = 0; // when the last one taken was handed over, so one offered twice is taken once
 let usage = null; // last "usage" message from the hosted service: { usage, ownKey }
 let platformModel = ""; // the model the hosted service runs on, from the last "config"
 let ownKeyAllowed = false; // the plan allows it (Foundry): the service says, the switch obeys
@@ -712,7 +730,9 @@ function renderEvent(ev, live = false) {
   }
   if (kind === "say") {
     clearPending();
-    return addTheirs(text);
+    addTheirs(text);
+    if (live) announce(`CopperOS says: ${text.replace(/[*_`#>]/g, "").replace(/\s+/g, " ").trim().slice(0, 400)}`);
+    return;
   }
   if (kind === "rules") return addRules(text);
   if (kind === "think") return setThink(text);
@@ -720,6 +740,7 @@ function renderEvent(ev, live = false) {
     clearPending();
     if (run) finishRun(kind, text, at);
     else if (kind !== "done") addNote(kind === "error" ? "err" : "muted", text || (kind === "error" ? "Error" : "Stopped"));
+    if (live) announce(kind === "done" ? "Done." : kind === "error" ? `Stopped by an error. ${text}` : text || "Stopped.");
     return;
   }
   addStep(kind, text);
@@ -930,17 +951,36 @@ function renderGated() {
   renderRun();
 }
 
+let gateFrom = null; // what had focus before an approval appeared
+
 function showApproval(pending) {
+  const was = pendingApprovalId;
+  const gate = $("approval");
   pendingApprovalId = pending?.id ?? null;
-  $("approval").hidden = !pending;
+  gate.hidden = !pending;
   if (pending) {
     const { verb, obj, sub } = approvalParts(pending.text ?? "");
     $("approval-verb").textContent = verb;
     $("approval-obj").textContent = obj;
     $("approval-sub").textContent = sub;
     $("approval-sub").hidden = !sub;
+    if (was !== pending.id) {
+      // The box takes focus, not a button: Enter or Space can never approve by accident.
+      const here = document.activeElement;
+      if (here && here !== document.body && !gate.contains(here)) gateFrom = here;
+      announce(`Approval needed. ${[verb, obj, sub].filter(Boolean).join(" ")}`);
+      if (document.hasFocus()) gate.focus({ preventScroll: true });
+    }
   }
+  // The composer is hidden while a gate is up, so it is shown again before focus goes back to it.
   renderGated();
+  if (!pending) {
+    if (was !== null && (document.activeElement === document.body || gate.contains(document.activeElement))) {
+      const back = gateFrom?.isConnected && !gateFrom.disabled ? gateFrom : $("send");
+      back.focus({ preventScroll: true });
+    }
+    gateFrom = null;
+  }
 }
 
 // ── questions (ask_user) ─────────────────────────────────────────────────
@@ -951,9 +991,13 @@ function showApproval(pending) {
 function showAsk(pending) {
   const questions = pending?.ask?.questions ?? [];
   if (!pending || questions.length === 0) {
+    const had = ask !== null;
+    const lost = document.activeElement === document.body || $("ask").contains(document.activeElement);
     $("ask").hidden = true;
     ask = null;
     renderGated();
+    // Focus was inside the question; it goes back to the composer's button, which is shown again by now.
+    if (had && lost) $("send").focus({ preventScroll: true });
     return;
   }
   if (ask && ask.id === pending.id) return; // already on screen; keep the progress
@@ -968,6 +1012,8 @@ function showAsk(pending) {
   $("ask").hidden = false;
   renderAsk();
   renderGated();
+  announce(`CopperOS has a question. ${questions[0].question}`);
+  if (document.hasFocus() && !$("ask").contains(document.activeElement)) $("ask").focus({ preventScroll: true });
 }
 
 /** A question's answer as sent back: picked options, then anything typed; null when skipped. */
@@ -1141,12 +1187,14 @@ function renderChats(chats) {
   }
 }
 
-function openHistory(tab = "chats") {
+function openHistory() {
   historyOpen = true;
   closeSettings();
   closeMemories();
+  closeMolds();
   $("history-page").classList.add("on");
-  showLibraryTab(tab);
+  $("history-refresh").hidden = true;
+  loadChatsTab();
 }
 
 function closeHistory() {
@@ -1155,20 +1203,24 @@ function closeHistory() {
   $("history-refresh").hidden = true;
 }
 
-/** Past chats and saved workflows share one window; this is which of them shows. */
-function showLibraryTab(tab) {
-  libraryTab = tab;
-  for (const b of document.querySelectorAll("#library-tabs [role=tab]")) {
-    b.setAttribute("aria-selected", String(b.dataset.tab === tab));
-  }
-  $("history-list").hidden = tab !== "chats";
-  $("workflows-pane").hidden = tab !== "workflows";
-  $("history-refresh").hidden = true;
-  if (tab === "chats") loadChatsTab();
-  else loadWorkflowsTab();
+/** The Molds page, opened from the top bar: its own window, beside Chats. */
+function openMolds() {
+  moldsOpen = true;
+  closeSettings();
+  closeMemories();
+  closeHistory();
+  $("molds-page").classList.add("on");
+  $("molds-refresh").hidden = true;
+  loadWorkflowsTab();
 }
 
-const workflowsShown = () => historyOpen && libraryTab === "workflows";
+function closeMolds() {
+  moldsOpen = false;
+  $("molds-page").classList.remove("on");
+  $("molds-refresh").hidden = true;
+}
+
+const workflowsShown = () => moldsOpen;
 
 function loadChatsTab() {
   const list = $("history-list");
@@ -1182,10 +1234,6 @@ function loadChatsTab() {
   if (!cached) list.innerHTML = '<div id="history-loading"><span class="spinner"></span>Loading…</div>';
   $("history-refresh").hidden = !cached;
   port.postMessage({ type: "chats" });
-}
-
-for (const b of document.querySelectorAll("#library-tabs [role=tab]")) {
-  b.addEventListener("click", () => showLibraryTab(b.dataset.tab));
 }
 
 // ── settings ─────────────────────────────────────────────────────────────
@@ -1333,6 +1381,8 @@ $("ai-list").addEventListener("click", (e) => {
 
 // Named for copper on its way from the ground to the mark on the logo.
 const PLAN_NAMES = { ore: "Ore", ingot: "Ingot", facet: "Facet", foundry: "Foundry" };
+// The order plans are offered in.
+const PLAN_ORDER = ["ingot", "facet", "foundry"];
 
 /**
  * On the hosted service, a signed-in user runs on CopperOS's own model. On
@@ -1617,7 +1667,12 @@ function renderPlans() {
   $("plans-manage").hidden = !b.hasCustomer;
   $("plans-manage").disabled = buying !== null;
 
-  for (const p of b.plans) {
+  // The service lists plans by price, which puts Foundry first. Here it follows Facet.
+  const order = (p) => {
+    const i = PLAN_ORDER.indexOf(p.id);
+    return i === -1 ? PLAN_ORDER.length : i;
+  };
+  for (const p of [...b.plans].sort((x, y) => order(x) - order(y))) {
     const here = p.id === b.plan;
     const card = document.createElement("div");
     card.className = "plan-opt" + (here ? " current" : "");
@@ -1632,7 +1687,20 @@ function renderPlans() {
     const per = document.createElement("small");
     per.textContent = " /month";
     price.appendChild(per);
-    top.append(name, price);
+    top.append(name);
+    if (p.id === "foundry") {
+      // Your own key: said in the short form, and in full for a screen reader.
+      const pill = document.createElement("span");
+      pill.className = "plan-pill";
+      pill.title = "Bring your own key";
+      pill.append("BYOK");
+      const full = document.createElement("span");
+      full.className = "sr";
+      full.textContent = " (bring your own key)";
+      pill.append(full);
+      top.append(pill);
+    }
+    top.append(price);
     const blurb = document.createElement("div");
     blurb.className = "plan-opt-blurb";
     blurb.textContent = p.blurb;
@@ -1793,6 +1861,7 @@ function openSettings() {
   awaitingSave = false;
   setBusy($("settings-save"), false);
   closeHistory();
+  closeMolds();
   closeMemories();
   $("settings-page").classList.add("on");
   setSettingsStatus("");
@@ -1810,6 +1879,8 @@ function openSettings() {
 function closeSettings() {
   settingsOpen = false;
   closePlans();
+  closeMemories();
+  $("settings-page").inert = false;
   $("settings-page").classList.remove("on");
 }
 
@@ -1821,6 +1892,19 @@ for (const b of document.querySelectorAll(".seg [data-backend]")) {
     if (b.dataset.backend !== backend) port.postMessage({ type: "set_backend", backend: b.dataset.backend });
   });
 }
+
+// A set of radio buttons answers the arrow keys, as the platform's radio groups do.
+document.addEventListener("keydown", (e) => {
+  const b = e.target.closest?.('[role="radiogroup"] > [role="radio"]');
+  if (!b || !["ArrowRight", "ArrowDown", "ArrowLeft", "ArrowUp"].includes(e.key)) return;
+  const all = [...b.parentElement.querySelectorAll('[role="radio"]:not([hidden])')];
+  const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : -1;
+  const next = all[(all.indexOf(b) + step + all.length) % all.length];
+  e.preventDefault();
+  next.focus();
+  next.click();
+});
+
 $("account-btn").addEventListener("click", () => {
   if (!account) {
     signIn();
@@ -2057,8 +2141,10 @@ function setMemoryStatus(text, tone = "") {
 
 function openMemories() {
   memoriesOpen = true;
-  closeSettings();
   closeHistory();
+  closeMolds();
+  // Opened from Settings, it lies over Settings, and Back shows Settings again.
+  $("settings-page").inert = settingsOpen;
   $("memories-page").classList.add("on");
   setMemoryStatus("");
   const list = $("memory-list");
@@ -2074,6 +2160,7 @@ function openMemories() {
 
 function closeMemories() {
   memoriesOpen = false;
+  $("settings-page").inert = false;
   $("memories-page").classList.remove("on");
   $("memories-refresh").hidden = true;
 }
@@ -2172,7 +2259,11 @@ function memoriesResult(msg) {
 }
 
 $("memories").addEventListener("click", openMemories);
-$("memories-close").addEventListener("click", closeMemories);
+$("memories-close").addEventListener("click", () => {
+  closeMemories();
+  // Back to what it was opened from.
+  if (settingsOpen) $("memories").focus({ preventScroll: true });
+});
 /** Grows the box with what is typed, up to its CSS max-height; then it scrolls. */
 function resizeMemoryText() {
   const box = $("memory-text");
@@ -2251,6 +2342,7 @@ function runWorkflow(w) {
     return;
   }
   closeHistory();
+  closeMolds();
   const text = workflowPrompt(w);
   const go = () => sendTask(text, false, { fromMold: w.id });
   if ($("empty")) go();
@@ -2264,12 +2356,95 @@ function startNewMold() {
     return;
   }
   closeHistory();
+  closeMolds();
   // Nothing is sent yet: the person describes the mold first, in their own words.
   if ($("empty")) setMoldDraft(true);
   else startFreshChat(() => setMoldDraft(true));
 }
 
 $("mold-draft-cancel").addEventListener("click", () => setMoldDraft(false));
+
+// ── a mold from the website ──
+//
+// The library's Run in CopperOS button opens the panel with its mold in the message box, in a fresh
+// chat, with approvals no looser than the mold asks for. Nothing is sent until the person presses Enter.
+
+const LOOSENESS = { all: 0, submits: 1, none: 2 };
+
+/** "Mold: Name", then the steps, as the library writes it. */
+function splitMold(text) {
+  const m = text.match(/^Mold:[ \t]*(.+)\n+([\s\S]*)$/);
+  return m ? { name: m[1].trim(), steps: m[2].trim() } : { name: "Mold", steps: text };
+}
+
+function hideMoldLink() {
+  moldLink = null;
+  $("mold-link").hidden = true;
+}
+
+/** Approvals set to what the mold asks for, unless the person's are stricter already: a page never loosens them. */
+function presetApprovals(want) {
+  const have = $("approval-mode").value;
+  if (want in LOOSENESS && LOOSENESS[want] < LOOSENESS[have]) {
+    setApprovalMode(want);
+    port.postMessage({ type: "set_approval_mode", mode: want });
+  }
+}
+
+async function takeMoldFromSite(mold) {
+  if (typeof mold?.text !== "string") return;
+  // A panel in each window hears about it: the one for the window that was clicked takes it.
+  const here = await chrome.windows.getCurrent().catch(() => null);
+  if (here && mold.windowId !== here.id) return;
+  if (mold.at === moldLinkAt) return;
+  moldLinkAt = mold.at;
+  port.postMessage({ type: "mold_taken" });
+  if (running) {
+    showToast("A task is still running in this chat. Stop it, or wait, then press the button again.");
+    return;
+  }
+  if (!$("empty") && !connected) {
+    showToast("Not connected, so a new chat can't be started. Try again once it is.");
+    return;
+  }
+  closeHistory();
+  closeMolds();
+  closeSettings();
+  const { name, steps } = splitMold(mold.text);
+  const fill = () => {
+    setMoldDraft(false);
+    presetApprovals(mold.approvals);
+    moldLink = { raw: mold.text };
+    $("mold-link-name").textContent = name;
+    $("mold-link-note").textContent = mold.approvals ? `Approvals: ${MODE_TEXT[$("approval-mode").value]}.` : "";
+    $("mold-link").hidden = false;
+    task.value = workflowPrompt({ name, steps });
+    autoResize();
+    renderComposer();
+    // Enter sends from anywhere in the box; what is shown is the start of the mold.
+    task.focus({ preventScroll: true });
+    task.setSelectionRange(0, 0);
+    task.scrollTop = 0;
+  };
+  if ($("empty")) fill();
+  else startFreshChat(fill);
+}
+
+/** Keep it: the same text goes through New mold instead, to be asked about and saved. */
+$("mold-link-save").addEventListener("click", () => {
+  if (!moldLink) return;
+  task.value = moldLink.raw;
+  hideMoldLink();
+  autoResize();
+  setMoldDraft(true);
+});
+
+$("mold-link-cancel").addEventListener("click", () => {
+  hideMoldLink();
+  task.value = "";
+  autoResize();
+  renderComposer();
+});
 
 /** Opens a new chat as the New chat button does, and carries on once the broker has made it. */
 function startFreshChat(then) {
@@ -2302,10 +2477,10 @@ function renderWorkflowChips() {
 }
 
 function openWorkflows() {
-  openHistory("workflows");
+  openMolds();
 }
 
-/** The Workflows half of the window, as it opens. */
+/** The Molds page, as it opens. */
 function loadWorkflowsTab() {
   setWfStatus("");
   $("wf-new").disabled = !connected && !signedOut();
@@ -2315,7 +2490,7 @@ function loadWorkflowsTab() {
     return;
   }
   if (!workflows) $("wf-list").innerHTML = '<div id="wf-loading"><span class="spinner"></span>Loading…</div>';
-  $("history-refresh").hidden = !workflows;
+  $("molds-refresh").hidden = !workflows;
   askWorkflows({ type: "list_workflows" });
 }
 
@@ -2392,7 +2567,7 @@ function workflowItem(w) {
 
 function workflowsResult(msg) {
   clearTimeout(workflowsTimer);
-  if (libraryTab === "workflows") $("history-refresh").hidden = true;
+  $("molds-refresh").hidden = true;
   if (msg.error && moldSaved(msg.error)) return;
   if (msg.error) {
     // Written up for the popup and refused (say, 50 saved already): tell them there.
@@ -2423,7 +2598,7 @@ function workflowsResult(msg) {
     hideWorkflowOffer();
     const saved = workflows[0];
     if (saved) showToast(`Saved “${saved.name}” to your molds`, "Edit", () => {
-      openHistory("workflows");
+      openMolds();
       openEditor({ id: saved.id, name: saved.name, steps: saved.steps });
     });
   } else if (msg.done === "save_workflow") {
@@ -2784,6 +2959,7 @@ port.onMessage.addListener((msg) => {
       if (offer && msg.chatId !== offer.chatId) hideWorkflowOffer();
       // Another chat on screen: a mold being described was for the one left.
       if (moldDraft && (msg.chatId ?? null) !== viewedChatId) setMoldDraft(false);
+      if (moldLink && (msg.chatId ?? null) !== viewedChatId) hideMoldLink();
       viewedChatId = msg.chatId ?? null;
       resetLog();
       for (const ev of msg.events ?? []) renderEvent(ev);
@@ -2807,6 +2983,10 @@ port.onMessage.addListener((msg) => {
         afterReset = null;
         then();
       }
+      break;
+
+    case "open_mold":
+      void takeMoldFromSite(msg.mold);
       break;
 
     case "run_state":
@@ -2970,6 +3150,7 @@ function sendTask(text, fromBox = text === undefined, extras = {}) {
     extras = { ...extras, makeMold: true };
     setMoldDraft(false);
   }
+  hideMoldLink();
   // The log is not cleared: each task is a turn in one ongoing chat, and the
   // broker keeps the transcript. "New chat" is how you start over.
   pendingEcho = text;
@@ -2989,6 +3170,7 @@ function sendTask(text, fromBox = text === undefined, extras = {}) {
 task.addEventListener("input", () => {
   autoResize();
   renderComposer();
+  if (moldLink && !task.value.trim()) hideMoldLink();
 });
 
 task.addEventListener("keydown", (e) => {
@@ -3049,6 +3231,7 @@ $("send").addEventListener("click", () => (running ? cancelRun() : sendTask()));
 
 $("new-chat").addEventListener("click", () => {
   setMoldDraft(false);
+  hideMoldLink();
   port.postMessage({ type: "reset" });
   resetLog();
   hideWorkflowOffer();
@@ -3056,17 +3239,21 @@ $("new-chat").addEventListener("click", () => {
   showApproval(null);
   showAsk(null);
   closeHistory();
+  closeMolds();
   closeSettings();
 });
 
 $("history").addEventListener("click", () => openHistory());
 $("history-close").addEventListener("click", closeHistory);
+$("molds").addEventListener("click", () => openMolds());
+$("molds-close").addEventListener("click", closeMolds);
 
 document.addEventListener("keydown", (e) => {
   if (e.key !== "Escape") return;
   if (!$("suggest").hidden) closeSuggest();
   else if (memoriesOpen) closeMemories();
   else if (settingsOpen) closeSettings();
+  else if (moldsOpen) closeMolds();
   else if (historyOpen) closeHistory();
 });
 

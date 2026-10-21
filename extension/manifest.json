@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "CopperOS: Automate your browser with AI",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "description": "CopperOS is an Open-Source Agentic Browser Extension that lets AI perform tasks on your browser.",
   "homepage_url": "https://copper.jassydev.com",
   "permissions": [
@@ -15,6 +15,13 @@
     "identity"
   ],
   "host_permissions": ["<all_urls>"],
+  "content_scripts": [
+    {
+      "matches": ["https://copper.jassydev.com/*"],
+      "js": ["website-bridge.js"],
+      "run_at": "document_start"
+    }
+  ],
   "background": {
     "service_worker": "background.js",
     "type": "module"

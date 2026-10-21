@@ -26,6 +26,7 @@ import * as presence from "./presence.js";
 import * as workspace from "./workspace.js";
 import * as auth from "./auth.js";
 import { LOCAL_URL, cloud, getBackend, localBrokerRunning, setBackend } from "./backend.js";
+import { acceptMold, reachOpenPages, stillWaiting } from "./mold-link.js";
 
 // The UI lives in the side panel, not a popup: it stays open across tab
 // switches within a window instead of closing the moment focus leaves.
@@ -1178,6 +1179,54 @@ function broadcastToPanels(msg) {
   }
 }
 
+// ── a mold from the website ──────────────────────────────────────────────────
+//
+// The library's "Run in CopperOS" button (website-bridge.js) sends the mold here. The panel opens
+// and fills its message box with it; the person presses Enter. It waits here until the panel in
+// the window that was clicked answers with mold_taken, so a panel that opens slowly, or that Chrome
+// would not open for this click, still finds it (the page says to click the toolbar icon).
+
+let waitingMold = null;
+
+async function moldWaiting() {
+  waitingMold ??= (await chrome.storage.session.get("waitingMold").catch(() => ({}))).waitingMold ?? null;
+  if (!stillWaiting(waitingMold)) waitingMold = null;
+  return waitingMold;
+}
+
+async function offerMold(ports = panelPorts) {
+  const mold = await moldWaiting();
+  if (!mold) return;
+  for (const port of ports) {
+    try { port.postMessage({ type: "open_mold", mold }); } catch { panelPorts.delete(port); }
+  }
+}
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg?.type !== "open_mold") return;
+  const mold = acceptMold(msg, sender, chrome.runtime.id);
+  if (!mold) {
+    sendResponse({ ok: false });
+    return;
+  }
+  // Chrome opens the panel only for the click that asked, so this comes before anything else.
+  let opening;
+  try {
+    opening = chrome.sidePanel.open({ windowId: mold.windowId });
+  } catch (err) {
+    opening = Promise.reject(err);
+  }
+  waitingMold = mold;
+  chrome.storage.session.set({ waitingMold: mold }).catch(() => {});
+  opening
+    .then(() => true, () => false)
+    .then((opened) => {
+      void offerMold();
+      sendResponse({ ok: true, opened });
+    });
+  return true;
+});
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "sidepanel") return;
   panelPorts.add(port);
@@ -1196,6 +1245,8 @@ chrome.runtime.onConnect.addListener((port) => {
       panelPorts.delete(port);
       return;
     }
+    // A mold from the website that was waiting for a panel.
+    void offerMold([port]);
     announceTab({ force: true });
     // The live view was on when the panel last closed; pick it back up.
     if (session.watching && !screencast.isStreaming() && session.chatId) {
@@ -1218,6 +1269,11 @@ chrome.runtime.onConnect.addListener((port) => {
     // A worker just woken by this message has not read back which chat is
     // on screen yet; a Stop sent before that would name no chat at all.
     await ready;
+    if (msg.type === "mold_taken") {
+      waitingMold = null;
+      chrome.storage.session.remove("waitingMold").catch(() => {});
+      return;
+    }
     if (msg.type === "probe_local") {
       // Looking again may find a broker to offer.
       await probeLocalBroker(true);
@@ -1402,6 +1458,9 @@ chrome.runtime.onInstalled.addListener(({ reason, previousVersion }) => {
 chrome.runtime.onInstalled.addListener(({ reason }) => {
   if (reason === "install") void chrome.storage.local.set({ newsBaseline: Date.now() }).catch(() => {});
 });
+
+// Website pages already open get the script that makes the library's Run in CopperOS button work.
+chrome.runtime.onInstalled.addListener(() => void reachOpenPages());
 
 // ── suggestions ─────────────────────────────────────────────────────────────
 

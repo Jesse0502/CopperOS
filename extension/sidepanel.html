@@ -1,5 +1,5 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
     <title>CopperOS</title>
@@ -47,13 +47,13 @@
         );
         --text: #1d1c1a;
         --text-muted: #69645d;
-        --text-faint: #8a847b;
+        --text-faint: #68635b;
 
         --ok: #1a9c5c;
         --ok-soft: rgba(26, 156, 92, 0.12);
         --err: #d0334c;
         --err-soft: rgba(208, 51, 76, 0.1);
-        --warn: #a8650b;
+        --warn: #8f5608;
         --warn-soft: rgba(224, 162, 59, 0.16);
         --warn-line: rgba(224, 162, 59, 0.55);
         --gate-bg: #fbf3e3;
@@ -78,7 +78,7 @@
           );
           --text: #ece9e6;
           --text-muted: #a8a39c;
-          --text-faint: #8e8981;
+          --text-faint: #9a958d;
           --brand-soft: rgba(217, 119, 87, 0.14);
           --brand-text: #e8896b;
           --ok: #3fbf7f;
@@ -101,6 +101,12 @@
       body {
         height: 100%;
       }
+      /* Nothing here scrolls sideways. The pages that slide in wait off to the right, which
+         makes the document twice as wide, and a focus while Chrome was still opening a narrow
+         panel once scrolled the whole UI left and left it there. */
+      html {
+        overflow: hidden;
+      }
       body {
         position: relative;
         margin: 0;
@@ -108,10 +114,10 @@
         display: flex;
         flex-direction: column;
         height: 100vh;
-        overflow: hidden;
+        overflow: clip;
         background: var(--bg);
         color: var(--text);
-        font: 14px/1.5 var(--sans);
+        font: 0.875rem/1.5 var(--sans);
         -webkit-font-smoothing: antialiased;
       }
       [hidden] {
@@ -139,10 +145,9 @@
 
       /* Small labels: Martian Mono, capitals, a little air. */
       .lbl {
-        font: 500 10.5px/1.4 var(--mono);
+        font: 500 0.75rem/1.4 var(--mono);
         font-variation-settings: "wdth" 87.5;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
         color: var(--text-faint);
       }
 
@@ -184,15 +189,6 @@
         86%,
         100% {
           background-position: -60% 0;
-        }
-      }
-      @keyframes drift {
-        0%,
-        100% {
-          transform: translateY(0) rotate(-2deg);
-        }
-        50% {
-          transform: translateY(-3px) rotate(2deg);
         }
       }
       @media (prefers-reduced-motion: reduce) {
@@ -312,7 +308,7 @@
         justify-content: center;
         gap: 6px;
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         font-weight: 600;
         padding: 7px 13px;
         border-radius: 10px;
@@ -351,13 +347,13 @@
         border-color: var(--brand-solid-hover);
       }
       .btn.sm {
-        font-size: 12px;
+        font-size: 0.75rem;
         padding: 4px 9px;
       }
       .btn.wide {
         width: 100%;
         padding: 11px 14px;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
       }
       .ib {
         position: relative;
@@ -415,7 +411,7 @@
         align-items: center;
         gap: 5px;
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         font-weight: 600;
         padding: 0;
         border: none;
@@ -437,7 +433,7 @@
         color: var(--text);
       }
       .link.danger {
-        font-size: 12px;
+        font-size: 0.75rem;
         font-weight: 500;
         color: var(--err);
       }
@@ -457,49 +453,9 @@
         border-bottom: 1px solid var(--border);
       }
       .hd-title {
-        font-size: 14px;
+        font-size: 0.875rem;
         font-weight: 650;
         letter-spacing: -0.01em;
-      }
-      /* Chats | Workflows */
-      .tabs {
-        display: inline-flex;
-        gap: 2px;
-        padding: 3px;
-        border-radius: 10px;
-        background: var(--surface-2);
-      }
-      .tabs button {
-        padding: 5px 13px;
-        border: none;
-        border-radius: 8px;
-        background: transparent;
-        color: var(--text-muted);
-        font: inherit;
-        font-size: 12.5px;
-        font-weight: 600;
-        cursor: pointer;
-        transition:
-          background-color 0.15s ease,
-          color 0.15s ease;
-      }
-      .tabs button:hover {
-        color: var(--text);
-      }
-      .tabs button[aria-selected="true"] {
-        background: var(--bg);
-        color: var(--text);
-        box-shadow: inset 0 0 0 1px var(--border-2);
-      }
-      .tabs button:focus-visible {
-        outline: 2px solid var(--brand);
-        outline-offset: 1px;
-      }
-      #workflows-pane {
-        flex: 1;
-        min-height: 0;
-        display: flex;
-        flex-direction: column;
       }
       .hd .back {
         margin-left: -6px;
@@ -509,7 +465,7 @@
         align-items: center;
         gap: 9px;
         min-width: 0;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         font-weight: 600;
         color: var(--text-muted);
       }
@@ -555,7 +511,7 @@
         overflow: hidden;
         white-space: nowrap;
         text-overflow: ellipsis;
-        font: 500 11.5px/1.2 var(--mono);
+        font: 500 0.75rem/1.2 var(--mono);
         font-variation-settings: "wdth" 87.5;
       }
       .acts {
@@ -594,7 +550,7 @@
       }
       /* A question or an approval is waiting: everything else fades back. */
       body.gated #log {
-        opacity: 0.5;
+        opacity: 1;
       }
       body.gated #composer {
         display: none;
@@ -620,11 +576,8 @@
         --size: 44px;
         margin-bottom: 6px;
       }
-      #empty .hello .mark img {
-        animation: drift 8s ease-in-out infinite;
-      }
       #empty .ask-line {
-        font-size: 17px;
+        font-size: 1.0625rem;
         font-weight: 650;
         letter-spacing: -0.02em;
         text-align: center;
@@ -640,7 +593,7 @@
         gap: 8px;
         text-align: left;
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         padding: 10px 12px;
         border-radius: var(--r-md);
         border: 1px solid var(--border);
@@ -676,7 +629,7 @@
         border-radius: 14px 14px 4px 14px;
         background: var(--brand-solid);
         color: var(--brand-fg);
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
@@ -718,7 +671,7 @@
         border-radius: 14px 14px 14px 4px;
         background: var(--surface);
         border: 1px solid var(--border);
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         overflow-wrap: anywhere;
       }
       /* The model's replies, from a small, escaped markdown subset. */
@@ -741,16 +694,16 @@
         margin: 2px 0 4px;
       }
       .theirs .md-h1 {
-        font-size: 14.5px;
+        font-size: 0.90625rem;
       }
       .theirs .md-h2 {
-        font-size: 14px;
+        font-size: 0.875rem;
       }
       .theirs code {
         background: var(--code-bg);
         padding: 1px 4px;
         border-radius: 4px;
-        font: 12px/1.4 var(--mono);
+        font: 0.75rem/1.4 var(--mono);
         font-variation-settings: "wdth" 87.5;
       }
       .theirs pre {
@@ -785,10 +738,9 @@
         padding: 9px 10px;
       }
       .run-h .t {
-        font: 600 11px/1.3 var(--mono);
+        font: 600 0.75rem/1.3 var(--mono);
         font-variation-settings: "wdth" 87.5;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
       }
       .run.active .run-h .t::before {
         content: "";
@@ -802,7 +754,7 @@
         animation: pulse 1.4s ease-in-out infinite;
       }
       .run-h .meta {
-        font: 500 11px/1.3 var(--mono);
+        font: 500 0.75rem/1.3 var(--mono);
         font-variation-settings: "wdth" 87.5;
         color: var(--text-faint);
         font-variant-numeric: tabular-nums;
@@ -847,7 +799,7 @@
         border-radius: 99px;
         background: rgba(0, 0, 0, 0.6);
         color: #fff;
-        font-size: 10.5px;
+        font-size: 0.75rem;
         font-weight: 700;
         letter-spacing: 0.3px;
       }
@@ -861,7 +813,7 @@
       }
       .think {
         margin: 8px 10px 0;
-        font-size: 12px;
+        font-size: 0.75rem;
         font-style: italic;
         color: var(--text-faint);
         display: -webkit-box;
@@ -875,7 +827,7 @@
         border: none;
         background: none;
         font: inherit;
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-faint);
         cursor: pointer;
       }
@@ -894,7 +846,7 @@
         align-items: flex-start;
         gap: 10px;
         padding: 6px 0;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         color: var(--text-muted);
       }
       .s:not(:last-child)::after {
@@ -932,10 +884,9 @@
       }
       .s .l {
         margin-right: 6px;
-        font: 600 10px/1.4 var(--mono);
+        font: 600 0.75rem/1.4 var(--mono);
         font-variation-settings: "wdth" 87.5;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
         color: var(--text);
       }
       .s.warn .ic {
@@ -999,7 +950,7 @@
         padding: 0;
         border: none;
         background: none;
-        font: 500 11px/1.5 var(--mono);
+        font: 500 0.75rem/1.5 var(--mono);
         font-variation-settings: "wdth" 87.5;
         color: var(--text-faint);
         text-align: left;
@@ -1052,10 +1003,9 @@
         display: flex;
         align-items: center;
         gap: 7px;
-        font: 600 11px/1.4 var(--mono);
+        font: 600 0.75rem/1.4 var(--mono);
         font-variation-settings: "wdth" 87.5;
-        letter-spacing: 0.05em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
       }
       .gate-h .i,
       .gate-h .g {
@@ -1078,12 +1028,12 @@
       }
       #approval-what {
         margin: 8px 0 12px;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         overflow-wrap: anywhere;
       }
       #approval-sub {
         margin-top: 2px;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         color: var(--text-muted);
       }
       #ask {
@@ -1108,7 +1058,7 @@
       }
       #wf-pop-what {
         margin: 8px 0 12px;
-        font-size: 13px;
+        font-size: 0.8125rem;
         color: var(--text-muted);
       }
       #wf-pop .gate-actions .btn {
@@ -1129,7 +1079,7 @@
         background: var(--surface-2);
         border: 1px solid var(--border-2);
         box-shadow: 0 14px 34px -14px rgba(0, 0, 0, 0.6);
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         animation: gateIn 0.25s cubic-bezier(0.2, 0.8, 0.3, 1) both;
       }
       #toast-text {
@@ -1152,7 +1102,7 @@
       }
       #ask-intro {
         margin-top: -4px;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         color: var(--text-muted);
       }
       #ask-intro:empty {
@@ -1182,7 +1132,7 @@
         background: var(--bg);
         color: var(--text);
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         text-align: left;
         cursor: pointer;
         transition:
@@ -1247,7 +1197,7 @@
         background: var(--bg);
         color: inherit;
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         outline: none;
       }
       #ask-other:focus,
@@ -1271,7 +1221,8 @@
         padding: 10px 12px 12px;
         border-top: 1px solid var(--border);
       }
-      #mold-draft {
+      #mold-draft,
+      #mold-link {
         display: flex;
         align-items: flex-start;
         gap: 10px;
@@ -1279,18 +1230,32 @@
         padding: 9px 11px;
         border-radius: var(--r-md);
         background: var(--brand-soft);
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         line-height: 1.45;
       }
-      #mold-draft[hidden] {
+      #mold-draft[hidden],
+      #mold-link[hidden] {
         display: none;
       }
-      #mold-draft b {
+      #mold-draft b,
+      #mold-link b {
         color: var(--brand);
       }
       #mold-draft-cancel {
         flex: none;
-        font-size: 12px;
+        font-size: 0.75rem;
+      }
+      #mold-link > span:first-child {
+        flex: 1;
+        min-width: 0;
+      }
+      .mold-link-acts {
+        flex: none;
+        display: flex;
+        flex-direction: column;
+        align-items: flex-end;
+        gap: 2px;
+        font-size: 0.75rem;
       }
       /* Writing a mold's idea: the examples and saved molds are not what is being asked for. */
       body.mold-draft #chips,
@@ -1322,7 +1287,7 @@
         background: transparent;
         color: inherit;
         font: inherit;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         resize: none;
         outline: none;
       }
@@ -1365,7 +1330,7 @@
         background: transparent;
         color: inherit;
         font: inherit;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         resize: none;
         outline: none;
       }
@@ -1383,7 +1348,7 @@
         background: var(--surface-2);
         color: var(--text-muted);
         font: inherit;
-        font-size: 12px;
+        font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;
         transition:
@@ -1413,7 +1378,7 @@
         display: flex;
         align-items: flex-start;
         gap: 5px;
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-faint);
       }
       .rules-line .i {
@@ -1441,7 +1406,7 @@
         border-radius: 999px;
         background: var(--surface-2);
         color: var(--text-muted);
-        font-size: 12px;
+        font-size: 0.75rem;
         font-weight: 600;
         cursor: pointer;
         transition: color 0.15s ease;
@@ -1572,7 +1537,7 @@
         gap: 2px;
         padding: 6px;
       }
-      /* Saved memories, opened from the header. */
+      /* Saved memories, opened from Settings, and the molds page. */
       #memories-body,
       #workflows-body {
         flex: 1;
@@ -1598,7 +1563,7 @@
         background: var(--surface);
         color: inherit;
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         resize: vertical;
         outline: none;
       }
@@ -1625,10 +1590,9 @@
       }
       .mgroup {
         margin-top: 6px;
-        font-size: 11px;
+        font-size: 0.75rem;
         font-weight: 700;
-        letter-spacing: 0.03em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
         color: var(--text-faint);
       }
       .mitem {
@@ -1641,7 +1605,7 @@
         background: var(--surface);
       }
       .mitem .t {
-        font-size: 13px;
+        font-size: 0.8125rem;
         font-weight: 600;
         overflow-wrap: anywhere;
       }
@@ -1650,7 +1614,7 @@
         -webkit-line-clamp: 3;
         -webkit-box-orient: vertical;
         overflow: hidden;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         color: var(--text-muted);
         overflow-wrap: anywhere;
         white-space: pre-line;
@@ -1663,7 +1627,7 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        font-size: 11px;
+        font-size: 0.75rem;
         color: var(--text-faint);
       }
       .mitem .mt .link {
@@ -1675,7 +1639,7 @@
       #wf-loading {
         padding: 14px 12px;
         text-align: center;
-        font-size: 13px;
+        font-size: 0.8125rem;
         color: var(--text-faint);
       }
 
@@ -1708,7 +1672,7 @@
         -webkit-box-orient: vertical;
         max-height: calc(4.5em + 2px);
         overflow: hidden;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         color: var(--text-muted);
         white-space: pre-line;
         overflow-wrap: anywhere;
@@ -1735,7 +1699,7 @@
         background: var(--surface);
         color: inherit;
         font: inherit;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         outline: none;
       }
       #wf-steps {
@@ -1747,7 +1711,7 @@
         background: var(--surface);
         color: inherit;
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         line-height: 1.5;
         resize: vertical;
         outline: none;
@@ -1775,7 +1739,7 @@
         align-items: center;
         gap: 6px;
         padding: 2px 0;
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       .wf-offer .i {
         width: 12px;
@@ -1786,7 +1750,7 @@
       #history-loading {
         padding: 14px 12px;
         text-align: center;
-        font-size: 13px;
+        font-size: 0.8125rem;
         color: var(--text-faint);
       }
       .hitem {
@@ -1816,7 +1780,7 @@
         align-items: center;
         gap: 6px;
         min-width: 0;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         font-weight: 600;
       }
       .hitem .t span {
@@ -1825,7 +1789,7 @@
         text-overflow: ellipsis;
       }
       .hitem .mt {
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-faint);
       }
       /* A chat whose agent is working right now. */
@@ -1854,10 +1818,9 @@
         display: flex;
         align-items: center;
         gap: 7px;
-        font: 600 10.5px/1.4 var(--mono);
+        font: 600 0.75rem/1.4 var(--mono);
         font-variation-settings: "wdth" 87.5;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
         color: var(--brand-text);
       }
       .mold-h .i {
@@ -1865,7 +1828,7 @@
         height: 13px;
       }
       .mold-name {
-        font-size: 14px;
+        font-size: 0.875rem;
         font-weight: 650;
       }
       .mold-steps {
@@ -1873,7 +1836,7 @@
         padding: 9px 10px;
         border-radius: 8px;
         background: var(--bg);
-        font: 12.5px/1.55 var(--sans);
+        font: 0.78125rem/1.55 var(--sans);
         white-space: pre-wrap;
         overflow-wrap: anywhere;
         max-height: 220px;
@@ -1888,7 +1851,7 @@
         flex: 1;
       }
       .mold-note {
-        font-size: 12px;
+        font-size: 0.75rem;
         color: var(--text-muted);
       }
       .mold-note.err {
@@ -1925,14 +1888,14 @@
       }
       .set-h {
         margin: 0;
-        font-size: 14px;
+        font-size: 0.875rem;
         font-weight: 650;
         letter-spacing: -0.01em;
         color: var(--text);
       }
       .set-tag {
         margin: -6px 0 0;
-        font-size: 12px;
+        font-size: 0.75rem;
         line-height: 1.45;
         color: var(--text-muted);
       }
@@ -1962,7 +1925,7 @@
         background: transparent;
         color: var(--text-muted);
         font: inherit;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         font-weight: 600;
         cursor: pointer;
       }
@@ -1975,14 +1938,14 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         color: var(--text-muted);
       }
       #local-row {
-        font-size: 12.5px;
+        font-size: 0.78125rem;
       }
       #local-row .link {
-        font-size: 12.5px;
+        font-size: 0.78125rem;
       }
       #account-who {
         flex: 1;
@@ -2008,14 +1971,14 @@
         display: flex;
         align-items: baseline;
         gap: 8px;
-        font-size: 13px;
+        font-size: 0.8125rem;
       }
       #plan-name {
         font-weight: 700;
       }
       #plan-resets {
         margin-left: auto;
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-faint);
       }
       #plan-meter {
@@ -2042,7 +2005,7 @@
         background: var(--err);
       }
       #plan-line {
-        font-size: 12px;
+        font-size: 0.75rem;
         color: var(--text-muted);
       }
       #plan-card.out #plan-line {
@@ -2067,7 +2030,7 @@
         display: flex;
         align-items: baseline;
         gap: 8px;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
       }
       .ai-row .nm {
         font-weight: 600;
@@ -2075,7 +2038,7 @@
         overflow-wrap: anywhere;
       }
       .ai-row .when {
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-faint);
         white-space: nowrap;
       }
@@ -2095,7 +2058,7 @@
         border-radius: 8px;
         background: var(--surface-2);
         color: var(--text-muted);
-        font: 11px/1.4 var(--mono);
+        font: 0.75rem/1.4 var(--mono);
         overflow-wrap: anywhere;
         user-select: all;
       }
@@ -2103,7 +2066,7 @@
         display: flex;
         align-items: flex-start;
         gap: 8px;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         cursor: pointer;
       }
       .check input {
@@ -2148,18 +2111,18 @@
         display: flex;
         align-items: baseline;
         gap: 8px;
-        font-size: 13px;
+        font-size: 0.8125rem;
       }
       #plans-now-name {
         font-weight: 700;
       }
       #plans-now-tag {
         margin-left: auto;
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-faint);
       }
       #plans-now-line {
-        font-size: 12px;
+        font-size: 0.75rem;
         color: var(--text-muted);
       }
       #plans-manage {
@@ -2173,10 +2136,9 @@
       }
       .plans-h {
         margin: 6px 0 0;
-        font-size: 11.5px;
+        font-size: 0.75rem;
         font-weight: 700;
-        letter-spacing: 0.06em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
         color: var(--text-faint);
       }
       .plan-opt {
@@ -2197,22 +2159,34 @@
         gap: 8px;
       }
       .plan-opt-name {
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         font-weight: 700;
+      }
+      /* BYOK: the plan runs on your own key. */
+      .plan-pill {
+        align-self: center;
+        padding: 1px 8px;
+        border-radius: 999px;
+        border: 1px solid var(--brand-text);
+        background: var(--brand-soft);
+        color: color-mix(in srgb, var(--brand-text) 70%, var(--text));
+        font: 600 0.8125rem/1.4 var(--mono);
+        font-variation-settings: "wdth" 87.5;
+        letter-spacing: 0.01em;
       }
       .plan-opt-price {
         margin-left: auto;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         font-weight: 700;
         font-variant-numeric: tabular-nums;
       }
       .plan-opt-price small {
-        font-size: 11.5px;
+        font-size: 0.75rem;
         font-weight: 500;
         color: var(--text-faint);
       }
       .plan-opt-blurb {
-        font-size: 12px;
+        font-size: 0.75rem;
         line-height: 1.45;
         color: var(--text-muted);
       }
@@ -2221,13 +2195,13 @@
       }
       /* Darker than the blurb above it, so the renewal terms stand out. */
       .plan-opt-renews {
-        font-size: 12px;
+        font-size: 0.75rem;
         line-height: 1.4;
         font-weight: 500;
         color: var(--text);
       }
       .plan-opt-here {
-        font-size: 11.5px;
+        font-size: 0.75rem;
         font-weight: 700;
         color: var(--brand-text);
       }
@@ -2270,17 +2244,17 @@
         cursor: default;
       }
       .pack-price {
-        font-size: 14px;
+        font-size: 0.875rem;
         font-weight: 700;
         font-variant-numeric: tabular-nums;
       }
       .pack-gets {
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-muted);
       }
       #plans-status {
         min-height: 1.3em;
-        font-size: 12px;
+        font-size: 0.75rem;
         color: var(--text-muted);
       }
       #plans-status.err {
@@ -2303,7 +2277,7 @@
       }
       #own-key-plans,
       #own-key-clear {
-        font-size: 12px;
+        font-size: 0.75rem;
       }
       #model-settings {
         display: flex;
@@ -2311,7 +2285,7 @@
         gap: 14px;
       }
       #model-offline {
-        font-size: 12.5px;
+        font-size: 0.78125rem;
         color: var(--text-muted);
       }
       .provider-block {
@@ -2328,7 +2302,7 @@
         gap: 5px;
       }
       .field > label {
-        font-size: 12px;
+        font-size: 0.75rem;
         font-weight: 600;
         color: var(--text-muted);
       }
@@ -2356,7 +2330,7 @@
         background: transparent;
         color: var(--text);
         font: inherit;
-        font-size: 13px;
+        font-size: 0.8125rem;
         outline: none;
       }
       .ctl select {
@@ -2374,13 +2348,13 @@
       }
       .ctl input.mono {
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-        font-size: 12.5px;
+        font-size: 0.78125rem;
       }
       .ctl .ib {
         margin-right: 2px;
       }
       .help {
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--text-faint);
       }
       #suggest-open {
@@ -2417,11 +2391,11 @@
       }
       .modal-card h2 {
         margin: 0;
-        font-size: 15px;
+        font-size: 0.9375rem;
         font-weight: 700;
       }
       .modal-card label {
-        font-size: 13px;
+        font-size: 0.8125rem;
         color: var(--text-muted);
       }
       #suggest-text {
@@ -2433,7 +2407,7 @@
         background: var(--surface);
         color: inherit;
         font: inherit;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         resize: vertical;
         outline: none;
       }
@@ -2479,18 +2453,17 @@
         border: 1px solid var(--brand);
         border-radius: 999px;
         color: var(--brand-text);
-        font: 600 10px/1 var(--mono);
-        letter-spacing: 0.07em;
-        text-transform: uppercase;
+        font: 600 0.75rem/1 var(--mono);
+        letter-spacing: 0.01em;
       }
       .wn-card h2 {
-        font-size: 22px;
+        font-size: 1.375rem;
         line-height: 1.2;
         letter-spacing: -0.02em;
       }
       #wn-lead {
         margin: 0;
-        font-size: 14px;
+        font-size: 0.875rem;
         line-height: 1.55;
         color: var(--text-muted);
       }
@@ -2503,7 +2476,7 @@
         flex-direction: column;
         gap: 9px;
         text-align: left;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         line-height: 1.45;
       }
       #wn-points li {
@@ -2545,25 +2518,8 @@
       .modal-card .gate-actions .spacer {
         flex: 1;
       }
-      .gh-link {
-        align-self: center;
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        margin-top: 2px;
-        font-size: 12px;
-        color: var(--text-faint);
-        text-decoration: none;
-      }
-      .gh-link:hover {
-        color: var(--text);
-      }
-      .gh-link .g {
-        width: 13px;
-        height: 13px;
-      }
       #settings-status {
-        font-size: 12px;
+        font-size: 0.75rem;
         color: var(--text-muted);
       }
       #settings-status:empty {
@@ -2595,14 +2551,14 @@
       }
       .screen h2 {
         margin: 0 0 6px;
-        font-size: 20px;
+        font-size: 1.25rem;
         font-weight: 650;
         line-height: 1.15;
         letter-spacing: -0.025em;
       }
       .screen p {
         margin: 0;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         line-height: 1.55;
         color: var(--text-muted);
       }
@@ -2623,7 +2579,7 @@
         }
       }
       .legal {
-        font-size: 11.5px !important;
+        font-size: 0.75rem !important;
         color: var(--text-faint) !important;
       }
       .legal a {
@@ -2642,15 +2598,14 @@
       body.cloud .secure {
         display: inline-flex;
         margin-top: 12px;
-        font: 500 10.5px/1.4 var(--mono);
+        font: 500 0.75rem/1.4 var(--mono);
         font-variation-settings: "wdth" 87.5;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
       }
       body.cloud .secure-note {
         display: flex;
         align-items: flex-start;
-        font-size: 12px;
+        font-size: 0.75rem;
         line-height: 1.45;
       }
       .secure .g,
@@ -2666,12 +2621,12 @@
         padding: 18px;
       }
       .signup-card h2 {
-        font-size: 18px;
+        font-size: 1.125rem;
         letter-spacing: -0.02em;
       }
       .signup-card p {
         margin: 0;
-        font-size: 13.5px;
+        font-size: 0.84375rem;
         line-height: 1.5;
         color: var(--text-muted);
       }
@@ -2688,7 +2643,7 @@
         display: flex;
         align-items: center;
         gap: 9px;
-        font-size: 13px;
+        font-size: 0.8125rem;
         color: var(--text);
       }
       .points .g {
@@ -2730,9 +2685,6 @@
         --size: 76px;
         z-index: 1;
       }
-      .boot .mark img {
-        animation: drift 7s ease-in-out infinite;
-      }
       .boot-bar {
         position: relative;
         z-index: 1;
@@ -2765,7 +2717,7 @@
         position: absolute;
         bottom: 22px;
         z-index: 1;
-        font-size: 12px;
+        font-size: 0.75rem;
         color: var(--text-faint);
       }
       #version {
@@ -2783,7 +2735,7 @@
         padding: 5px 5px 5px 10px;
         border-radius: 10px;
         background: var(--code-bg);
-        font: 12px/1.5 var(--mono);
+        font: 0.75rem/1.5 var(--mono);
         font-variation-settings: "wdth" 87.5;
       }
       .code span {
@@ -2794,10 +2746,9 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        font: 500 11px/1.4 var(--mono);
+        font: 500 0.75rem/1.4 var(--mono);
         font-variation-settings: "wdth" 87.5;
-        letter-spacing: 0.04em;
-        text-transform: uppercase;
+        letter-spacing: 0.01em;
         color: var(--text-faint);
       }
       .waiting .dot {
@@ -2813,11 +2764,192 @@
         gap: 6px 16px;
       }
       .note-small {
-        font-size: 11.5px;
+        font-size: 0.75rem;
         color: var(--err);
       }
       .note-small:empty {
         display: none;
+      }
+
+      /* ── for everyone: size, focus, targets, preferences ────────────────── */
+      /* Every size above is in rem, so Chrome's own text size applies. Nothing is smaller than
+         0.75rem (12px). */
+      html {
+        font-size: 100%;
+      }
+      .sr {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        margin: -1px;
+        padding: 0;
+        overflow: hidden;
+        clip-path: inset(50%);
+        white-space: nowrap;
+        border: 0;
+      }
+      /* One focus ring everywhere, 3:1 against every surface; the composer box takes it for the
+         text areas inside it. */
+      :focus-visible {
+        outline: 2px solid var(--brand-text);
+        outline-offset: 2px;
+      }
+      #ask-other:focus-visible,
+      #memory-text:focus-visible,
+      #wf-name:focus-visible,
+      #wf-steps:focus-visible,
+      #suggest-text:focus-visible,
+      .ctl input:focus-visible {
+        outline: 2px solid var(--brand-text);
+        outline-offset: 1px;
+      }
+      .inp:focus-within {
+        outline: 2px solid var(--brand-text);
+        outline-offset: 2px;
+      }
+      #task:focus-visible,
+      #rules:focus-visible {
+        outline: none;
+      }
+      /* Targets: 32 to 40px with a mouse, 44px and up on a touch screen. */
+      .ib {
+        width: 32px;
+        height: 32px;
+      }
+      .ib.sm {
+        width: 28px;
+        height: 28px;
+      }
+      .btn {
+        min-height: 32px;
+      }
+      .btn.sm {
+        min-height: 28px;
+        padding: 4px 10px;
+      }
+      .pill-btn {
+        min-height: 28px;
+        padding: 3px 10px 3px 8px;
+      }
+      #send {
+        width: 36px;
+        height: 36px;
+      }
+      /* At larger text the composer's row wraps, so no label is cut short. */
+      .inp .row {
+        flex-wrap: wrap;
+      }
+      .perm {
+        min-height: 28px;
+        padding: 3px 10px 3px 8px;
+      }
+      /* The select inside is invisible, so the pill carries the ring. */
+      .perm:has(select:focus-visible) {
+        outline: 2px solid var(--brand-text);
+        outline-offset: 2px;
+      }
+      .chip {
+        min-height: 40px;
+      }
+      .link,
+      .more,
+      .sum {
+        min-height: 24px;
+      }
+      @media (pointer: coarse) {
+        .ib,
+        .ib.sm {
+          width: 44px;
+          height: 44px;
+        }
+        .btn,
+        .btn.sm,
+        .pill-btn,
+        .link,
+        .more,
+        .sum {
+          min-height: 44px;
+        }
+        #send {
+          width: 48px;
+          height: 48px;
+        }
+      }
+      /* The device asks for more contrast. */
+      @media (prefers-contrast: more) {
+        :root {
+          --bg: #ffffff;
+          --surface: #f5f3ef;
+          --surface-2: #ebe8e2;
+          --border: rgba(0, 0, 0, 0.45);
+          --border-2: rgba(0, 0, 0, 0.7);
+          --text: #000000;
+          --text-muted: #34302b;
+          --text-faint: #46423c;
+          --brand-text: #8f3714;
+          --brand-solid: #8f3714;
+          --brand-solid-hover: #762c10;
+          --ok: #0b5a2e;
+          --err: #8f1226;
+          --warn: #6e4004;
+        }
+        .btn,
+        .ib,
+        .chip,
+        .pill-btn,
+        .inp {
+          border: 1px solid var(--text);
+        }
+      }
+      @media (prefers-contrast: more) and (prefers-color-scheme: dark) {
+        :root {
+          --bg: #000000;
+          --surface: #121110;
+          --surface-2: #1c1b1a;
+          --border: rgba(255, 255, 255, 0.45);
+          --border-2: rgba(255, 255, 255, 0.7);
+          --text: #ffffff;
+          --text-muted: #dcd8d2;
+          --text-faint: #c4bfb7;
+          --brand-text: #ffa585;
+          --ok: #6fe0a4;
+          --err: #ff8a9b;
+          --warn: #ffc766;
+        }
+      }
+      /* No see-through layers or blur when the device asks. */
+      @media (prefers-reduced-transparency: reduce) {
+        #whatsnew,
+        .overlay,
+        [class*="modal"],
+        #toast {
+          backdrop-filter: none !important;
+          -webkit-backdrop-filter: none !important;
+        }
+      }
+      /* Windows contrast themes: keep what is drawn with backgrounds. */
+      @media (forced-colors: active) {
+        .dot,
+        .s .ic,
+        .boot-bar i,
+        #send,
+        .btn.pr {
+          forced-color-adjust: none;
+        }
+        .dot {
+          background: CanvasText;
+        }
+        #send,
+        .btn.pr {
+          background: ButtonText;
+          color: ButtonFace;
+          border-color: ButtonText;
+        }
+        .inp:focus-within,
+        .chip:hover,
+        .ib:hover {
+          outline: 2px solid Highlight;
+        }
       }
     </style>
   </head>
@@ -2975,12 +3107,6 @@
         <symbol id="g-dot" viewBox="0 0 16 16">
           <circle cx="8" cy="8" r="2.2" fill="currentColor" />
         </symbol>
-        <symbol id="g-github" viewBox="0 0 16 16">
-          <path
-            fill="currentColor"
-            d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0016 8c0-4.42-3.58-8-8-8z"
-          />
-        </symbol>
         <symbol
           id="g-lock"
           viewBox="0 0 16 16"
@@ -3006,6 +3132,8 @@
         </symbol>
       </defs>
     </svg>
+
+    <div id="sr-live" class="sr" role="status" aria-live="polite" aria-atomic="true"></div>
 
     <div id="boot" class="boot" role="status" aria-label="Starting CopperOS">
       <span class="mark" aria-hidden="true"
@@ -3039,19 +3167,19 @@
           id="history"
           class="ib"
           type="button"
-          title="Chats and molds"
-          aria-label="Chats and molds"
+          title="Chats"
+          aria-label="Chats"
         >
           <i class="i i-hist"></i>
         </button>
         <button
-          id="memories"
+          id="molds"
           class="ib"
           type="button"
-          title="Saved memories"
-          aria-label="Saved memories"
+          title="Molds"
+          aria-label="Molds"
         >
-          <i class="i i-memory"></i>
+          <i class="i i-flow"></i>
         </button>
         <button
           id="settings"
@@ -3108,6 +3236,8 @@
         class="gate"
         role="alertdialog"
         aria-labelledby="approval-title"
+        aria-describedby="approval-what"
+        tabindex="-1"
         hidden
       >
         <div class="gate-h" id="approval-title">
@@ -3132,6 +3262,7 @@
         class="gate"
         role="dialog"
         aria-labelledby="ask-question"
+        tabindex="-1"
         hidden
       >
         <div class="gate-h">
@@ -3197,6 +3328,21 @@
             Cancel
           </button>
         </div>
+        <!-- A mold from the website's library, in the box and ready to run. -->
+        <div id="mold-link" hidden>
+          <span
+            ><b id="mold-link-name"></b> from the library.
+            <span id="mold-link-note"></span> Press Enter to run it.</span
+          >
+          <span class="mold-link-acts">
+            <button id="mold-link-save" class="link quiet" type="button">
+              Save as a mold instead
+            </button>
+            <button id="mold-link-cancel" class="link quiet" type="button">
+              Cancel
+            </button>
+          </span>
+        </div>
         <div class="inp">
           <textarea
             id="task"
@@ -3245,7 +3391,7 @@
       </div>
     </main>
 
-    <section id="history-page" class="page" aria-label="Chats and molds">
+    <section id="history-page" class="page" aria-label="Chats">
       <div class="hd">
         <button
           id="history-close"
@@ -3256,33 +3402,7 @@
         >
           <svg class="g"><use href="#g-back" /></svg>
         </button>
-        <div
-          id="library-tabs"
-          class="tabs"
-          role="tablist"
-          aria-label="Chats or molds"
-        >
-          <button
-            id="tab-chats"
-            type="button"
-            role="tab"
-            data-tab="chats"
-            aria-selected="true"
-            aria-controls="history-list"
-          >
-            Chats
-          </button>
-          <button
-            id="tab-workflows"
-            type="button"
-            role="tab"
-            data-tab="workflows"
-            aria-selected="false"
-            aria-controls="workflows-pane"
-          >
-            Molds
-          </button>
-        </div>
+        <span class="hd-title">Chats</span>
         <span
           id="history-refresh"
           class="spinner"
@@ -3291,26 +3411,41 @@
           hidden
         ></span>
       </div>
-      <div id="history-list" role="tabpanel" aria-labelledby="tab-chats"></div>
-      <div
-        id="workflows-pane"
-        role="tabpanel"
-        aria-labelledby="tab-workflows"
-        hidden
-      >
-        <div id="workflows-body">
-          <p class="help">
-            A mold is a task cast once and run again: saved as steps, it runs
-            in a fresh chat, so you never explain it twice. New mold: describe it
-            in your own words, and CopperOS asks about anything missing and
-            writes it up for you.
-          </p>
-          <div class="wf-bar">
-            <button id="wf-new" class="btn" type="button">New mold</button>
-          </div>
-          <div id="wf-status" class="help" role="status"></div>
-          <div id="wf-list"></div>
+      <div id="history-list"></div>
+    </section>
+
+    <section id="molds-page" class="page" aria-label="Molds">
+      <div class="hd">
+        <button
+          id="molds-close"
+          class="ib back"
+          type="button"
+          title="Back"
+          aria-label="Back"
+        >
+          <svg class="g"><use href="#g-back" /></svg>
+        </button>
+        <span class="hd-title">Molds</span>
+        <span
+          id="molds-refresh"
+          class="spinner"
+          role="status"
+          aria-label="Loading"
+          hidden
+        ></span>
+      </div>
+      <div id="workflows-body">
+        <p class="help">
+          A mold is a task saved as steps. It runs in a fresh chat, so you
+          never explain it twice. To make one, choose New mold and describe it
+          in your own words. CopperOS asks about anything missing and writes
+          it up for you.
+        </p>
+        <div class="wf-bar">
+          <button id="wf-new" class="btn" type="button">New mold</button>
         </div>
+        <div id="wf-status" class="help" role="status"></div>
+        <div id="wf-list"></div>
       </div>
     </section>
 
@@ -3375,6 +3510,13 @@
           </div>
         </section>
 
+        <section id="sec-memories" class="set-sec" aria-labelledby="h-memories">
+          <h3 id="h-memories" class="set-h">Saved memories</h3>
+          <p class="set-tag">What CopperOS keeps about you across every chat.</p>
+          <button id="memories" class="btn" type="button">
+            <i class="i i-memory"></i>Open saved memories
+          </button>
+        </section>
         <section id="sec-plan" class="set-sec" aria-labelledby="h-plan">
           <h3 id="h-plan" class="set-h">Plans &amp; credits</h3>
           <p class="set-tag">What you can use, and what is left of it.</p>
@@ -3635,13 +3777,6 @@
         <button id="settings-save" class="btn pr wide" type="button">
           Save
         </button>
-        <a
-          class="gh-link"
-          href="https://github.com/Jesse0502/CopperOS"
-          target="_blank"
-          rel="noopener"
-          ><svg class="g"><use href="#g-github" /></svg>Open source on GitHub</a
-        >
         <span id="version" class="lbl"></span>
       </div>
     </section>
