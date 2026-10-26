@@ -19,7 +19,7 @@ const MOLDS = [
 ];
 
 const MOLD_HELP =
-  "A mold is a task you save once and run again. In the panel, open Chats and molds (the clock icon) and choose New mold. Or start from one of these:";
+  "A mold is a task you save once and run again. In the panel, open Molds (the icon next to the clock) and choose New mold. Or start from one of these:";
 
 const INTRO = "CopperOS works in your own Chrome, signed in as you. Tell it what to do in plain words.";
 
