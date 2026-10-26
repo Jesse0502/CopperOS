@@ -174,19 +174,33 @@ export class CloudTransport implements Transport {
       });
     });
     // The browser that started the task may have reconnected since: try the
-    // one we know, then whichever is newest.
+    // one we know, then whichever is newest. This runs on its own and the
+    // caller gets `result` at once: sending can wait up to 30 s for a browser
+    // that is reconnecting, and the op's own timeout must not wait behind it
+    // (nor fire with nobody holding the promise yet, which ends the Lambda).
     const message = { id, op, params, chatId };
-    const delivered = await this.enqueue(async () => {
-      if (await post(await this.browser(), message)) return true;
+    void this.enqueue(async () => {
+      // Timed out or stopped while queued, or while a browser was waited for:
+      // nobody is waiting for the answer, so it must not run in the person's
+      // browser late.
+      if (!this.pending.has(id)) return false;
+      const first = await this.browser();
+      if (!this.pending.has(id)) return false;
+      if (await post(first, message)) return true;
       this.target = null;
-      return post(await this.browser(), message);
-    }).catch(() => false);
-    if (!delivered) {
-      const p = this.pending.get(id);
-      p?.reject(new Error("extension is not connected"));
-      if (p) clearTimeout(p.timer);
-      this.pending.delete(id);
-    }
+      const next = await this.browser();
+      if (!this.pending.has(id)) return false;
+      return post(next, message);
+    })
+      .catch(() => false)
+      .then((delivered) => {
+        if (delivered) return;
+        const p = this.pending.get(id);
+        if (!p) return; // answered, timed out or stopped already
+        clearTimeout(p.timer);
+        this.pending.delete(id);
+        p.reject(new Error("extension is not connected"));
+      });
     return result;
   }
 
