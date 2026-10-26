@@ -97,15 +97,15 @@ export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
   } catch {
     return { statusCode: 400 };
   }
+  // A ping only keeps the connection busy. Nobody reads a pong, and each
+  // message is billed, so it gets no answer and no lookup.
+  if (msg.type === "ping") return OK;
+
   const who = auth.userId
     ? { userId: auth.userId, kind: auth.kind ?? "extension" }
     : await getConnection(connectionId);
   if (!who) return { statusCode: 410 };
 
-  if (msg.type === "ping") {
-    await post(connectionId, { type: "pong" });
-    return OK;
-  }
   // A worker only keeps its connection alive; everything it says goes
   // straight to the browser.
   if (who.kind === "worker") return OK;

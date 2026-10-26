@@ -53,13 +53,19 @@ function runChanged(chatId, on) {
 const RECONNECT_MS = 2000;
 // After the hosted socket has turned us away a few times in a row, try less often.
 const REFUSED_BACKOFF_MS = 30000;
-const PING_MS = 20000;
+// The hosted socket closes after 10 minutes without a message. Every message is billed, so a ping goes
+// out every few minutes, not every few seconds.
+const PING_MS = 4 * 60_000;
+// MV3 stops a service worker 30 s after its last event or extension API call. A cheap API call every
+// 20 s keeps it, and so its socket, alive without sending anything.
+const AWAKE_MS = 20000;
 const KEEPALIVE_ALARM = "broker-keepalive";
 const MAX_EVENTS = 80;
 const TERMINAL = ["done", "error", "cancelled"];
 
 let ws = null;
 let pingTimer = null;
+let awakeTimer = null;
 let reconnectTimer = null;
 let connecting = false;
 const panelPorts = new Set();
@@ -901,9 +907,9 @@ function wire(sock) {
       pendingCancels.clear();
     })();
     clearInterval(pingTimer);
-    // MV3 kills idle service workers; steady WebSocket traffic keeps this one
-    // alive for the length of a run.
+    clearInterval(awakeTimer);
     pingTimer = setInterval(() => send({ type: "ping" }), PING_MS);
+    awakeTimer = setInterval(() => void chrome.runtime.getPlatformInfo().catch(() => {}), AWAKE_MS);
   };
 
   sock.onmessage = async (event) => {
@@ -1083,6 +1089,8 @@ function wire(sock) {
     if (ws !== sock) return; // superseded socket closing; not our problem
     clearInterval(pingTimer);
     pingTimer = null;
+    clearInterval(awakeTimer);
+    awakeTimer = null;
     ws = null;
     // The hosted socket refuses a bad token before it ever opens.
     if (!opened && backend === "cloud") refused++;
@@ -1113,6 +1121,8 @@ function disconnect() {
   reconnectTimer = null;
   clearInterval(pingTimer);
   pingTimer = null;
+  clearInterval(awakeTimer);
+  awakeTimer = null;
   const sock = ws;
   ws = null;
   try { sock?.close(); } catch { /* already closing */ }
