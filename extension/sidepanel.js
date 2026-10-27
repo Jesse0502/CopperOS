@@ -237,6 +237,7 @@ let buyingTimer = null;
 let awaiting = null; // a payment page is open: what to watch for, { plan, credits, until }
 let awaitingTimer = null;
 let awaitingSave = false; // true between clicking Save and its "config" echo
+let modelDirty = false; // the model form has edits that are not saved
 let viewedChatId = null;
 let pendingApprovalId = null;
 // The open ask_user form: { id, intro, questions, index, picks: Set[], other: string[] }
@@ -248,6 +249,8 @@ let lastChats = []; // most recent "chats" response, re-rendered when the flags 
 // The approval mode new chats start with ("Ask before" in Settings), or null
 // to leave it to the broker.
 let approvalDefault = null;
+// Whether the computer is kept awake while a task runs (Settings).
+let keepAwake = true;
 // Whether the viewed chat's tasks get supervisor check-ins.
 let supervisor = false;
 // The viewed chat's agent switch. Off, the extension refuses every browser
@@ -1252,6 +1255,23 @@ function setSettingsStatus(text, tone) {
   el.textContent = text || "";
   el.classList.toggle("err", tone === "err");
   el.classList.toggle("ok", tone === "ok");
+  renderFoot();
+}
+
+/** The bottom bar is there for what needs saving or saying, and only then. */
+function renderFoot() {
+  $("settings-save").hidden = !(modelDirty || awaitingSave);
+  $("settings-foot").hidden = $("settings-save").hidden && !$("settings-status").textContent;
+}
+
+/** A setting that took effect as it was changed. */
+let savedTimer = null;
+function flashSaved() {
+  setSettingsStatus("Saved", "ok");
+  clearTimeout(savedTimer);
+  savedTimer = setTimeout(() => {
+    if ($("settings-status").textContent === "Saved") setSettingsStatus("");
+  }, 1500);
 }
 
 function fillModelSelect(select, models, selected) {
@@ -1824,11 +1844,14 @@ $("jev-clear").addEventListener("click", () => {
   setSettingsStatus("");
   setBusy($("settings-save"), true);
   awaitingSave = true;
+  renderFoot();
   port.postMessage({ type: "set_config", patch: { jev: { apiKey: "", clear: true } } });
 });
 
 function applyConfig(cfg, model, allowed) {
   currentConfig = cfg;
+  modelDirty = false;
+  renderFoot();
   if (model) platformModel = model;
   if (typeof allowed === "boolean") ownKeyAllowed = allowed;
   $("cfg-provider").value = cfg.provider;
@@ -1859,6 +1882,7 @@ function requestModels(provider) {
 function openSettings() {
   settingsOpen = true;
   awaitingSave = false;
+  modelDirty = false;
   setBusy($("settings-save"), false);
   closeHistory();
   closeMolds();
@@ -1867,6 +1891,7 @@ function openSettings() {
   setSettingsStatus("");
   askBeforeShown = approvalDefault ?? "submits";
   $("cfg-ask-before").value = askBeforeShown;
+  $("cfg-keep-awake").checked = keepAwake;
   renderAccount();
   renderSettingsAvailability();
   if (connected) port.postMessage({ type: "get_config" });
@@ -1936,6 +1961,7 @@ $("own-key-clear").addEventListener("click", () => {
   setSettingsStatus("");
   setBusy($("settings-save"), true);
   awaitingSave = true;
+  renderFoot();
   port.postMessage({ type: "set_config", patch: { [provider]: { apiKey: "", clear: true } } });
 });
 
@@ -1966,22 +1992,32 @@ for (const p of ["openai", "openrouter", "jev"]) {
   });
 }
 
+// Preferences take effect as they are changed.
+$("cfg-ask-before").addEventListener("change", () => {
+  const mode = $("cfg-ask-before").value;
+  if (mode === askBeforeShown) return;
+  approvalDefault = mode;
+  askBeforeShown = mode;
+  port.postMessage({ type: "set_approval_default", mode });
+  flashSaved();
+});
+$("cfg-keep-awake").addEventListener("change", () => {
+  keepAwake = $("cfg-keep-awake").checked;
+  port.postMessage({ type: "set_keep_awake", on: keepAwake });
+  flashSaved();
+});
+
+// What the model form holds is saved together, with Save.
+function markModelDirty() {
+  modelDirty = true;
+  renderFoot();
+}
+$("model-settings").addEventListener("input", markModelDirty);
+$("model-settings").addEventListener("change", markModelDirty);
+
 $("settings-save").addEventListener("click", () => {
-  const askBefore = $("cfg-ask-before").value;
-  if (askBefore !== askBeforeShown) {
-    approvalDefault = askBefore;
-    askBeforeShown = askBefore;
-    port.postMessage({ type: "set_approval_default", mode: askBefore });
-  }
-  if (!connected) {
-    setSettingsStatus("Saved", "ok");
-    return;
-  }
   // Off Foundry, the cloud runs on CopperOS's own model: no provider, key or model to save.
-  if (backend === "cloud" && !ownKeyAllowed) {
-    setSettingsStatus("Saved", "ok");
-    return;
-  }
+  if (!connected || (backend === "cloud" && !ownKeyAllowed)) return;
   const provider = $("cfg-provider").value;
   const patch = {
     provider,
@@ -2003,6 +2039,7 @@ $("settings-save").addEventListener("click", () => {
   setSettingsStatus("");
   setBusy($("settings-save"), true);
   awaitingSave = true;
+  renderFoot();
   port.postMessage({ type: "set_config", patch });
   // A broker that errors instead of answering must not leave it spinning.
   setTimeout(() => {
@@ -2953,6 +2990,7 @@ port.onMessage.addListener((msg) => {
       setBusy($("account-btn"), signingIn);
       if (Array.isArray(msg.chats)) lastChats = msg.chats;
       approvalDefault = msg.approvalDefault ?? null;
+      keepAwake = msg.keepAwake !== false;
       localBrokerUp = msg.localBroker === true;
       localOffer = msg.localOffer === true;
       renderLocalOffer();

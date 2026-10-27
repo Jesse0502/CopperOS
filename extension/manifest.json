@@ -9,6 +9,7 @@
     "debugger",
     "storage",
     "alarms",
+    "power",
     "scripting",
     "tabGroups",
     "sidePanel",

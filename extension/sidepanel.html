@@ -1867,40 +1867,196 @@
         overflow-y: auto;
         display: flex;
         flex-direction: column;
-        gap: 16px;
-        padding: 12px;
+        gap: 20px;
+        padding: 14px 12px 20px;
       }
-      /* Settings is a stack of sections, each with a title, a line on what it is for, and only
-         what belongs to it. */
+      /* Settings is a stack of groups: a small label, then what is in it as rows in one card.
+         Plain preferences take effect as they are changed. Only the model form has a Save, and
+         it is there only while that form has changes. */
       .set-sec {
         display: flex;
         flex-direction: column;
-        gap: 10px;
-        padding-top: 16px;
-        border-top: 1px solid var(--border);
-      }
-      .set-sec:first-child {
-        padding-top: 0;
-        border-top: none;
+        gap: 8px;
       }
       .set-sec[hidden] {
         display: none;
       }
       .set-h {
-        margin: 0;
-        font-size: 0.875rem;
-        font-weight: 650;
-        letter-spacing: -0.01em;
-        color: var(--text);
+        margin: 0 2px;
+        font-size: 0.6875rem;
+        font-weight: 600;
+        letter-spacing: 0.07em;
+        text-transform: uppercase;
+        color: var(--text-muted);
       }
       .set-tag {
-        margin: -6px 0 0;
+        margin: 0 2px;
         font-size: 0.75rem;
         line-height: 1.45;
         color: var(--text-muted);
       }
       .set-sec.danger .set-h {
         color: var(--err);
+      }
+      .set-card {
+        display: flex;
+        flex-direction: column;
+        border: 1px solid var(--border);
+        border-radius: 10px;
+        background: var(--surface);
+        overflow: hidden;
+      }
+      .set-card > * + * {
+        border-top: 1px solid var(--border);
+      }
+      .set-card.set-pad {
+        gap: 14px;
+        padding: 12px;
+      }
+      .set-card.set-pad > * + * {
+        border-top: none;
+      }
+      .set-row,
+      .set-stack {
+        display: flex;
+        gap: 12px;
+        padding: 10px 12px;
+      }
+      .set-row {
+        align-items: center;
+        width: 100%;
+        min-height: 44px;
+        font: inherit;
+        color: var(--text);
+        text-align: left;
+        background: none;
+        border: none;
+        cursor: pointer;
+      }
+      button.set-row:hover,
+      summary.set-row:hover {
+        background: var(--surface-2);
+      }
+      .set-row:focus-visible {
+        outline: 2px solid var(--brand);
+        outline-offset: -2px;
+      }
+      .set-row .i,
+      .set-row > .g {
+        width: 15px;
+        height: 15px;
+        flex: none;
+        color: var(--text-muted);
+      }
+      .set-row .go {
+        width: 12px;
+        height: 12px;
+        color: var(--text-faint);
+        transform: rotate(-90deg);
+      }
+      .set-stack {
+        flex-direction: column;
+        gap: 8px;
+      }
+      .row-text {
+        flex: 1;
+        min-width: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 2px;
+      }
+      .row-title {
+        font-size: 0.8125rem;
+        font-weight: 600;
+        line-height: 1.35;
+      }
+      .row-sub {
+        font-size: 0.75rem;
+        line-height: 1.45;
+        color: var(--text-muted);
+      }
+      /* A checkbox drawn as the switch it is. */
+      .switch {
+        position: relative;
+        flex: none;
+        width: 34px;
+        height: 20px;
+        margin: 0;
+        border-radius: 999px;
+        border: 1px solid var(--border-2);
+        background: var(--surface-2);
+        appearance: none;
+        cursor: pointer;
+        transition:
+          background-color 0.15s ease,
+          border-color 0.15s ease;
+      }
+      .switch::after {
+        content: "";
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        width: 14px;
+        height: 14px;
+        border-radius: 50%;
+        background: var(--text-muted);
+        transition:
+          transform 0.15s ease,
+          background-color 0.15s ease;
+      }
+      .switch:checked {
+        background: var(--brand-solid);
+        border-color: var(--brand-solid);
+      }
+      .switch:checked::after {
+        transform: translateX(14px);
+        background: var(--brand-fg);
+      }
+      .switch:focus-visible {
+        outline: 2px solid var(--brand);
+        outline-offset: 2px;
+      }
+      .switch:disabled {
+        opacity: 0.45;
+        cursor: default;
+      }
+      @media (prefers-reduced-motion: reduce) {
+        .switch,
+        .switch::after,
+        .set-fold .go {
+          transition: none;
+        }
+      }
+      /* One that is closed until it is wanted. */
+      .set-fold > summary {
+        list-style: none;
+      }
+      .set-fold > summary::-webkit-details-marker {
+        display: none;
+      }
+      .set-fold[open] > summary .go {
+        transform: none;
+      }
+      .set-fold .go {
+        transition: transform 0.15s ease;
+      }
+      .set-fold-body {
+        display: flex;
+        flex-direction: column;
+        gap: 10px;
+        padding: 12px;
+      }
+      .set-row.flat {
+        min-height: 0;
+        padding: 0;
+        cursor: pointer;
+      }
+      .set-version {
+        text-align: center;
+      }
+      #settings-foot[hidden],
+      #settings-save[hidden] {
+        display: none;
       }
       .btn.danger {
         align-self: flex-start;
@@ -1938,8 +2094,9 @@
         display: flex;
         align-items: center;
         gap: 8px;
-        font-size: 0.78125rem;
-        color: var(--text-muted);
+        font-size: 0.8125rem;
+        font-weight: 600;
+        color: var(--text);
       }
       #local-row {
         font-size: 0.78125rem;
@@ -2061,17 +2218,6 @@
         font: 0.75rem/1.4 var(--mono);
         overflow-wrap: anywhere;
         user-select: all;
-      }
-      .check {
-        display: flex;
-        align-items: flex-start;
-        gap: 8px;
-        font-size: 0.78125rem;
-        cursor: pointer;
-      }
-      .check input {
-        flex: none;
-        margin: 2px 0 0;
       }
       #ai-status:empty {
         display: none;
@@ -2356,9 +2502,6 @@
       .help {
         font-size: 0.75rem;
         color: var(--text-faint);
-      }
-      #suggest-open {
-        align-self: flex-start;
       }
 
       /* ── a dialog over the panel ────────────────────────────────────────── */
@@ -3490,7 +3633,7 @@
           </div>
           <div id="account-row" hidden>
             <span id="account-who"></span>
-            <button id="account-btn" class="link" type="button"></button>
+            <button id="account-btn" class="btn sm" type="button"></button>
           </div>
           <div id="secure-note" class="secure-note">
             <svg class="g"><use href="#g-lock" /></svg
@@ -3510,16 +3653,8 @@
           </div>
         </section>
 
-        <section id="sec-memories" class="set-sec" aria-labelledby="h-memories">
-          <h3 id="h-memories" class="set-h">Saved memories</h3>
-          <p class="set-tag">What CopperOS keeps about you across every chat.</p>
-          <button id="memories" class="btn" type="button">
-            <i class="i i-memory"></i>Open saved memories
-          </button>
-        </section>
         <section id="sec-plan" class="set-sec" aria-labelledby="h-plan">
-          <h3 id="h-plan" class="set-h">Plans &amp; credits</h3>
-          <p class="set-tag">What you can use, and what is left of it.</p>
+          <h3 id="h-plan" class="set-h">Plan</h3>
           <div id="plan-card">
             <div class="plan-top">
               <span id="plan-name"></span>
@@ -3550,215 +3685,264 @@
           </div>
         </section>
 
-        <div id="ai-card" class="set-sec" hidden>
-          <h3 class="set-h">MCP</h3>
-          <p class="set-tag">Let your own LLM control CopperOS actions via MCP.</p>
-          <div class="help">
-            In Claude, open Settings, then Connectors, then Add custom connector,
-            and paste this address.
-          </div>
-          <div id="ai-url-row">
-            <code id="ai-url"></code>
-            <button id="ai-copy" class="btn sm" type="button">Copy</button>
-          </div>
-          <div id="ai-list"></div>
-          <div class="help">
-            An app can read your chats, memories and molds, and start and stop
-            tasks. Approvals and questions wait for you here.
-          </div>
-          <label class="check">
-            <input id="ai-loosen" type="checkbox" />
-            <span
-              >Let apps lower approvals, turn the supervisor off, and add
-              memories and molds</span
-            >
-          </label>
-          <div class="help">
-            Off, an app can only raise approvals. CopperOS treats memories and
-            molds as things you said.
-          </div>
-          <div id="ai-status" class="help" role="status"></div>
-        </div>
-
-        <section id="sec-providers" class="set-sec" aria-labelledby="h-providers">
-          <h3 id="h-providers" class="set-h">Providers</h3>
-          <p class="set-tag">The model and the keys CopperOS runs on.</p>
-          <div id="own-key-row" hidden>
-            <div id="own-key-help" class="help"></div>
-            <button id="own-key-plans" class="link" type="button" hidden>
-              See the Foundry plan
-            </button>
-            <button id="own-key-clear" class="link quiet" type="button" hidden>
-              Remove my saved API key
-            </button>
-          </div>
-          <div id="model-offline" hidden></div>
-          <div id="model-settings">
-            <div class="field">
-              <label for="cfg-provider">Provider</label>
+        <section id="sec-prefs" class="set-sec" aria-labelledby="h-prefs">
+          <h3 id="h-prefs" class="set-h">Preferences</h3>
+          <div class="set-card">
+            <div class="set-stack">
+              <label class="row-text" for="cfg-ask-before">
+                <span class="row-title">Default permissions</span>
+                <span class="row-sub">New chats ask you before:</span>
+              </label>
               <div class="ctl">
-                <select id="cfg-provider">
-                  <option value="ollama">Ollama (this computer)</option>
-                  <option value="openai">OpenAI</option>
-                  <option value="openrouter">OpenRouter</option>
+                <select id="cfg-ask-before">
+                  <option value="all">Every action</option>
+                  <option value="submits">Submits</option>
+                  <option value="none">Nothing</option>
                 </select>
                 <svg class="g chev"><use href="#g-chev" /></svg>
               </div>
+              <span class="row-sub">Change it for one chat next to Send.</span>
             </div>
-
-            <div id="block-ollama" class="provider-block">
-              <div class="field">
-                <label for="cfg-ollama-host">Ollama host</label>
-                <div class="ctl">
-                  <input
-                    id="cfg-ollama-host"
-                    type="text"
-                    placeholder="http://127.0.0.1:11434"
-                    spellcheck="false"
-                  />
-                </div>
-              </div>
-              <div class="field">
-                <label for="cfg-ollama-model"
-                  >Model
-                  <span class="spinner" id="cfg-ollama-loading" hidden></span
-                ></label>
-                <div class="ctl">
-                  <select id="cfg-ollama-model"></select
-                  ><svg class="g chev"><use href="#g-chev" /></svg>
-                </div>
-              </div>
-            </div>
-
-            <div id="block-openai" class="provider-block">
-              <div class="field">
-                <label for="cfg-openai-key">API key</label>
-                <div class="ctl">
-                  <input
-                    id="cfg-openai-key"
-                    class="mono"
-                    type="password"
-                    placeholder="sk-…"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <button
-                    id="cfg-openai-key-toggle"
-                    class="ib sm"
-                    type="button"
-                    title="Show key"
-                    aria-label="Show key"
-                  >
-                    <svg class="g"><use href="#g-eye" /></svg>
-                  </button>
-                </div>
-              </div>
-              <div class="field">
-                <label for="cfg-openai-model"
-                  >Model
-                  <span class="spinner" id="cfg-openai-loading" hidden></span
-                ></label>
-                <div class="ctl">
-                  <select id="cfg-openai-model"></select
-                  ><svg class="g chev"><use href="#g-chev" /></svg>
-                </div>
-              </div>
-            </div>
-
-            <div id="block-openrouter" class="provider-block">
-              <div class="field">
-                <label for="cfg-openrouter-key">API key</label>
-                <div class="ctl">
-                  <input
-                    id="cfg-openrouter-key"
-                    class="mono"
-                    type="password"
-                    placeholder="sk-or-…"
-                    autocomplete="off"
-                    spellcheck="false"
-                  />
-                  <button
-                    id="cfg-openrouter-key-toggle"
-                    class="ib sm"
-                    type="button"
-                    title="Show key"
-                    aria-label="Show key"
-                  >
-                    <svg class="g"><use href="#g-eye" /></svg>
-                  </button>
-                </div>
-              </div>
-              <div class="field">
-                <label for="cfg-openrouter-model"
-                  >Model
-                  <span class="spinner" id="cfg-openrouter-loading" hidden></span
-                ></label>
-                <div class="ctl">
-                  <select id="cfg-openrouter-model"></select
-                  ><svg class="g chev"><use href="#g-chev" /></svg>
-                </div>
-                <div class="help">
-                  Every model on OpenRouter that can use tools, which is what
-                  CopperOS needs to act in the browser. With the list open, type
-                  the start of one (anthropic/, google/) to jump to it.
-                </div>
-              </div>
-            </div>
-
-            <!-- Jev: the supervisor and the safety checks. On Foundry only with a key of the user's own. -->
-            <div id="jev-block" class="field">
-              <label for="cfg-jev-key">Jev API key</label>
-              <div class="ctl">
-                <input
-                  id="cfg-jev-key"
-                  class="mono"
-                  type="password"
-                  placeholder="From typesafe.ai"
-                  autocomplete="off"
-                  spellcheck="false"
-                />
-                <button
-                  id="cfg-jev-key-toggle"
-                  class="ib sm"
-                  type="button"
-                  title="Show key"
-                  aria-label="Show key"
+            <label class="set-row" for="cfg-keep-awake">
+              <span class="row-text">
+                <span class="row-title"
+                  >Keep this computer awake while a task is running</span
                 >
-                  <svg class="g"><use href="#g-eye" /></svg>
-                </button>
-              </div>
-              <div id="jev-help" class="help"></div>
-              <button id="jev-clear" class="link quiet" type="button" hidden>
-                Remove the saved Jev key
+                <span class="row-sub"
+                  >The screen can still turn off. Closing a laptop lid still
+                  puts it to sleep.</span
+                >
+              </span>
+              <input
+                id="cfg-keep-awake"
+                class="switch"
+                type="checkbox"
+                role="switch"
+              />
+            </label>
+          </div>
+        </section>
+
+        <section id="sec-providers" class="set-sec" aria-labelledby="h-providers">
+          <h3 id="h-providers" class="set-h">Providers</h3>
+          <div class="set-card set-pad">
+            <div id="own-key-row" hidden>
+              <div id="own-key-help" class="help"></div>
+              <button id="own-key-plans" class="link" type="button" hidden>
+                See the Foundry plan
+              </button>
+              <button id="own-key-clear" class="link quiet" type="button" hidden>
+                Remove my saved API key
               </button>
             </div>
+            <div id="model-offline" hidden></div>
+            <div id="model-settings">
+              <div class="field">
+                <label for="cfg-provider">Provider</label>
+                <div class="ctl">
+                  <select id="cfg-provider">
+                    <option value="ollama">Ollama (this computer)</option>
+                    <option value="openai">OpenAI</option>
+                    <option value="openrouter">OpenRouter</option>
+                  </select>
+                  <svg class="g chev"><use href="#g-chev" /></svg>
+                </div>
+              </div>
+
+              <div id="block-ollama" class="provider-block">
+                <div class="field">
+                  <label for="cfg-ollama-host">Ollama host</label>
+                  <div class="ctl">
+                    <input
+                      id="cfg-ollama-host"
+                      type="text"
+                      placeholder="http://127.0.0.1:11434"
+                      spellcheck="false"
+                    />
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="cfg-ollama-model"
+                    >Model
+                    <span class="spinner" id="cfg-ollama-loading" hidden></span
+                  ></label>
+                  <div class="ctl">
+                    <select id="cfg-ollama-model"></select
+                    ><svg class="g chev"><use href="#g-chev" /></svg>
+                  </div>
+                </div>
+              </div>
+
+              <div id="block-openai" class="provider-block">
+                <div class="field">
+                  <label for="cfg-openai-key">API key</label>
+                  <div class="ctl">
+                    <input
+                      id="cfg-openai-key"
+                      class="mono"
+                      type="password"
+                      placeholder="sk-…"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <button
+                      id="cfg-openai-key-toggle"
+                      class="ib sm"
+                      type="button"
+                      title="Show key"
+                      aria-label="Show key"
+                    >
+                      <svg class="g"><use href="#g-eye" /></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="cfg-openai-model"
+                    >Model
+                    <span class="spinner" id="cfg-openai-loading" hidden></span
+                  ></label>
+                  <div class="ctl">
+                    <select id="cfg-openai-model"></select
+                    ><svg class="g chev"><use href="#g-chev" /></svg>
+                  </div>
+                </div>
+              </div>
+
+              <div id="block-openrouter" class="provider-block">
+                <div class="field">
+                  <label for="cfg-openrouter-key">API key</label>
+                  <div class="ctl">
+                    <input
+                      id="cfg-openrouter-key"
+                      class="mono"
+                      type="password"
+                      placeholder="sk-or-…"
+                      autocomplete="off"
+                      spellcheck="false"
+                    />
+                    <button
+                      id="cfg-openrouter-key-toggle"
+                      class="ib sm"
+                      type="button"
+                      title="Show key"
+                      aria-label="Show key"
+                    >
+                      <svg class="g"><use href="#g-eye" /></svg>
+                    </button>
+                  </div>
+                </div>
+                <div class="field">
+                  <label for="cfg-openrouter-model"
+                    >Model
+                    <span class="spinner" id="cfg-openrouter-loading" hidden></span
+                  ></label>
+                  <div class="ctl">
+                    <select id="cfg-openrouter-model"></select
+                    ><svg class="g chev"><use href="#g-chev" /></svg>
+                  </div>
+                  <div class="help">
+                    Every model on OpenRouter that can use tools, which is what
+                    CopperOS needs to act in the browser. With the list open, type
+                    the start of one (anthropic/, google/) to jump to it.
+                  </div>
+                </div>
+              </div>
+
+              <!-- Jev: the supervisor and the safety checks. On Foundry only with a key of the user's own. -->
+              <div id="jev-block" class="field">
+                <label for="cfg-jev-key">Jev API key</label>
+                <div class="ctl">
+                  <input
+                    id="cfg-jev-key"
+                    class="mono"
+                    type="password"
+                    placeholder="From typesafe.ai"
+                    autocomplete="off"
+                    spellcheck="false"
+                  />
+                  <button
+                    id="cfg-jev-key-toggle"
+                    class="ib sm"
+                    type="button"
+                    title="Show key"
+                    aria-label="Show key"
+                  >
+                    <svg class="g"><use href="#g-eye" /></svg>
+                  </button>
+                </div>
+                <div id="jev-help" class="help"></div>
+                <button id="jev-clear" class="link quiet" type="button" hidden>
+                  Remove the saved Jev key
+                </button>
+              </div>
+            </div>
           </div>
         </section>
 
-        <section id="sec-permissions" class="set-sec" aria-labelledby="h-permissions">
-          <h3 id="h-permissions" class="set-h">Default permissions</h3>
-          <p class="set-tag">New chats ask you before:</p>
-          <div class="field">
-            <div class="ctl">
-              <select id="cfg-ask-before" aria-label="Default permissions">
-                <option value="all">Every action</option>
-                <option value="submits">Submits</option>
-                <option value="none">Nothing</option>
-              </select>
-              <svg class="g chev"><use href="#g-chev" /></svg>
-            </div>
-            <div class="help">
-              Change it for one chat next to Send.
-            </div>
+        <section id="sec-more" class="set-sec" aria-label="Memories and suggestions">
+          <div class="set-card">
+            <button id="memories" class="set-row" type="button">
+              <i class="i i-memory"></i>
+              <span class="row-text">
+                <span class="row-title">Saved memories</span>
+                <span class="row-sub"
+                  >What CopperOS keeps about you across every chat.</span
+                >
+              </span>
+              <svg class="g go"><use href="#g-chev" /></svg>
+            </button>
+            <button id="suggest-open" class="set-row" type="button">
+              <svg class="g"><use href="#g-mail" /></svg>
+              <span class="row-text">
+                <span class="row-title">Send a suggestion</span>
+                <span class="row-sub">Tell us what to fix or add.</span>
+              </span>
+              <svg class="g go"><use href="#g-chev" /></svg>
+            </button>
           </div>
         </section>
 
-        <section id="sec-suggest" class="set-sec" aria-labelledby="h-suggest">
-          <h3 id="h-suggest" class="set-h">Send a suggestion</h3>
-          <p class="set-tag">Tell us what to fix or add.</p>
-          <button id="suggest-open" class="btn" type="button">
-            <svg class="g"><use href="#g-mail" /></svg>Write a suggestion
-          </button>
+        <section id="ai-card" class="set-sec" hidden>
+          <details class="set-card set-fold">
+            <summary class="set-row">
+              <span class="row-text">
+                <span class="row-title">MCP</span>
+                <span class="row-sub"
+                  >Let your own LLM control CopperOS actions via MCP.</span
+                >
+              </span>
+              <svg class="g go"><use href="#g-chev" /></svg>
+            </summary>
+            <div class="set-fold-body">
+              <div class="help">
+                In Claude, open Settings, then Connectors, then Add custom connector,
+                and paste this address.
+              </div>
+              <div id="ai-url-row">
+                <code id="ai-url"></code>
+                <button id="ai-copy" class="btn sm" type="button">Copy</button>
+              </div>
+              <div id="ai-list"></div>
+              <div class="help">
+                An app can read your chats, memories and molds, and start and stop
+                tasks. Approvals and questions wait for you here.
+              </div>
+              <label class="set-row flat" for="ai-loosen">
+                <span class="row-text">
+                  <span class="row-title"
+                    >Let apps lower approvals, turn the supervisor off, and add
+                    memories and molds</span
+                  >
+                  <span class="row-sub"
+                    >Off, an app can only raise approvals. CopperOS treats memories
+                    and molds as things you said.</span
+                  >
+                </span>
+                <input id="ai-loosen" class="switch" type="checkbox" role="switch" />
+              </label>
+              <div id="ai-status" class="help" role="status"></div>
+            </div>
+          </details>
         </section>
 
         <section id="delete-sec" class="set-sec danger" aria-labelledby="h-delete" hidden>
@@ -3771,13 +3955,14 @@
             Delete account
           </button>
         </section>
+
+        <div class="set-version"><span id="version" class="lbl"></span></div>
       </div>
-      <div class="page-foot">
+      <div id="settings-foot" class="page-foot" hidden>
         <div id="settings-status" role="status"></div>
-        <button id="settings-save" class="btn pr wide" type="button">
+        <button id="settings-save" class="btn pr wide" type="button" hidden>
           Save
         </button>
-        <span id="version" class="lbl"></span>
       </div>
     </section>
 

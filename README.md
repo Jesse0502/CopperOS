@@ -584,6 +584,11 @@ A `chrome.alarms` heartbeat wakes the worker and reconnects if the socket died
 while the browser was in the background, since `setTimeout` does not survive
 worker termination.
 
+While a chat is running, `chrome.power.requestKeepAwake("system")` keeps the
+computer from sleeping; the screen can still turn off. It is released when the
+last running chat ends, when the socket drops, or when "Keep this computer
+awake while a task is running" under Settings, Preferences is turned off.
+
 ## The hosted service
 
 Someone who installs CopperOS from the Chrome Web Store signs in with Google

@@ -44,8 +44,35 @@ function driving(chatId, tabId) {
   void workspace.drive(chatId, tabId);
   if (chatId === session.chatId) announceTab();
 }
+// While a chat is running the computer is kept from sleeping (the screen may
+// still turn off), unless the person switched that off in Settings. The ops go
+// to this browser, so a sleeping computer stalls the task.
+let keepAwake = true;
+const runningChats = new Set();
+let awake = false;
+
+function syncKeepAwake(force = false) {
+  const want = keepAwake && runningChats.size > 0 && ws?.readyState === WebSocket.OPEN;
+  if (want === awake && !force) return;
+  awake = want;
+  try {
+    if (want) chrome.power.requestKeepAwake("system");
+    else chrome.power.releaseKeepAwake();
+  } catch {
+    // No power API here: nothing to keep awake.
+  }
+}
+
+function chatRunning(chatId, on) {
+  if (!chatId) return;
+  if (on) runningChats.add(chatId);
+  else runningChats.delete(chatId);
+  syncKeepAwake();
+}
+
 function runChanged(chatId, on) {
   if (!chatId) return;
+  chatRunning(chatId, on);
   presence.setActive(chatId, on, chatCtx(chatId).tabId);
   void workspace.setRunning(chatId, on, chatCtx(chatId).tabId);
 }
@@ -170,12 +197,15 @@ const ready = (async () => {
   backend = await getBackend();
   signedIn = await auth.account().catch(() => null);
   const stored = await chrome.storage.local
-    .get(["backend", "approvalDefault", "supervisorDefault"])
+    .get(["backend", "approvalDefault", "supervisorDefault", "keepAwake"])
     .catch(() => ({}));
   // There was once a per-chat agent switch. It is gone, and a chat left switched off must not stay blocked.
   chrome.storage.local.remove("agentOff").catch(() => {});
   approvalDefault = ["all", "submits", "none"].includes(stored.approvalDefault) ? stored.approvalDefault : null;
   supervisorDefault = typeof stored.supervisorDefault === "boolean" ? stored.supervisorDefault : null;
+  keepAwake = stored.keepAwake !== false;
+  // A request made by a worker that has since been recycled may still be held: start clean.
+  syncKeepAwake(true);
   try {
     const { [sessionKey()]: saved, tabsByChat: savedTabs } =
       await chrome.storage.session.get([sessionKey(), "tabsByChat"]);
@@ -262,6 +292,9 @@ function recordEvent(msg) {
   if (msg.event === "start" && chatId !== null && session.stopped[chatId]) {
     delete session.stopped[chatId];
   }
+  // Every chat counts, not only the one on screen.
+  if (chatId !== null && msg.event === "start") chatRunning(chatId, true);
+  if (chatId !== null && TERMINAL.includes(msg.event)) chatRunning(chatId, false);
 
   if (msg.event === "start" && forViewed) {
     session.running = true;
@@ -994,6 +1027,11 @@ function wire(sock) {
     // The saved-chats list, sent in answer to a "chats" request from the panel.
     if (msg.type === "chats") {
       session.chats = msg.chats ?? [];
+      for (const chat of session.chats) {
+        if (chat.running) runningChats.add(chat.id);
+        else runningChats.delete(chat.id);
+      }
+      syncKeepAwake();
       persist();
       broadcastToPanels({ type: "chats", chats: session.chats });
       return;
@@ -1092,6 +1130,9 @@ function wire(sock) {
     clearInterval(awakeTimer);
     awakeTimer = null;
     ws = null;
+    // Nothing can run in this browser while it is cut off, and a missed end of a run must not keep the computer awake.
+    runningChats.clear();
+    syncKeepAwake();
     // The hosted socket refuses a bad token before it ever opens.
     if (!opened && backend === "cloud") refused++;
     announce(false);
@@ -1125,6 +1166,8 @@ function disconnect() {
   awakeTimer = null;
   const sock = ws;
   ws = null;
+  runningChats.clear();
+  syncKeepAwake();
   try { sock?.close(); } catch { /* already closing */ }
 }
 
@@ -1301,6 +1344,12 @@ chrome.runtime.onConnect.addListener((port) => {
     }
     if (msg.type === "set_backend" && (msg.backend === "local" || msg.backend === "cloud")) {
       await switchBackend(msg.backend);
+      return;
+    }
+    if (msg.type === "set_keep_awake") {
+      keepAwake = msg.on === true;
+      await chrome.storage.local.set({ keepAwake }).catch(() => {});
+      syncKeepAwake();
       return;
     }
     if (msg.type === "set_approval_default" && ["all", "submits", "none"].includes(msg.mode)) {
@@ -1512,6 +1561,7 @@ function restoreMessage() {
     localBroker,
     localOffer: localOffer(),
     approvalDefault,
+    keepAwake,
   };
 }
 
