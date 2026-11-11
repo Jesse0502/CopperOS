@@ -9,9 +9,9 @@
 //   Google login. Exact displayed values, no pixels involved.
 // - Moving: the Name box, the field left of the formula bar that takes a
 //   cell or range ("B7", "A1:C5", "Sheet2!B2") and selects it.
-// - Writing: from a selected cell, keystrokes — the first character as a
-//   real key press, which opens the cell for editing, the rest inserted in
-//   one go, Tab to the next cell. Then the block is read back and compared,
+// - Writing: from a selected cell, Delete to empty it, F2 to open it for
+//   editing, the text inserted in one go, Tab to the next cell. Then the
+//   block is read back and compared,
 //   so the model learns about anything Sheets changed (autocomplete, a
 //   value it reformatted) instead of assuming.
 
@@ -341,25 +341,23 @@ export async function gotoCell(tabId, target, box = null) {
 
 const isSkip = (v) => v === null || v === undefined || v === "";
 
-/** Type one value into the selected cell. The first key opens the cell for editing, replacing what was there. */
+/**
+ * Put one value into the selected cell: Delete empties it, F2 opens it for
+ * editing, and the text goes in without a single character key. Opening the
+ * cell by typing its first letter let Sheets autocomplete from that one
+ * letter and commit the suggestion on Tab, putting the cell above's text in
+ * place of the value.
+ */
 async function enterValue(tabId, value) {
+  await input.pressKey(tabId, "Delete");
+  await input.pressKey(tabId, "F2");
+  // Give focus a beat to land in the cell editor.
+  await sleep(50);
   const lines = String(value).split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     // A line break inside a cell; a bare Enter would commit it instead.
     if (i > 0) await input.pressKey(tabId, "Alt+Enter");
-    const line = lines[i];
-    if (!line) continue;
-    if (i === 0) {
-      const [first, ...rest] = [...line];
-      await input.typeChar(tabId, first);
-      if (rest.length) {
-        // Sheets opens its cell editor on that key; give focus a beat to land there.
-        await sleep(30);
-        await input.insertText(tabId, rest.join(""));
-      }
-    } else {
-      await input.insertText(tabId, line);
-    }
+    if (lines[i]) await input.insertText(tabId, lines[i]);
   }
 }
 

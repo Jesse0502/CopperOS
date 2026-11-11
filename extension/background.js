@@ -771,8 +771,9 @@ const OPS = {
 
   async sheet_read({ chatId, range, tabId }) {
     const id = await targetTab(chatId, tabId);
-    const { text } = await sheets.readRange(id, { range });
-    return { text };
+    // rows and origin let sheet_write see which of its cells already hold something.
+    const { text, rows, origin } = await sheets.readRange(id, { range });
+    return { text, rows, origin };
   },
 
   // Both wait for what they need themselves: the write for Sheets to save,

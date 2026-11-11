@@ -1017,8 +1017,15 @@
         gap: 6px;
       }
       #approval {
+        display: flex;
+        flex-direction: column;
+        max-height: 64vh;
         border: 1px solid var(--warn-line);
         background: var(--gate-bg);
+      }
+      #approval .gate-h,
+      #approval .gate-actions {
+        flex: none;
       }
       #approval .gate-h {
         color: var(--warn);
@@ -1027,9 +1034,13 @@
         flex: 1;
       }
       #approval-what {
+        flex: 0 1 auto;
+        min-height: 0;
         margin: 8px 0 12px;
         font-size: 0.84375rem;
         overflow-wrap: anywhere;
+        overflow-y: auto;
+        overscroll-behavior: contain;
       }
       #approval-sub {
         margin-top: 2px;
@@ -1101,20 +1112,31 @@
         font-variant-numeric: tabular-nums;
       }
       #ask-intro {
-        margin-top: -4px;
+        margin: -4px 0 5px;
         font-size: 0.78125rem;
         color: var(--text-muted);
+        overflow-wrap: anywhere;
       }
       #ask-intro:empty {
         display: none;
       }
+      /* The question, its intro, the options and the answer box scroll together, so a long
+         question never pushes the buttons out of the card. Only Back/Skip/Send stay put. */
       #ask-body {
         display: flex;
         flex-direction: column;
         gap: 5px;
+        flex: 1 1 auto;
         min-height: 0;
         overflow-y: auto;
+        overscroll-behavior: contain;
         padding: 1px;
+      }
+      #ask-body > * {
+        flex: none;
+      }
+      #ask-body > .gate-h {
+        margin-bottom: 5px;
       }
       #ask-options {
         display: flex;
@@ -3408,13 +3430,13 @@
         tabindex="-1"
         hidden
       >
-        <div class="gate-h">
-          <svg class="g"><use href="#g-q" /></svg>
-          <span id="ask-question"></span>
-          <span id="ask-count"></span>
-        </div>
-        <div id="ask-intro"></div>
         <div id="ask-body">
+          <div class="gate-h">
+            <svg class="g"><use href="#g-q" /></svg>
+            <span id="ask-question"></span>
+            <span id="ask-count"></span>
+          </div>
+          <div id="ask-intro"></div>
           <div id="ask-options"></div>
           <input
             id="ask-other"

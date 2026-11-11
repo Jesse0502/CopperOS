@@ -298,6 +298,8 @@ A long form over several pages: do this for each page.
 Google Sheets draws its grid on a canvas: no cell is ever in a snapshot, and no ref points at one. A snapshot of a sheet starts with the top-left of the grid instead, with its column letters and row numbers.
 - Read cells with sheet_read; pass a range for anything beyond that preview.
 - Enter values with sheet_write — a whole block per call, never cell by cell. Its result lists any cell that does not read back as written.
+- sheet_write leaves filled cells alone unless overwrite is true. Put new content in empty cells; replace what a cell holds only when the user asked for that.
+- Never change the sheet's settings or menus (Tools, Preferences) to get a write through. If cells keep reading back wrong, stop and tell the user.
 - For anything else — formatting, clearing, deleting — select the cells with sheet_select, then use the toolbar or menus from the snapshot, or press_key shortcuts (Delete clears, Mod+b bolds, Mod+z undoes).
 - Formatting never shows in sheet_read. With the cells still selected, the toolbar button's state in the result (Bold pressed=true) is your confirmation — do not go looking for more.
 - Never click on the grid.

@@ -1099,6 +1099,71 @@ const sheetRead: BrowserTool = {
 
 type Mismatch = { cell: string; wrote: string; shows: string };
 
+const colLetters = (i: number): string => {
+  let s = "";
+  for (let n = i + 1; n > 0; n = Math.floor((n - 1) / 26)) s = String.fromCharCode(65 + ((n - 1) % 26)) + s;
+  return s;
+};
+
+/** "Sheet4!I2" → { sheet: "Sheet4", col: 8, row: 1 }, or null when it is not one cell. */
+function startCell(ref: string): { sheet: string | null; col: number; row: number } | null {
+  const bang = ref.lastIndexOf("!");
+  const sheet = bang >= 0 ? ref.slice(0, bang) : null;
+  const m = /^\$?([A-Za-z]{1,3})\$?(\d{1,7})$/.exec(ref.slice(bang + 1).trim());
+  if (!m) return null;
+  let col = 0;
+  for (const c of m[1].toUpperCase()) col = col * 26 + (c.charCodeAt(0) - 64);
+  return { sheet, col: col - 1, row: Number(m[2]) - 1 };
+}
+
+type Filled = { cell: string; shows: string };
+
+/**
+ * Cells of the block that already hold something other than what is about
+ * to go in. null when the sheet could not be read; "unchecked" when the
+ * extension is older than 1.1.3 and returns the cells only as text.
+ */
+async function filledCells(
+  at: string,
+  grid: string[][],
+  ctx: ToolCtx,
+): Promise<Filled[] | null | "unchecked"> {
+  const s = startCell(at);
+  if (!s) return null;
+  const width = Math.max(1, ...grid.map((r) => r.length));
+  const range =
+    `${s.sheet ? `${s.sheet}!` : ""}${colLetters(s.col)}${s.row + 1}:` +
+    `${colLetters(s.col + width - 1)}${s.row + grid.length}`;
+  let r: { text?: string; rows?: string[][] } | undefined;
+  try {
+    r = await call<{ text?: string; rows?: string[][] }>("sheet_read", ctx.chatId, { range }, 60_000, ctx.signal);
+  } catch (err) {
+    if (ctx.signal?.aborted) throw err;
+    return null;
+  }
+  if (!Array.isArray(r?.rows)) return typeof r?.text === "string" ? "unchecked" : null;
+  const out: Filled[] = [];
+  grid.forEach((row, i) => {
+    row.forEach((v, j) => {
+      const shows = r!.rows![i]?.[j] ?? "";
+      if (v === "" || shows.trim() === "" || shows.trim() === v.trim()) return;
+      out.push({ cell: `${colLetters(s.col + j)}${s.row + i + 1}`, shows });
+    });
+  });
+  return out;
+}
+
+const MAX_FILLED_LISTED = 20;
+
+function listFilled(filled: Filled[]): string {
+  const shown = filled
+    .slice(0, MAX_FILLED_LISTED)
+    .map((f) => `${f.cell}: ${preview(f.shows, 80)}`)
+    .join("\n");
+  const more = filled.length > MAX_FILLED_LISTED ? `\n… and ${filled.length - MAX_FILLED_LISTED} more` : "";
+  return shown + more;
+}
+
 const sheetWrite: BrowserTool = {
   def: {
     name: "sheet_write",
@@ -1109,7 +1174,9 @@ const sheetWrite: BrowserTool = {
       "start. A value starting with = goes in as a formula. An empty string " +
       "leaves that cell as it is (to clear cells, sheet_select them and " +
       "press_key Delete). Afterwards the block is read back, and any cell that " +
-      `does not show what was written is listed. At most ${MAX_SHEET_CELLS} cells per call.`,
+      `does not show what was written is listed. At most ${MAX_SHEET_CELLS} cells per call. ` +
+      "It will not write over cells that already hold something: it lists them " +
+      "and writes nothing, unless overwrite is true.",
     input_schema: {
       type: "object",
       properties: {
@@ -1119,12 +1186,18 @@ const sheetWrite: BrowserTool = {
           items: { type: "array", items: { type: "string" } },
           description: 'The values, row by row, e.g. [["Name", "Price"], ["Apple", "1.20"]]',
         },
+        overwrite: {
+          type: "boolean",
+          description:
+            "Replace cells that already hold something. Only when the user asked for those " +
+            "cells to be replaced or updated; otherwise write to empty cells instead.",
+        },
         justification: JUSTIFICATION,
       },
       required: ["start", "rows"],
     },
   },
-  async run({ start, rows, justification }, ctx) {
+  async run({ start, rows, overwrite, justification }, ctx) {
     const grid = cellRows(rows);
     if (!grid) {
       return 'Pass rows as a list of rows, each a list of cell values, e.g. rows: [["Name", "Price"], ["Apple", "1.20"]].';
@@ -1137,8 +1210,32 @@ const sheetWrite: BrowserTool = {
       );
     }
     const at = String(start ?? "").trim();
+    const replace = overwrite === true || overwrite === "true";
+    // Before anything is written, and before the entry check: what the block would land on.
+    const checked = await filledCells(at, grid, ctx);
+    const taken = checked === "unchecked" ? [] : checked;
+    if (taken === null && !replace) {
+      return (
+        `Nothing written: could not read ${at} to check that those cells are empty. ` +
+        `Read them with sheet_read first. If the user asked for these cells to be ` +
+        `replaced, call sheet_write again with overwrite: true.`
+      );
+    }
+    if (taken?.length && !replace) {
+      return (
+        `Nothing written: ${taken.length} cell${taken.length === 1 ? "" : "s"} of that block ` +
+        `already hold${taken.length === 1 ? "s" : ""} something:\n${listFilled(taken)}\n` +
+        `Write to empty cells instead (sheet_read shows where they are). Pass overwrite: true ` +
+        `only if the user asked for these cells to be replaced.`
+      );
+    }
     const filled = grid.reduce((n, r) => n + r.filter((c) => c !== "").length, 0);
-    const what = `Write ${filled} cell${filled === 1 ? "" : "s"} into the sheet at ${at}`;
+    let what = `Write ${filled} cell${filled === 1 ? "" : "s"} into the sheet at ${at}`;
+    if (taken?.length) {
+      what += `, replacing what ${taken.length} of them hold:\n${listFilled(taken)}`;
+    } else if (taken === null) {
+      what += " (could not check whether those cells are empty; anything in them is replaced)";
+    }
     // One check for the whole block, not one per cell: a table of prices
     // says nothing about the user and passes; a column of personal details
     // gets the same scrutiny a form field would.
@@ -1150,7 +1247,8 @@ const sheetWrite: BrowserTool = {
       justification,
     );
     if (blocked) return blocked;
-    await gate("click", what, ctx);
+    // Replacing what someone wrote is asked about the way a submit is.
+    await gate(taken?.length || taken === null ? "submit" : "click", what, ctx);
 
     emit("sheet", ctx.chatId, `${at} ⇐ ${grid.length} row${grid.length === 1 ? "" : "s"}, ${filled} cells`);
     const r = await call<any>(

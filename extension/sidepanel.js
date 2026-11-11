@@ -1033,6 +1033,11 @@ function renderAsk() {
   $("ask-count").textContent = ask.questions.length > 1 ? `${ask.index + 1} of ${ask.questions.length}` : "";
   $("ask-intro").textContent = ask.index === 0 ? ask.intro : "";
   $("ask-question").textContent = q.question;
+  // A new question starts at its top; picking an option on the same one keeps its place.
+  if (ask.shownIndex !== ask.index) {
+    ask.shownIndex = ask.index;
+    $("ask-body").scrollTop = 0;
+  }
 
   const box = $("ask-options");
   box.replaceChildren();
