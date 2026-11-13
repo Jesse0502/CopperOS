@@ -8,6 +8,7 @@
 import type { APIGatewayAuthorizerResult, APIGatewayRequestAuthorizerEvent } from "aws-lambda";
 import { CognitoJwtVerifier } from "aws-jwt-verify";
 import { useGrant } from "./connections.js";
+import { isBlocked } from "./blocked.js";
 
 // Created once per container; it caches Cognito's signing keys between calls.
 const verifier = CognitoJwtVerifier.create({
@@ -43,6 +44,10 @@ function deny(resource: string): APIGatewayAuthorizerResult {
 }
 
 export async function handler(event: APIGatewayRequestAuthorizerEvent): Promise<APIGatewayAuthorizerResult> {
+  if (isBlocked(event.requestContext?.identity?.sourceIp)) {
+    console.warn("[authorize] refused a blocked address");
+    return deny(event.methodArn);
+  }
   const token = event.queryStringParameters?.token;
   if (!token) return deny(event.methodArn);
 

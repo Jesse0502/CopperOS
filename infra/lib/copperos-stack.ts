@@ -72,6 +72,10 @@ export type CopperStackProps = StackProps & {
   alertEmail: string;
   /** Where "Send a suggestion" from the extension goes. */
   feedbackEmail: string;
+  /** When set, the only people who may sign up (addresses, or "@domain"); unset, anyone may. */
+  signUpAllow?: string[];
+  /** Addresses refused at the socket, suggestions and MCP. */
+  blockedIps: string[];
   /**
    * Dollars of CopperOS's model an Ore (free) account may use per week, and
    * the most the free plan may cost everyone together per calendar month.
@@ -161,7 +165,9 @@ export class CopperStack extends Stack {
     const extensionUrls = [props.extensionId, ...(prod ? [] : props.devExtensionIds)].map(
       (id) => `https://${id}.chromiumapp.org/`,
     );
-    const client = users.addClient("Extension", {
+    // Dev's client was replaced on 2026-11-14 (a new id makes a new client and deletes the old one),
+    // after its id had been public in the repo; its id now lives only in extension/dev-stage.json.
+    const client = users.addClient(prod ? "Extension" : "ExtensionV2", {
       userPoolClientName: "extension",
       // A browser extension cannot keep a secret; PKCE protects the code instead.
       generateSecret: false,
@@ -320,6 +326,7 @@ export class CopperStack extends Stack {
         USER_POOL_ID: users.userPoolId,
         CLIENT_ID: client.userPoolClientId,
         CONNECTIONS_TABLE: connections.tableName,
+        BLOCKED_IPS: props.blockedIps.join(","),
       },
     });
     // Spends the one-time passes running tasks join the socket with.
@@ -419,6 +426,7 @@ export class CopperStack extends Stack {
         USER_POOL_ID: users.userPoolId,
         SIGN_IN_URL: signIn.baseUrl(),
         MCP_AUTH_TABLE: mcpAuth.tableName,
+        BLOCKED_IPS: props.blockedIps.join(","),
       },
     });
     for (const t of [usersTable, memories, workflows, chats, tasks, usage, connections, mcpAuth]) t.grantReadWriteData(mcpFn);
@@ -502,6 +510,7 @@ export class CopperStack extends Stack {
         CONNECTIONS_TABLE: connections.tableName,
         FROM_ADDRESS: `no-reply@${props.emailDomain}`,
         FEEDBACK_TO: props.feedbackEmail,
+        BLOCKED_IPS: props.blockedIps.join(","),
       },
     });
     connections.grantReadWriteData(feedbackFn);
@@ -545,6 +554,18 @@ export class CopperStack extends Stack {
       }),
     );
     users.addTrigger(cognito.UserPoolOperation.POST_CONFIRMATION, welcomeFn);
+
+    // Who may make an account (broker/src/cloud/pre-sign-up.ts): the SignUp API is public with the
+    // client id, so the sign-in page hiding the email option is not enough. Not told the pool either.
+    const preSignUpFn = fn("PreSignUp", "pre-sign-up.ts", {
+      memorySize: 128,
+      timeout: Duration.seconds(5),
+      environment: {
+        EMAIL_SIGN_UP: props.emailSignIn ? "on" : "off",
+        ...(props.signUpAllow ? { SIGN_UP_ALLOW: props.signUpAllow.join(",") } : {}),
+      },
+    });
+    users.addTrigger(cognito.UserPoolOperation.PRE_SIGN_UP, preSignUpFn);
 
     // Where the Unsubscribe link in the "what's new" emails goes (broker/src/cloud/unsubscribe.ts). A
     // public address, safe to be: a link only works for the person it was made for, by a signature

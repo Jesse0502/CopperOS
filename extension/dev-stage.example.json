@@ -1,0 +1,6 @@
+{
+  "socketUrl": "wss://<api-id>.execute-api.us-east-1.amazonaws.com/dev",
+  "signInUrl": "https://<domain-prefix>.auth.us-east-1.amazoncognito.com",
+  "clientId": "<dev app client id>",
+  "feedbackUrl": "https://<function-url-id>.lambda-url.us-east-1.on.aws/"
+}

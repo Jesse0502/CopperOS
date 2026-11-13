@@ -23,6 +23,7 @@ import { cloudBackend, requestAllowed } from "./mcp-backend.js";
 import { cognitoIdentity } from "./mcp-cognito.js";
 import { createOAuth, type HttpRequest, type HttpResponse, type Identity } from "./mcp-oauth.js";
 import { dynamoAuthStore, type AuthStore } from "./mcp-store.js";
+import { isBlocked } from "./blocked.js";
 
 useStore(new CloudStore());
 // The usage meter the tools ask before starting a task (mcp-backend.ts).
@@ -116,7 +117,8 @@ export function createHandler(deps: McpDeps) {
 
 let real: ReturnType<typeof createHandler> | null = null;
 
-export const handler = (event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> => {
+export const handler = async (event: LambdaFunctionURLEvent): Promise<LambdaFunctionURLResult> => {
+  if (isBlocked(event.requestContext.http.sourceIp)) return { statusCode: 403, body: "Not allowed." };
   real ??= createHandler({
     auth: dynamoAuthStore(),
     identity: cognitoIdentity({

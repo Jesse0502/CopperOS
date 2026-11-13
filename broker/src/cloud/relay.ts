@@ -100,6 +100,10 @@ export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
   // A ping only keeps the connection busy. Nobody reads a pong, and each
   // message is billed, so it gets no answer and no lookup.
   if (msg.type === "ping") return OK;
+  // Chat ids are made by the server (session.ts newId); anything else is refused before it reaches a table key.
+  if (msg.chatId != null && !(typeof msg.chatId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(msg.chatId))) {
+    return { statusCode: 400 };
+  }
 
   const who = auth.userId
     ? { userId: auth.userId, kind: auth.kind ?? "extension" }

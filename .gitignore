@@ -9,3 +9,6 @@ index.html
 website
 *.zip
 /broker/whats-new.html
+
+infra/private.json
+extension/dev-stage.json
