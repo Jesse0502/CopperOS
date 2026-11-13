@@ -87,7 +87,10 @@ export async function handler(event: APIGatewayProxyEventV2): Promise<APIGateway
   if (!text) return reply(400, { error: "Write a suggestion first." });
   const words = text.split(/\s+/).filter((w) => /[\p{L}\p{N}]/u.test(w)).length;
   const letters = text.match(/[\p{L}\p{N}]/gu)?.length ?? 0;
-  if (words < MIN_WORDS || letters < MIN_LETTERS) return reply(400, { error: "Say a little more — a few words at least." });
+  if (words < MIN_WORDS || letters < MIN_LETTERS) {
+    console.log(`[feedback] refused (too short) · ${text.length} chars`);
+    return reply(400, { error: "Say a little more — a few words at least." });
+  }
   if (text.length > TEXT_CAP) return reply(400, { error: `Keep it under ${TEXT_CAP} characters.` });
 
   const person = await signedIn(event.headers.authorization);

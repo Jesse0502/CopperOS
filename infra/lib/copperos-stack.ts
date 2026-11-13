@@ -296,6 +296,9 @@ export class CopperStack extends Stack {
     const stripeWebhookParam = `/copperos/${stage}/stripe-webhook-secret`;
 
     // ── functions ────────────────────────────────────────────────────────
+    // Functions whose logs hold sign-in attempts, refused sign-ups, socket message types and
+    // suggestion limits, never what anyone asked or the agent did.
+    const SECURITY_LOGS = new Set(["Authorize", "PreSignUp", "Relay", "Feedback"]);
     const fn = (id: string, entry: string, opts: Partial<nodejs.NodejsFunctionProps>) =>
       new nodejs.NodejsFunction(this, id, {
         functionName: name(id.toLowerCase()),
@@ -313,7 +316,9 @@ export class CopperStack extends Stack {
           banner: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);",
         },
         logGroup: new logs.LogGroup(this, `${id}Logs`, {
-          retention: logs.RetentionDays.TWO_WEEKS,
+          // Security logs (no task content) are kept 90 days, so an attempt noticed late can still be
+          // traced; the rest 14, as the privacy policy says.
+          retention: SECURITY_LOGS.has(id) ? logs.RetentionDays.THREE_MONTHS : logs.RetentionDays.TWO_WEEKS,
           removalPolicy: RemovalPolicy.DESTROY,
         }),
         ...opts,
@@ -643,6 +648,41 @@ export class CopperStack extends Stack {
         treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
       }).addAlarmAction(new SnsAction(alerts));
     }
+
+    // Someone probing the service: each alarm counts refusals in its function's log over an hour.
+    // Normal use makes almost none of these (an expired token now and then).
+    const probing = (
+      id: string,
+      f: lambda.Function,
+      pattern: string,
+      threshold: number,
+      what: string,
+    ) => {
+      const metricName = id;
+      new logs.MetricFilter(this, `${id}Filter`, {
+        logGroup: f.logGroup,
+        filterPattern: logs.FilterPattern.anyTerm(...pattern.split("|")),
+        metricNamespace: `CopperOS/${stage}`,
+        metricName,
+        metricValue: "1",
+        defaultValue: 0,
+      });
+      new cloudwatch.Alarm(this, `${id}Alarm`, {
+        alarmName: name(id.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase()),
+        alarmDescription:
+          `${what} on ${stage}: ${threshold}+ in an hour. Check the function's log and CloudTrail ` +
+          `(Cognito calls carry the caller's IP); add the IP to blockedIps in infra/private.json and deploy.`,
+        metric: new cloudwatch.Metric({ namespace: `CopperOS/${stage}`, metricName, statistic: "Sum", period: Duration.hours(1) }),
+        threshold,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(new SnsAction(alerts));
+    };
+    probing("RejectedTokens", authorizerFn, "rejected|refused", 10, "Sign-in tokens refused at the socket");
+    probing("RefusedSignUps", preSignUpFn, "refused", 3, "Sign-ups refused");
+    probing("RefusedMessages", relayFn, "refused", 5, "Socket messages refused");
+    probing("SuggestionLimits", feedbackFn, "refused", 5, "Suggestions over the limits");
 
     // ── what the extension needs to know ─────────────────────────────────
     // For `npm run admin -- encrypt`, which reads the chats already stored.
