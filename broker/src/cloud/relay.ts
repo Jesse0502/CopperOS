@@ -11,6 +11,7 @@ import {
   CognitoIdentityProviderClient,
   ListUsersCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
+import { createHash } from "node:crypto";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import type { APIGatewayProxyResultV2, APIGatewayProxyWebsocketEventV2 } from "aws-lambda";
 import { Agent, listChats } from "../agent.js";
@@ -77,6 +78,17 @@ type Event = APIGatewayProxyWebsocketEventV2 & {
 
 const OK = { statusCode: 200 };
 
+// One line per message, so an incident can be traced message by message: its type, a hash of
+// the account (the same account always gives the same hash; hash a sub to find its lines), the
+// chat, and what happened. Never the message's content.
+const userTag = (userId: string | null | undefined) =>
+  userId ? createHash("sha256").update(userId).digest("hex").slice(0, 12) : "unknown";
+function trace(type: unknown, userId: string | null | undefined, chatId: unknown, outcome: string): void {
+  const kind = String(type ?? "").replace(/[^A-Za-z0-9_]/g, "").slice(0, 32) || "?";
+  const chat = typeof chatId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(chatId) ? chatId : chatId == null ? "-" : "invalid";
+  console.log(`[relay] ${kind} · user ${userTag(userId)} · chat ${chat} · ${outcome}`);
+}
+
 export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
   const { routeKey, connectionId } = event.requestContext;
   const auth = event.requestContext.authorizer ?? {};
@@ -84,6 +96,7 @@ export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
   if (routeKey === "$connect") {
     if (!auth.userId) return { statusCode: 401 };
     await recordConnection(connectionId, auth.userId, auth.kind ?? "extension", auth.chatId);
+    trace("connect", auth.userId, auth.chatId ?? null, auth.kind ?? "extension");
     return OK;
   }
   if (routeKey === "$disconnect") {
@@ -95,6 +108,7 @@ export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
   try {
     msg = JSON.parse(event.body ?? "{}");
   } catch {
+    trace("unparsable", auth.userId, null, "refused");
     return { statusCode: 400 };
   }
   // A ping only keeps the connection busy. Nobody reads a pong, and each
@@ -102,13 +116,17 @@ export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
   if (msg.type === "ping") return OK;
   // Chat ids are made by the server (session.ts newId); anything else is refused before it reaches a table key.
   if (msg.chatId != null && !(typeof msg.chatId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(msg.chatId))) {
+    trace(msg.type, auth.userId, msg.chatId, "refused: bad chat id");
     return { statusCode: 400 };
   }
 
   const who = auth.userId
     ? { userId: auth.userId, kind: auth.kind ?? "extension" }
     : await getConnection(connectionId);
-  if (!who) return { statusCode: 410 };
+  if (!who) {
+    trace(msg.type, null, msg.chatId, "refused: unknown connection");
+    return { statusCode: 410 };
+  }
 
   // A worker only keeps its connection alive; everything it says goes
   // straight to the browser.
@@ -116,13 +134,17 @@ export async function handler(event: Event): Promise<APIGatewayProxyResultV2> {
 
   // An op result (whole, or a chunk of a big one) for a running task.
   if (msg.type === "chunk" || (typeof msg.id === "string" && "ok" in msg)) {
+    // A big result arrives in many chunks; only whole results get a line.
+    if (msg.type !== "chunk") trace("result", who.userId, msg.chatId, msg.ok ? "ok" : "failed");
     await Promise.all((await workersOf(who.userId)).map((w) => post(w.connectionId, msg)));
     return OK;
   }
 
   try {
     await handle(who.userId, connectionId, msg);
+    trace(msg.type, who.userId, msg.chatId, "handled");
   } catch (err) {
+    trace(msg.type, who.userId, msg.chatId, "error");
     console.error(`[relay] ${msg.type}: ${String((err as Error)?.stack ?? err)}`);
     await post(connectionId, {
       type: "agent_event",
